@@ -68,6 +68,8 @@ You can also specify your IP in the above file (We recommend using the static ad
 
 There is built-in ipv4 only mDNS server. You can access the device using `dap.local`.
 
+mDNS name can be edited here: [wifi_configuration.h](main/wifi_configuration.h)
+
 > The mDNS in ESP8266 only supports ipv4.
 
 ![mDNS](https://user-images.githubusercontent.com/17078589/149659052-7b29533f-9660-4811-8125-f8f50490d762.png)
@@ -220,6 +222,13 @@ There is built-in ipv4 only mDNS server. You can access the device using `dap.lo
 | TVCC               | 3V3    |
 | GND                | GND    |
 
+--------------
+
+| Other              |               |
+|--------------------|---------------|
+| LED\_WIFI\_STATUS  | GPIO10        |
+| Tx                 | GPIO17        |
+| Rx                 | GPIO18        |
 
 </details>
 
