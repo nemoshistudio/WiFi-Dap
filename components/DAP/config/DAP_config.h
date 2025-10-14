@@ -356,8 +356,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_nTRST 0       // optional
   #define PIN_nRESET 5
 
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
+  #define PIN_LED_CONNECTED 10
+  #define PIN_LED_RUNNING 11
 #elif defined CONFIG_IDF_TARGET_ESP32
   #define PIN_SWDIO 12      // SPI MISO
   #define PIN_SWDIO_MOSI 13 // SPI MOSI
@@ -367,8 +367,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_nTRST 25       // optional
   #define PIN_nRESET 26
 
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
+  #define PIN_LED_CONNECTED 10
+  #define PIN_LED_RUNNING 11
 #elif defined CONFIG_IDF_TARGET_ESP32C3
   #define PIN_SWDIO _      // SPI MISO
   #define PIN_SWDIO_MOSI 7 // SPI MOSI
@@ -378,8 +378,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_nTRST 4       // optional
   #define PIN_nRESET 5
 
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
+  #define PIN_LED_CONNECTED 10
+  #define PIN_LED_RUNNING 11
 #elif defined CONFIG_IDF_TARGET_ESP32S3
   #define PIN_SWDIO _      // SPI MISO
   #define PIN_SWDIO_MOSI 11 // SPI MOSI
@@ -389,8 +389,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_nTRST 14       // optional
   #define PIN_nRESET 13
 
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
+  #define PIN_LED_CONNECTED 48 
+  #define PIN_LED_RUNNING 47 
 #else
 #error "not a supported target"
 #endif
@@ -941,7 +941,18 @@ It is recommended to provide the following LEDs for status indication:
  */
 __STATIC_INLINE void LED_CONNECTED_OUT(uint32_t bit)
 {
-  (void)(bit);
+
+  if (bit)
+  {
+    //set bit
+    GPIO.out_w1ts |= (0x1 << PIN_LED_CONNECTED);
+  }
+  else
+  {
+    //reset bit
+    GPIO.out_w1tc |= (0x1 << PIN_LED_CONNECTED);
+  }
+
 }
 
 /**
@@ -953,17 +964,17 @@ __STATIC_INLINE void LED_CONNECTED_OUT(uint32_t bit)
  */
 __STATIC_INLINE void LED_RUNNING_OUT(uint32_t bit)
 {
-  (void)(bit);
-  // if (bit)
-  // {
-  //   //set bit
-  //   GPIO.out_w1ts |= (0x1 << PIN_LED_RUNNING);
-  // }
-  // else
-  // {
-  //   //reset bit
-  //   GPIO.out_w1tc |= (0x1 << PIN_LED_RUNNING);
-  // }
+  
+  if (bit)
+  {
+    //set bit
+    GPIO.out_w1ts |= (0x1 << PIN_LED_RUNNING);
+  }
+  else
+  {
+    //reset bit
+    GPIO.out_w1tc |= (0x1 << PIN_LED_RUNNING);
+  }
 }
 
 ///@}
