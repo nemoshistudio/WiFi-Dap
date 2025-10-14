@@ -380,8 +380,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_nTRST 4       // optional
   #define PIN_nRESET 5
 
-  #define PIN_LED_CONNECTED 3
-  #define PIN_LED_RUNNING 2
+  #define PIN_LED_CONNECTED _
+  #define PIN_LED_RUNNING _
 
 #elif defined CONFIG_IDF_TARGET_ESP32S3
   #define PIN_SWDIO _      // SPI MISO
@@ -948,12 +948,12 @@ __STATIC_INLINE void LED_CONNECTED_OUT(uint32_t bit)
   if (bit)
   {
     //set bit
-    GPIO.out_w1ts |= (0x1 << PIN_LED_CONNECTED);
+    GPIO_SET_LEVEL_HIGH(PIN_LED_CONNECTED);
   }
   else
   {
     //reset bit
-    GPIO.out_w1tc |= (0x1 << PIN_LED_CONNECTED);
+    GPIO_SET_LEVEL_LOW(PIN_LED_CONNECTED);
   }
 
 }
@@ -971,12 +971,12 @@ __STATIC_INLINE void LED_RUNNING_OUT(uint32_t bit)
   if (bit)
   {
     //set bit
-    GPIO.out_w1ts |= (0x1 << PIN_LED_RUNNING);
+    GPIO_SET_LEVEL_HIGH(PIN_LED_RUNNING);
   }
   else
   {
     //reset bit
-    GPIO.out_w1tc |= (0x1 << PIN_LED_RUNNING);
+    GPIO_SET_LEVEL_LOW(PIN_LED_RUNNING);
   }
 }
 
