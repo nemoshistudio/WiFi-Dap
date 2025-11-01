@@ -204,7 +204,7 @@ static void uart_bridge_setup() {
         uart_driver_install(UART_BRIDGE_TX, 0, UART_BUF_SIZE, 0, NULL, 0); // TX only
     }
 
-#if defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32C3
+#if defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32C3  || defined CONFIG_IDF_TARGET_ESP32S3
     uart_set_pin(UART_BRIDGE_TX, UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN, -1, -1);
 #endif
 
