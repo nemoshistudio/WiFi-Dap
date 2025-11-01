@@ -69,8 +69,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #elif defined CONFIG_IDF_TARGET_ESP32S3
     #define UART_BRIDGE_TX UART_NUM_1
     #define UART_BRIDGE_RX UART_NUM_1
-    #define UART_BRIDGE_TX_PIN 17
-    #define UART_BRIDGE_RX_PIN 18
+    #define UART_BRIDGE_TX_PIN 10
+    #define UART_BRIDGE_RX_PIN 9
 #else
     #error unknown hardware
 #endif

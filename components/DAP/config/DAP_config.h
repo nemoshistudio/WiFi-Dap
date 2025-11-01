@@ -387,8 +387,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_SWDIO _      // SPI MISO
   #define PIN_SWDIO_MOSI 11 // SPI MOSI
   #define PIN_SWCLK 12
-  #define PIN_TDO 9        // device TDO -> Host Data Input
-  #define PIN_TDI 10
+  #define PIN_TDO 15       // device TDO -> Host Data Input
+  #define PIN_TDI 16
   #define PIN_nTRST 14       // optional
   #define PIN_nRESET 13
 
