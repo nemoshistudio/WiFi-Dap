@@ -73,7 +73,7 @@ static RingbufHandle_t dap_dataIN_handle = NULL;
 static RingbufHandle_t dap_dataOUT_handle = NULL;
 static SemaphoreHandle_t data_response_mux = NULL;
 
-void dap_gpio_init(void) {
+void dap_led_init(void) {
     // 配置 LED 引脚为输出模式
     GPIO_FUNCTION_SET(PIN_LED_CONNECTED);
     GPIO_FUNCTION_SET(PIN_LED_RUNNING);
