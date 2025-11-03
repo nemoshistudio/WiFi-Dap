@@ -18,6 +18,7 @@
 #include "main/timer.h"
 #include "main/wifi_configuration.h"
 #include "main/wifi_handle.h"
+#include "main/DAP_handle.h"
 
 #include "components/corsacOTA/src/corsacOTA.h"
 
