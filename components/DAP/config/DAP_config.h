@@ -392,8 +392,8 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
   #define PIN_nTRST 14       // optional
   #define PIN_nRESET 13
 
-  #define PIN_LED_CONNECTED 4
-  #define PIN_LED_RUNNING 47 
+  #define PIN_LED_CONNECTED 47
+  #define PIN_LED_RUNNING 4
 #else
 #error "not a supported target"
 #endif
