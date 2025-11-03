@@ -13,7 +13,7 @@ enum reset_handle_t
 void handle_dap_data_request(usbip_stage2_header *header, uint32_t length);
 void handle_swo_trace_response(usbip_stage2_header *header);
 void handle_dap_unlink();
-
+void dap_led_init();
 int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num);
 
 #endif
