@@ -73,6 +73,17 @@ static RingbufHandle_t dap_dataIN_handle = NULL;
 static RingbufHandle_t dap_dataOUT_handle = NULL;
 static SemaphoreHandle_t data_response_mux = NULL;
 
+void dap_gpio_init(void) {
+    // 配置 LED 引脚为输出模式
+    GPIO_FUNCTION_SET(PIN_LED_CONNECTED);
+    GPIO_FUNCTION_SET(PIN_LED_RUNNING);
+    GPIO_SET_DIRECTION_NORMAL_OUT(PIN_LED_CONNECTED);
+    GPIO_SET_DIRECTION_NORMAL_OUT(PIN_LED_RUNNING);
+    
+    // 初始状态设为关闭
+    GPIO_SET_LEVEL_LOW(PIN_LED_CONNECTED);
+    GPIO_SET_LEVEL_LOW(PIN_LED_RUNNING);
+}
 
 void malloc_dap_ringbuf() {
     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)

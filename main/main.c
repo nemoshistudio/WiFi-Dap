@@ -101,6 +101,7 @@ void app_main() {
     uart_bridge_init();
 #endif
     wifi_init();
+    dap_led_init();
     DAP_Setup();
     timer_init();
 
