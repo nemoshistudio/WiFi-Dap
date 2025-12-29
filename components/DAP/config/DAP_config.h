@@ -136,7 +136,7 @@ This information includes:
 /// Default communication speed on the Debug Access Port for SWD and JTAG mode.
 /// Used to initialize the default SWD/JTAG clock frequency.
 /// The command \ref DAP_SWJ_Clock can be used to overwrite this default setting.
-#define DAP_DEFAULT_SWJ_CLOCK 1000000U ///< Default SWD/JTAG clock frequency in Hz.
+#define DAP_DEFAULT_SWJ_CLOCK 4000000U ///1000000U ///< Default SWD/JTAG clock frequency in Hz.
 // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<1MHz
 
 /// Maximum Package Buffers for Command and Response data.
@@ -394,6 +394,7 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
 
   #define PIN_LED_CONNECTED 5
   #define PIN_LED_RUNNING 6
+  
 #else
 #error "not a supported target"
 #endif
