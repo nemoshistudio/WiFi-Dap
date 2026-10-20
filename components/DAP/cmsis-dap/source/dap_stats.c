@@ -12,6 +12,7 @@
 
 #include <esp_timer.h>
 
+#include "cmsis-dap/include/DAP.h"
 #include "cmsis-dap/include/dap_stats.h"
 
 static dap_stats_snapshot_t s_stats;
@@ -108,6 +109,24 @@ void dap_stats_note_swd_xfer(void)
     s_stats.swd_xfers++;
 }
 
+void dap_stats_note_swd_result(uint8_t ack)
+{
+    switch (ack) {
+    case DAP_TRANSFER_OK:
+        s_stats.swd_ok++;
+        break;
+    case DAP_TRANSFER_WAIT:
+        s_stats.swd_wait++;
+        break;
+    case DAP_TRANSFER_FAULT:
+        s_stats.swd_fault++;
+        break;
+    default:
+        s_stats.swd_other++;
+        break;
+    }
+}
+
 uint32_t dap_stats_vendor_command(const uint8_t *request, uint8_t *response)
 {
     uint8_t sub = request[0];
@@ -124,7 +143,7 @@ uint32_t dap_stats_vendor_command(const uint8_t *request, uint8_t *response)
     if (sub == 1U) {
         int64_t now = dap_stats_now();
 
-        s_stats.version = 1U;
+        s_stats.version = 2U;
         s_stats.uptime_ms = (uint32_t)((now - s_first_us) / 1000);
         memcpy(response, &s_stats, sizeof(s_stats));
         return ((2U << 16) | (uint32_t)(1U + sizeof(s_stats)));

@@ -39,6 +39,10 @@ typedef struct __attribute__((packed)) {
     uint32_t batch_subcmds;        /* sub-commands executed from batches */
     uint32_t batch_breaks;         /* batches stopped early by the response cap */
     uint32_t swd_xfers;            /* SWD_Transfer() calls (all modes) */
+    uint32_t swd_ok;               /* ACK OK */
+    uint32_t swd_wait;             /* ACK WAIT (retried by DAP handlers) */
+    uint32_t swd_fault;            /* ACK FAULT */
+    uint32_t swd_other;            /* junk/protocol error */
     uint32_t block_read_words;     /* DAP_TransferBlock read words */
     uint32_t block_write_words;    /* DAP_TransferBlock write words */
     uint32_t xfer_cmds;            /* DAP_Transfer commands */
@@ -53,6 +57,7 @@ void dap_stats_note_batch(uint32_t requested, uint32_t processed, uint8_t hit_ca
 void dap_stats_note_transfer(uint32_t items);
 void dap_stats_note_block(uint32_t words, uint8_t is_read);
 void dap_stats_note_swd_xfer(void);
+void dap_stats_note_swd_result(uint8_t ack);
 
 /** CMSIS-DAP Vendor9 handler: request points after the command id, response
  *  points after the echo byte.  Returns (request bytes << 16) | response bytes
@@ -66,6 +71,7 @@ uint32_t dap_stats_vendor_command(const uint8_t *request, uint8_t *response);
 #define DAP_STATS_TRANSFER(items)      dap_stats_note_transfer(items)
 #define DAP_STATS_BLOCK(words, rd)     dap_stats_note_block((words), (rd))
 #define DAP_STATS_SWD_XFER()           dap_stats_note_swd_xfer()
+#define DAP_STATS_SWD_RESULT(ack)      dap_stats_note_swd_result(ack)
 
 #else /* CONFIG_BIRDIEBOT_DAP_STATS */
 
@@ -77,6 +83,7 @@ uint32_t dap_stats_vendor_command(const uint8_t *request, uint8_t *response);
 #define DAP_STATS_TRANSFER(items)      ((void)(items))
 #define DAP_STATS_BLOCK(words, rd)     ((void)(words), (void)(rd))
 #define DAP_STATS_SWD_XFER()           do { } while (0)
+#define DAP_STATS_SWD_RESULT(ack)      ((void)(ack))
 
 #endif /* CONFIG_BIRDIEBOT_DAP_STATS */
 

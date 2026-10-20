@@ -1393,7 +1393,8 @@ static uint32_t DAP_Transfer(const uint8_t *request, uint8_t *response) {
     return ((2U << 16) | 2U);    // consume index+count only
   }
 
-  DAP_STATS_TRANSFER((uint32_t)request[2]);
+  /* request layout here: [DAP index][count][items...] (cmd already consumed) */
+  DAP_STATS_TRANSFER((uint32_t)request[1]);
 
   switch (DAP_Data.debug_port) {
 #if (DAP_SWD != 0)
