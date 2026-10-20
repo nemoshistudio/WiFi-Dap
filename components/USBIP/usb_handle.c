@@ -7,6 +7,7 @@
  * @copyright Copyright (c) 2020
  *
  */
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -17,6 +18,9 @@
 
 #include "lwip/err.h"
 
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#endif
 
 const char *strings_list[] = {
         0, // reserved: available languages  -> iInterface
@@ -210,6 +214,28 @@ void handleUSBControlRequest(usbip_stage2_header *header)
     }
 }
 
+/**
+ * @brief Clip a descriptor response to the host-requested wLength (USB 2.0
+ *        §9.4.3: the device must never return more bytes than wLength).
+ *
+ * wLength == 0 keeps the legacy behaviour (return the full descriptor) because
+ * some usbip clients do not fill this field; every normal GET_DESCRIPTOR from
+ * Windows/Linux sets wLength >= the descriptor length.
+ */
+static int usb_handle_clip_response_len(usbip_stage2_header *header, int len)
+{
+    uint16_t wlength = (uint16_t)header->u.cmd_submit.request.wLength.u8lo |
+                       (uint16_t)((uint16_t)header->u.cmd_submit.request.wLength.u8hi << 8);
+
+    if (len < 0) {
+        return 0;
+    }
+    if (wlength != 0 && len > (int)wlength) {
+        return (int)wlength;
+    }
+    return len;
+}
+
 static void handleGetDescriptor(usbip_stage2_header *header)
 {
     // 9.4.3 Get Descriptor
@@ -217,7 +243,8 @@ static void handleGetDescriptor(usbip_stage2_header *header)
     {
     case USB_DT_DEVICE: // get device descriptor
 	    printf("* GET 0x01 DEVICE DESCRIPTOR\r\n");
-        send_stage2_submit_data(header, 0, &kUSBd0DeviceDescriptor[0], sizeof(kUSBd0DeviceDescriptor));
+        send_stage2_submit_data(header, 0, &kUSBd0DeviceDescriptor[0],
+                                usb_handle_clip_response_len(header, sizeof(kUSBd0DeviceDescriptor)));
         break;
 
     case USB_DT_CONFIGURATION: // get configuration descriptor
@@ -239,36 +266,72 @@ static void handleGetDescriptor(usbip_stage2_header *header)
         }
         break;
 
-    case USB_DT_STRING:
-        if (header->u.cmd_submit.request.wValue.u8lo == 0)
-        {
-	        printf("** REQUESTED list of supported languages\r\n");
-            send_stage2_submit_data(header, 0, kLangDescriptor, sizeof(kLangDescriptor));
-        }
-        else if (header->u.cmd_submit.request.wValue.u8lo != 0xee)
-        {
-            int slen = strlen(strings_list[header->u.cmd_submit.request.wValue.u8lo]);
-            int wslen = slen * 2;
-            int buff_len = sizeof(usb_string_descriptor) + wslen;
-            char temp_buff[64];
-            usb_string_descriptor *desc = (usb_string_descriptor *)temp_buff;
-            desc->bLength = buff_len;
-            desc->bDescriptorType = USB_DT_STRING;
-            for (int i = 0; i < slen; i++)
-            {
-                desc->wData[i] = strings_list[header->u.cmd_submit.request.wValue.u8lo][i];
+    case USB_DT_STRING: {
+        /*
+         * N2 (docs/security-review-dap.md, P0): the descriptor index is fully
+         * controlled by the (unauthenticated) remote host:
+         *   - the old code used wValue.u8lo directly as a strings_list[] index
+         *     (array has only ARRAY_SIZE entries) -> OOB pointer read,
+         *   - and encoded strlen(strings_list[idx]) into char temp_buff[64]
+         *     without a length bound -> stack overflow / stack info leak.
+         * Fix: whitelist the index, bound the UTF-16LE encoding to the staging
+         * buffer, clip to the host wLength and STALL invalid indices.
+         */
+        const uint8_t str_index = header->u.cmd_submit.request.wValue.u8lo;
+        const char *str;
+        char temp_buff[64];
+        usb_string_descriptor *desc = (usb_string_descriptor *)temp_buff;
+        /* Maximum UTF-16LE characters that fit into temp_buff (31 for 64 B). */
+        const size_t max_chars = (sizeof(temp_buff) - sizeof(usb_string_descriptor)) / sizeof(uint16_t);
+        size_t slen, wslen, buff_len;
 
-            }
-            send_stage2_submit_data(header, 0, (uint8_t *)temp_buff, buff_len);
+        _Static_assert(sizeof(temp_buff) > sizeof(usb_string_descriptor),
+                       "USB string descriptor staging buffer is too small");
+
+        if (str_index == 0) {
+            /* String Descriptor Zero: LANGID list */
+            printf("** REQUESTED list of supported languages\r\n");
+            send_stage2_submit_data(header, 0, kLangDescriptor,
+                                    usb_handle_clip_response_len(header, sizeof(kLangDescriptor)));
+            break;
         }
-        else
-        {
-	        printf("low bit : %d\r\n", (int) header->u.cmd_submit.request.wValue.u8lo);
-	        printf("high bit : %d\r\n", (int) header->u.cmd_submit.request.wValue.u8hi);
-	        printf("***Unsupported String descriptor***\r\n");
+
+        if (str_index == 0xEE) {
+            /* MS OS 1.0 string descriptor: not provided (MSOS 2.0 is announced
+             * through the BOS descriptor instead); answer with no data. */
+            printf("***Unsupported String descriptor (MS OS 0xEE)***\r\n");
             send_stage2_submit(header, 0, 0);
+            break;
         }
+
+        if (str_index >= ARRAY_SIZE(strings_list) || strings_list[str_index] == NULL) {
+            /* Invalid index: STALL the control request (USB 2.0 §9.4.3). */
+            printf("USB invalid string descriptor index:%u (STALL)\r\n",
+                   (unsigned)str_index);
+            send_stage2_submit(header, -EPIPE, 0);
+            break;
+        }
+
+        str = strings_list[str_index];
+        slen = strlen(str);
+        if (slen > max_chars) {
+            /* Truncate instead of overflowing the staging buffer. */
+            printf("USB string descriptor %u truncated from %u to %u chars\r\n",
+                   (unsigned)str_index, (unsigned)slen, (unsigned)max_chars);
+            slen = max_chars;
+        }
+        wslen = slen * sizeof(uint16_t);
+        buff_len = sizeof(usb_string_descriptor) + wslen;
+        desc->bLength = (uint8_t)buff_len;
+        desc->bDescriptorType = USB_DT_STRING;
+        for (size_t i = 0; i < slen; ++i) {
+            /* UTF-16LE: ASCII byte followed by a zero high byte */
+            desc->wData[i] = (uint16_t)(uint8_t)str[i];
+        }
+        send_stage2_submit_data(header, 0, temp_buff,
+                                usb_handle_clip_response_len(header, (int)buff_len));
         break;
+    }
 
     case USB_DT_INTERFACE:
 	    printf("* GET 0x04 INTERFACE DESCRIPTOR (UNIMPLEMENTED)\r\n");
@@ -318,9 +381,12 @@ static void handleGetDescriptor(usbip_stage2_header *header)
 #endif
     default:
         //// TODO: ms os 1.0 descriptor
-	    printf("USB unknown Get Descriptor requested:%d\r\n", header->u.cmd_submit.request.wValue.u8lo);
-	    printf("low bit :%d\r\n", header->u.cmd_submit.request.wValue.u8lo);
-	    printf("high bit :%d\r\n", header->u.cmd_submit.request.wValue.u8hi);
+	    printf("USB unknown Get Descriptor type:%d index:%d (STALL)\r\n",
+	           (int)header->u.cmd_submit.request.wValue.u8hi,
+	           (int)header->u.cmd_submit.request.wValue.u8lo);
+        /* N2 hardening: answer with STALL so an unsupported/malformed
+         * descriptor request cannot leave the URB waiting forever. */
+        send_stage2_submit(header, -EPIPE, 0);
         break;
     }
 }
