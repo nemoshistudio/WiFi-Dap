@@ -1,0 +1,151 @@
+# WiFi Dap JSON / WebSocket 协议契约（v1）
+
+> 状态：**冻结草案 v1（2026-10-20，Wave 0）**。Wave 1/2 的前后端实现以本文为准；变更需 Lead 统一修改并广播。
+> 相关契约：`docs/ws-binary-router.md`（二进制路由 API）、`docs/ota-local-upload.md`（OTA 上传）、`docs/wifi-credential-memory.md`（多 WiFi 凭据）、`docs/versioning.md`（版本/握手）、`docs/i18n-keys.md`（前端文案 key）。
+
+---
+
+## 1. 传输层
+
+| 项 | 约定 |
+|---|---|
+| HTTP | 端口 80，`esp_http_server`；`GET /` 返回内嵌 UI（gzip）；`GET /ws.*` 返回 SharedWorker JS（gzip）；`GET /SSDP.xml` |
+| WebSocket | 单条连接：`ws://<device-ip>/ws`；文本帧 = JSON 消息；二进制帧 = 4 字节头 + payload |
+| 心跳 | 固件每 **1500ms** 向所有 WS 客户端广播一个**空 TEXT 帧**；前端收到任意消息即重置 2s 超时 |
+| 帧大小 | 单帧 payload 上限 = `memory_pool` 可用容量（当前 2048 - 内部头 ≈ 1.8KB）；超限关闭连接（JSON）或回错误帧（二进制） |
+| 并发 | 请求-响应无 ID（沿用 D/C 约定）；同一时刻同 cmd 只允许一个在途；慢命令（WiFi 扫描/连接、OTA 进度）用异步事件/轮询响应 |
+| 鉴权 | 默认 **关闭**（`BIRDIEBOT_WEB_AUTH=n`）；打开后：连接 URL 带 `?token=<pair_code>` 或首帧 `{"module":0,"cmd":0,"token":"..."}`，HTTP 用 `Authorization: Bearer`；`Origin`/`Host` 校验 |
+
+### 1.1 JSON 请求/响应
+
+请求：`{"module":<u8>,"cmd":<u16>, ...业务字段}`。
+成功：回显请求字段 + 结果字段（无结果字段时仅回显请求，作为隐式 ACK）。
+失败：`{"module":<u8>,"cmd":<u16>,"err":"<message>","code":<int>}`。
+异步事件：`{"module":<u8>,"event":"<name>", ...}`（当前未使用；OTA/UART 走轮询/二进制）。
+
+错误码（沿用 C 的 `api_json_req_status_e`）：
+
+| code | 含义 |
+|---|---|
+| 2 | `Bad json request`（缺 module/cmd、JSON 解析失败） |
+| 3 | `Internal error` |
+| 4 | `Unsupported cmd` |
+| 5 | `Property error`（字段缺失/类型错/取值非法） |
+| 6 | `Busy`（内存池/请求队列满，稍后重试） |
+
+---
+
+## 2. 模块与命令总表
+
+模块号：SYSTEM=0、WIFI=1、DATA_FLOW=2、RESERVED=3、UART=4、OTA=5。`protocol_version = 1`。
+
+### 2.1 SYSTEM(0)
+
+| cmd | 名称 | 请求 | 响应 | 说明 |
+|---|---|---|---|---|
+| 1 | GET_FM_INFO | – | `{"fm_ver":"v1.0.0","upd_date":"YYYY-MM-DD","protocol_version":1}` | 固件版本 + 协议版本；`upd_date` 由构建注入 |
+| 2 | REBOOT | – | 回显请求 | 2 秒后重启 |
+| 3 | GET_SYS_INFO | – | `{"sn":"XXXXXXXXXXXX","hw_ver":"...","mf_date":"YYYY-MM-DD"}` | SN 默认 = WiFi STA MAC 无分隔大写 12 hex；hw_ver/mf 由构建注入，可留空字符串 |
+| 200 | DO_CRASH | – | 不返回 | **仅 debug 构建注册**，release 不实现 |
+
+### 2.2 WIFI(1)
+
+| cmd | 名称 | 关键请求字段 | 响应字段 | 说明 |
+|---|---|---|---|---|
+| 1 | GET_STA_INFO | – | `ssid,password,ip,gateway,netmask,dns_main,dns_backup,rssi,mac` | 沿用 C/D 现有 |
+| 2 | CONNECT | `ssid,password[,save=1]` | 成功时复用 GET_STA_INFO 字段 | `save` 默认 1（写入多凭据记忆，见 wifi-credential-memory.md） |
+| 3 | SCAN | – | `scan_list:[{rssi,ssid,mac}]` | 异步；结果回一条 JSON |
+| 4 | DISCONNECT | – | 回显 | 停止 STA 连接（AP 保持） |
+| 5 | GET_AP_INFO | – | `ssid,password,ip,gateway,netmask` | ⚠️ 含 AP 口令（默认无鉴权下仅在可信 LAN 使用） |
+| 6 | GET_MODE | – | `{"status":"<mode>","mode":<int>}` | 沿用 C 的 `wifi_apsta_mode_e` |
+| 7 | SET_MODE | `mode` | 回显 | 含 Smart APSTA 模式 |
+| 8 | SET_AP_CRED | `ssid,password` | 回显 | 空 ssid 表示恢复默认 `WiFi-Dap-XXXX` |
+| 9 | GET_STATIC_IP | – | `{"enable":bool,"ip":"","gateway":"","netmask":"","dns_main":"","dns_backup":""}` | – |
+| 10 | SET_STATIC_IP | `enable` + 上述字段 | 回显 | 默认 enable=false（DHCP） |
+| **11** | **GET_SAVED_LIST** | – | `{"auto_save":bool,"list":[{"idx":0,"ssid":"...","last_success":<unix>,"priority":0}]}` | 多 WiFi 记忆 |
+| **12** | **ADD_SAVED** | `ssid,password[,priority]` | 回显 + `idx` | 已存在则更新口令/时间 |
+| **13** | **DEL_SAVED** | `idx` | 回显 | – |
+| **14** | **SET_AUTO_SAVE** | `enable` | 回显 | 默认 true |
+
+AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA)` 末 2 字节的 4 位大写十六进制；NVS 用户自定义优先。
+
+### 2.3 DATA_FLOW(2)（最小实现，D 的 Uart/Widget 仅依赖 attach）
+
+| cmd | 名称 | 请求 | 响应 |
+|---|---|---|---|
+| 1 | GET_INS_LIST | – | `{"instances":[{"ins_idx":0,"mod_idx":0,"mod_type":130,"port_info":{"periph_num":0}}]}`，`mod_type=130`=UART |
+| 2 | GET_CUR_INS | – | `{"ins_idx":0}` |
+| 3 | GET_CUR_ATTACH_LIST | – | `{"attaches":[...]}` |
+| 4 | GET_ATTACH_LIST | – | `{"attaches":[...]}` |
+| 5 | ATTACH | `ins_idx, s_ins_idx, r_ins_idx` | 回显 |
+| 6 | ATTACH_CUR_TO_RECVER | `{data_type}` | 回显 |
+| 7 | ATTACH_CUR_TO_SENDER | `{data_type}` | 回显 |
+| 8 | DETACH_SINGLE | `attach_idx` | 回显 |
+| 9 | DETACH_CUR_FROM | `attach_idx` | 回显 |
+| 10 | SET_DATA_TYPE | `ins_idx,data_type` | 回显 |
+
+> 实现范围：实例 = 1 个 UART 实例（`periph_num` 为 UART 号）；`data_type` 使用二进制头中的 `RAW=0x20`；Web UI 的 attach 流程必须返回成功。
+
+### 2.4 UART(4)
+
+| cmd | 名称 | 请求 | 响应 |
+|---|---|---|---|
+| 1 | GET_AVAILABLE_NUMS | – | `{"num":1}` |
+| 4 / 5 | GET_BAUD / SET_BAUD | `sub_mod, baud` | `{"baud":115200}` |
+| 6 / 7 | GET_CONFIG / SET_CONFIG | `sub_mod, data_bits(5-8), parity(0-2), stop_bits(1/15/2)` | 同上 |
+| 8 / 9 | GET_FLOW_CTRL / SET_FLOW_CTRL | `sub_mod, flow_ctrl` | `{"flow_ctrl":0}` |
+| 10 / 11 | GET_PINS_NUM / SET_PINS_NUM | `sub_mod[,tx_pin,rx_pin]` | 未实现时回显 + `err:"unsupported"`（前端不阻塞） |
+| 12 / 13 | GET_MODE / SET_MODE | `sub_mod[,mode]` | 未实现时同上 |
+| 20 / 21 | GET_STATUS / SET_STATUS | `sub_mod[,enable]` | `{"enable":true}` |
+| 22 / 23 | GET_DATA_TYPE / SET_DATA_TYPE | `sub_mod[,data_type]` | `{"data_type":32}`（RAW） |
+| 24 | GET_DEFAULT_NUM | – | `{"num":0}` |
+
+数据面：见 §3；UART 默认 115200-8N1，`sub_mod` = UART 序号（当前固定 0）。
+
+### 2.5 OTA(5)（浏览器本地上传方案；详见 docs/ota-local-upload.md）
+
+| cmd | 名称 | 请求 | 响应 |
+|---|---|---|---|
+| 1 | GET_INFO | – | `{"running":"ota_0","running_ver":"v1.0.0","free":<bytes>,"slot_size":<bytes>,"status":"IDLE"}` |
+| 3 | GET_PROGRESS | – | `{"offset":<u32>,"total":<u32>,"status":"IDLE|RECEIVING|VERIFYING|READY|APPLYING|ERROR","err":""}` |
+| 4 | ABORT | – | 回显；收尾 `esp_ota_abort` 并回到 IDLE |
+
+上传端点：`POST /api/ota/upload`（见 OTA 契约文档）。
+
+---
+
+## 3. 二进制帧协议（UART/数据面）
+
+4 字节头（`wt_bin_data_hdr_t`）：
+
+| offset | 字段 | 值 |
+|---|---|---|
+| 0 | `data_type` | `EVENT=0x02`、`RAW_BROADCAST=0x04`、`RAW=0x20`、`CMD=0x21`、`RESPONSE=0x22` |
+| 1 | `module` | 模块号（UART=4 等） |
+| 2 | `sub_mod` | 子实例（UART 序号） |
+| 3 | reserved | 0 |
+
+方向与语义：
+
+- **client → device**：`RAW`（module=4, sub_mod=uart_idx）→ 写入 UART TX；`CMD` 保留（控制命令走 JSON）；其他 `data_type` 返回错误帧。
+- **device → client**：UART RX → `RAW_BROADCAST`（module=4, sub_mod=uart_idx）广播给所有 WS 客户端；`EVENT` 保留给设备事件（JSON 优先）。
+- 分片：入站 WS 二进制帧只在 **FIN=1** 时交给 router；不带分片聚合；单帧超限关闭/丢弃并回 `MSG_BINARY_ERROR`。
+- 背压：UART RX 队列满时丢弃最旧数据并累加 `overflow` 计数（不阻塞 httpd）；`GET STATUS` 可返回该计数（可选）。
+- 路由 API 见 `docs/ws-binary-router.md`；实现归属：WP-204（`components/dataflow/**` + `uri_bin_router.c`），挂接点 WP-123（`uri_ws.c`）。
+
+---
+
+## 4. 兼容性与版本
+
+- 本协议在 D 的现有 JSON 命令（module 0/1/2/4/5 语义）基础上扩展：SYSTEM cmd 3、WIFI cmd 11–14、OTA 上传方式改为浏览器上传（原 D 的 URL 更新不用）。
+- `protocol_version` 握手：WS 连接后前端发 `SYSTEM/GET_FM_INFO`，比较响应中的 `protocol_version` 与本端常量；不匹配则用 toast 提示“固件与网页版本不匹配，请刷新/升级”，但不阻塞使用。
+- 前端请求字段名保持 D 的驼峰/下划线约定（以 D 的 `src/api/*.ts` 为准）；后端响应用 C 的下划线字段名。
+
+---
+
+## 5. 安全默认
+
+- 默认无鉴权（实验室模式）；打开 `BIRDIEBOT_WEB_AUTH` 后：`/ws` 与 `/api` 均需 token；`Origin`/`Host` 校验；OTA 上传和 WiFi 口令读取必须带 token。
+- WS-DAP(3240) 与 UART TCP 桥(1346) 默认开启，但各自 Kconfig 可关；release 文档必须提示“仅限可信局域网”。
+
+*契约版本：v1，2026-10-20，Lead 维护。*
