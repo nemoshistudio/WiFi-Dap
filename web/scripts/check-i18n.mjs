@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 314
+const EXPECTED_TOTAL = 318
 const EXPECTED_BASELINE = 180
-const EXPECTED_ADDED = 134
+const EXPECTED_ADDED = 138
 
 const errors = []
 const warnings = []
@@ -109,8 +109,9 @@ const ADDED_KEYS = [
         'title', 'description', 'empty', 'autoSave', 'autoSaveHint', 'priority', 'lastSuccess',
         'current', 'connect', 'connecting', 'forget', 'forgetConfirm', 'forgetConfirmTitle',
         'deleted', 'add', 'addTitle', 'added', 'updated', 'invalidPassword', 'maxReached',
-        'connectFailed', 'apDefault', 'apCustom', 'apDefaultHint',
+        'connectFailed', 'apDefault', 'apCustom', 'apDefaultHint', 'listFull', 'evictedHint',
     ]),
+    ...keys('wifi.ap', ['resetDefault', 'resetConfirm']),
     ...keys('ota.upload', [
         'title', 'description', 'selectFile', 'dragHint', 'fileName', 'fileSize', 'fileVersion',
         'fileDate', 'fileInvalid', 'tooLarge', 'sha256', 'verifyingFile', 'upload', 'uploading',
@@ -137,7 +138,7 @@ const EXPECTED_KEYS = [...BASELINE_KEYS, ...ADDED_KEYS]
 const EXPECTED_SET = new Set(EXPECTED_KEYS)
 const BASELINE_SET = new Set(BASELINE_KEYS)
 const ADDED_SET_RE = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/
-const ALLOWED_PLACEHOLDERS = new Set(['err', 'max', 'size', 'code', 'web', 'fw', 'count'])
+const ALLOWED_PLACEHOLDERS = new Set(['err', 'max', 'size', 'code', 'web', 'fw', 'count', 'ssid'])
 
 function selfCheckContract() {
     const problems = []

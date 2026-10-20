@@ -236,9 +236,16 @@ export default {
             invalidPassword: "Wi-Fi password must be at least 8 characters",
             maxReached: "Saved network limit reached ({max})",
             connectFailed: "Connection failed: {err}",
+            listFull: "Saved networks limit reached ({max})",
+            evictedHint: "Evicted old network: {ssid}",
             apDefault: "Default name",
             apCustom: "Custom name",
             apDefaultHint: "Default AP name format: WiFi-Dap-XXXX (XXXX = last two MAC bytes, uppercase hex)",
+        },
+
+        ap: {
+            resetDefault: "Restore default SSID",
+            resetConfirm: "Restore the default AP SSID?",
         },
     },
 

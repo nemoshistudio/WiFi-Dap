@@ -215,6 +215,8 @@ export interface IWifiSavedList extends ApiJsonMsg {
     list: IWifiSavedItem[];
     /** 可选增量：当前 STA 已连接条目下标 */
     connected_idx?: number;
+    /** 可选增量：设备侧保存上限（Kconfig，默认 8）；旧固件缺字段时前端回退 8 */
+    max?: number;
 }
 
 /** ADD_SAVED(cmd 12) 响应：不回显 password（契约 §7.2 安全例外）。 */
@@ -223,6 +225,8 @@ export interface IWifiSavedAddResult extends ApiJsonMsg {
     ssid?: string;
     priority?: number;
     updated?: boolean;
+    /** 可选增量：本次因表满被淘汰的记录下标（用于提示，前端从旧列表映射 ssid） */
+    evicted_idx?: number;
 }
 
 /** DEL_SAVED(cmd 13) 响应为回显；SET_AUTO_SAVE(cmd 14) 响应如下。 */
