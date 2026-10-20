@@ -9,6 +9,7 @@
 
 #include "ssdp.h"
 #include "wifi_configuration.h"
+#include "wifi_manager.h"
 
 #define TAG __FILE_NAME__
 
@@ -203,6 +204,7 @@ void wifi_event_handler(void *handler_arg __attribute__((unused)),
 		last_disco_reason = event->reason;
 		++last_disco_count;
 		event_ctx.is_connected = 0;
+		wifi_manager_wifi_led_set(false);
 		reconnect_after_disco();
 		break;
 	}
@@ -257,6 +259,7 @@ int wifi_event_trigger_connect(uint8_t attempt, wifi_event_connect_done_cb cb, v
 
 void event_on_connected(ip_event_got_ip_t *event)
 {
+	wifi_manager_wifi_led_set(true);
 	if (event_ctx.conn.cb) {
 		event_ctx.conn.cb(event_ctx.conn.arg, event);
 	}

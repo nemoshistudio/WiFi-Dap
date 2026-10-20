@@ -17,10 +17,8 @@
 #include <lwip/ip4_addr.h>
 #include <string.h>
 #include <assert.h>
-#include <hal/gpio_types.h>
-#include <driver/ledc.h>
-#include <hal/gpio_hal.h>
-#include <soc/ledc_periph.h>
+#include <driver/gpio.h>
+#include "birdiebot_board.h"
 
 #include "ssdp.h"
 #include "wifi_api.h"
@@ -110,7 +108,7 @@ static void delayed_set_ap_stop(void *arg);
 static void delayed_set_ap_start(void *arg);
 
 static void wifi_led_init(void);
-static void wifi_led_set_blink(void);
+static void wifi_led_set_off(void);
 static void wifi_led_set_on(void);
 
 static bool disconnect_reason_is_credential(int reason)
@@ -148,7 +146,7 @@ void wifi_manager_init(void)
 	uint8_t do_connect = 0;
 
 	wifi_led_init();
-	wifi_led_set_blink();
+	wifi_led_set_off();
 
 	/* Mutex / event group first: credential memory and event handlers may run
 	 * before the WiFi driver is fully configured. */
@@ -305,51 +303,45 @@ static int set_initial_sta_cred(void)
 
 static void wifi_led_init(void)
 {
-#if WIFI_LED_ENABLE
-	ledc_timer_config_t ledc_timer = {
-		.duty_resolution = LEDC_TIMER_14_BIT, // resolution of PWM duty
-		.freq_hz = 5,                      // frequency of PWM signal
-		.speed_mode = LEDC_LOW_SPEED_MODE,           // timer mode
-		.timer_num = LEDC_TIMER_0,            // timer index
-		.clk_cfg = LEDC_USE_APB_CLK,              // Auto select the source clock
+#if BIRDIEBOT_BOARD_HAS_WIFI_LED
+	gpio_config_t io = {
+		.pin_bit_mask = 1ULL << PIN_LED_WIFI_STATUS,
+		.mode = GPIO_MODE_OUTPUT,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.intr_type = GPIO_INTR_DISABLE,
 	};
-	ledc_timer_config(&ledc_timer);
-
-	ledc_channel_config_t ledc_channel = {
-		.channel    = LEDC_CHANNEL_0,
-		.duty       = 0,
-		.gpio_num   = WIFI_LED_PIN,
-		.speed_mode = LEDC_LOW_SPEED_MODE,
-		.hpoint     = 1,
-		.timer_sel  = LEDC_TIMER_0,
-		.flags.output_invert = 0
-	};
-
-	ledc_channel_config(&ledc_channel);
-	ledc_fade_func_install(0);
-
-	gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[WIFI_LED_PIN], PIN_FUNC_GPIO);
-	gpio_set_direction(WIFI_LED_PIN, GPIO_MODE_OUTPUT_OD);
-	gpio_set_direction(WIFI_LED_PIN, GPIO_FLOATING);
-	esp_rom_gpio_connect_out_signal(WIFI_LED_PIN, ledc_periph_signal[LEDC_LOW_SPEED_MODE].sig_out0_idx + LEDC_CHANNEL_0,
-	                                1, 0);
+	gpio_config(&io);
+	gpio_set_level(PIN_LED_WIFI_STATUS, 0);
 #endif
 }
 
-
-static void wifi_led_set_blink(void)
+static void wifi_led_set_state(bool on)
 {
-#if WIFI_LED_ENABLE
-	ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (1 << 12), 0);
+#if BIRDIEBOT_BOARD_HAS_WIFI_LED
+	gpio_set_level(PIN_LED_WIFI_STATUS, on ? 1 : 0);
+#else
+	(void) on;
 #endif
 }
 
+static void wifi_led_set_off(void)
+{
+	wifi_led_set_state(false);
+}
 
 static void wifi_led_set_on(void)
 {
-#if WIFI_LED_ENABLE
-	ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (1 << 14) - 1, 0);
-#endif
+	wifi_led_set_state(true);
+}
+
+/* Called from the WiFi/IP event handler: LED on after STA got an IP,
+ * off when the STA link is lost. Active level: drive HIGH = on (ZXR S3
+ * PIN_LED_WIFI_STATUS = GPIO4). */
+void wifi_manager_wifi_led_set(bool on)
+{
+	wifi_led_set_state(on);
+	ESP_LOGI(TAG, "WiFi status LED %s", on ? "on" : "off");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -883,7 +875,7 @@ static void disconn_handler(void)
 	 * 2. WI-FI AP or AP device is closed
 	 * 3. this device is ejected by AP
 	 * */
-	wifi_led_set_blink();
+	wifi_led_set_off();
 	handle_wifi_disconnected();
 	if (ctx.auto_reconnect == 0) {
 		return;

@@ -1,11 +1,15 @@
 #ifndef WIFI_MANAGER_H_GUARD
 #define WIFI_MANAGER_H_GUARD
 
+#include <stdbool.h>
 #include <esp_wifi_types.h>
 #include "wifi_api.h"
 #include "wifi_storage.h"
 
 void wifi_manager_init(void);
+
+/** Drive the board WiFi status LED (on = STA has an IP address). */
+void wifi_manager_wifi_led_set(bool on);
 
 
 void *wifi_manager_get_ap_netif(void);
