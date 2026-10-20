@@ -10,8 +10,9 @@ multi-credential JSON API (docs/wifi-credential-memory.md §7, docs/protocol.md
   R2 SYSTEM(0)/GET_SYS_INFO(3)  sn is 12 upper-case hex chars (STA MAC)
   R3 WIFI(1)/GET_SAVED_LIST(11) auto_save/count/list shape, idx order,
                                 SSID/last_success/priority ranges, no password,
-                                optional connected_idx; cmd 11 unsupported
-                                (code 4 = old firmware) is reported clearly
+                                optional max (device limit, must not be < count,
+                                contract b015a0c) and connected_idx; cmd 11
+                                unsupported (code 4 = old firmware) is reported
   R4 WIFI(1)/GET_AP_INFO(5)     effective AP SSID: either the dynamic default
                                 "WiFi-Dap-XXXX" (XXXX == sn[-4:]) or a
                                 custom 1..32 byte value (user value wins, §6)
@@ -494,6 +495,12 @@ def check_saved_list(ws: WsClient, rep: Reporter) -> dict:
             problems.append(f"{prefix}.last_success is not a non-negative integer")
         if not rng(item.get("priority"), 0, 255):
             problems.append(f"{prefix}.priority is not in 0..255")
+    max_entries = response.get("max")
+    if max_entries is not None:
+        if not is_int(max_entries) or not (1 <= max_entries <= 8):
+            problems.append(f"max={max_entries!r} is not an integer in 1..8")
+        elif is_int(count) and count > max_entries:
+            problems.append(f"count={count} > max={max_entries}")
     connected_idx = response.get("connected_idx")
     if connected_idx is not None:
         if not is_int(connected_idx) or not (0 <= connected_idx < len(saved_list)):
@@ -504,7 +511,8 @@ def check_saved_list(ws: WsClient, rep: Reporter) -> dict:
     else:
         rep.ok("R3 WIFI/GET_SAVED_LIST(11)",
                f"auto_save={response.get('auto_save')} count={len(saved_list)} "
-               f"connected_idx={connected_idx!r} (no password echo)")
+               f"max={max_entries!r} connected_idx={connected_idx!r} "
+               "(no password echo)")
     return response
 
 

@@ -83,6 +83,7 @@ typedef struct wifi_cred_list_item_t {
 
 typedef struct wifi_cred_list_t {
 	bool auto_save;
+	uint8_t max;           /* device side limit (Kconfig BIRDIEBOT_WIFI_CRED_MAX, contract §7.1) */
 	uint8_t count;
 	uint8_t connected_idx; /* BIRDIEBOT_WIFI_CRED_NONE == not connected */
 	wifi_cred_list_item_t item[BIRDIEBOT_WIFI_CRED_MAX];
