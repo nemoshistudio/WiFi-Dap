@@ -2,11 +2,18 @@
  * @file gpio_op.h
  * @author windowsair
  * @brief esp GPIO operation
- * @version 0.1
+ * @version 0.2
  * @date 2021-03-03
  *
  * @copyright Copyright (c) 2021
  *
+ * WP-102 merge (A 2025 fork + C IDF5):
+ *  - A's dedicated-GPIO hooks (S3 Xtensa `ee.*` instructions, C3 RISC-V CSR
+ *    user GPIO) are kept: DAP_config.h uses SWCLK_SET/SWDIO_SET/... when
+ *    defined, which is how the 2025 fork reaches its fast SWCLK rates.
+ *  - IDF5 API forms from the C tree are kept (gpio_ll HAL calls instead of
+ *    the IDF4 GPIO register struct where the C tree already converted them).
+ *  - ESP8266 branches are intentionally removed.
  */
 
 #ifndef __GPIO_OP_H__
@@ -16,28 +23,15 @@
 #include "cmsis-dap/include/cmsis_compiler.h"
 #include "cmsis-dap/include/gpio_common.h"
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
+// Dedicated-GPIO CPU instruction helpers:
+//   S3: dedic_gpio_cpu_ll_read_in() (Xtensa `ee.get_gpio_in`)
+//   C3: CSR_GPIO_*_USER + RV_*_CSR macros (riscv/csr.h)
+#include "hal/dedic_gpio_cpu_ll.h"
+#endif
 
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-__STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
-{
-  gpio_pin_reg_t pin_reg;
-
-  pin_reg.val = READ_PERI_REG(GPIO_PIN_REG(io_num));
-
-  // It should be noted that GPIO0, 2, 4, and 5 need to set the func register to 0,
-  // and the other GPIO needs to be set to 3 so that IO can be GPIO function.
-  if ((0x1 << io_num) & (GPIO_Pin_0 | GPIO_Pin_2 | GPIO_Pin_4 | GPIO_Pin_5)) {
-      pin_reg.rtc_pin.func_low_bit = 0;
-      pin_reg.rtc_pin.func_high_bit = 0;
-  } else {
-      pin_reg.func_low_bit = 3;
-      pin_reg.func_high_bit = 0;
-  }
-
-  WRITE_PERI_REG(GPIO_PIN_REG(io_num), pin_reg.val);
-}
-#elif defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
 __STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
 {
     // function number 2 is GPIO_FUNC for each pin
@@ -61,14 +55,7 @@ __STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
 #endif
 
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-__STATIC_INLINE __UNUSED void GPIO_SET_DIRECTION_NORMAL_OUT(int io_num)
-{
-  GPIO.enable_w1ts |= (0x1 << io_num);
-  // PP out
-  GPIO.pin[io_num].driver = 0;
-}
-#elif defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
 __STATIC_INLINE __UNUSED void GPIO_SET_DIRECTION_NORMAL_OUT(int io_num)
 {
     GPIO.enable_w1ts = (0x1 << io_num);
@@ -85,19 +72,18 @@ __STATIC_INLINE __UNUSED void GPIO_SET_DIRECTION_NORMAL_OUT(int io_num)
 #elif defined CONFIG_IDF_TARGET_ESP32S3
 __STATIC_INLINE __UNUSED void GPIO_SET_DIRECTION_NORMAL_OUT(int io_num)
 {
-	gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
-	// PP out
-	gpio_ll_od_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
+    gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
+    // PP out
+    gpio_ll_od_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
 }
 #endif
 
 
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
 __STATIC_INLINE __UNUSED void GPIO_SET_LEVEL_HIGH(int io_num)
 {
   GPIO.out_w1ts |= (0x1 << io_num);
 }
-//FIXME: esp32
 __STATIC_INLINE __UNUSED void GPIO_SET_LEVEL_LOW(int io_num)
 {
   GPIO.out_w1tc |= (0x1 << io_num);
@@ -114,7 +100,7 @@ __STATIC_INLINE __UNUSED void GPIO_SET_LEVEL_LOW(int io_num)
 #endif
 
 
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
 __STATIC_INLINE __UNUSED int GPIO_GET_LEVEL(int io_num)
 {
   return ((GPIO.in >> io_num) & 0x1) ? 1 : 0;
@@ -125,8 +111,6 @@ __STATIC_INLINE __UNUSED int GPIO_GET_LEVEL(int io_num)
   return gpio_ll_get_level(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
 }
 #endif
-
-
 
 
 #if defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32C3
@@ -140,28 +124,46 @@ __STATIC_INLINE __UNUSED void GPIO_PULL_UP_ONLY_SET(int io_num)
 #elif defined CONFIG_IDF_TARGET_ESP32S3
 __STATIC_INLINE __UNUSED void GPIO_PULL_UP_ONLY_SET(int io_num)
 {
-	// disable pull down
-	gpio_ll_pulldown_dis(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
-	// enable pull up
-	gpio_ll_pullup_en(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
-}
-#elif defined CONFIG_IDF_TARGET_ESP8266
-__STATIC_INLINE __UNUSED void GPIO_PULL_UP_ONLY_SET(int io_num)
-{
-  gpio_pin_reg_t pin_reg;
-
-  pin_reg.val = READ_PERI_REG(GPIO_PIN_REG(io_num));
-  pin_reg.pullup = 1;
-  WRITE_PERI_REG(GPIO_PIN_REG(io_num), pin_reg.val);
+  // disable pull down
+  gpio_ll_pulldown_dis(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
+  // enable pull up
+  gpio_ll_pullup_en(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
 }
 #endif
 
 
-// static void GPIO_SET_DIRECTION_NORMAL_IN(int io_num)
-// {
-//   GPIO.enable_w1tc |= (0x1 << io_num);
-// }
-
+/*
+ * Dedicated-GPIO fast path hooks (A 2025 fork).
+ *
+ * The SWD clock / data pins are mapped to the CPU dedicated GPIO outputs in
+ * spi_switch.c's DAP_SPI_Deinit():
+ *
+ *   ESP32-S3: SWCLK -> CORE1_GPIO_OUT1 (bit 1), SWDIO -> CORE1_GPIO_OUT0 (bit 0)
+ *             input:  CORE1_GPIO_IN0 <- SWDIO pad
+ *   ESP32-C3: SWCLK -> CPU_GPIO_OUT1  (bit 1), SWDIO -> CPU_GPIO_OUT0  (bit 0)
+ *             input:  CPU_GPIO_IN0  <- SWDIO pad, OEN CSR bits 0/1
+ *
+ * These macros are optional: DAP_config.h falls back to the generic GPIO
+ * accessors when they are not defined (see PIN_SWCLK_TCK_SET etc.).
+ */
+#if defined CONFIG_IDF_TARGET_ESP32S3
+// `ee.set_bit_gpio_out 0x2` == set dedicated output bit 1 (SWCLK)
+#define SWCLK_SET() do { asm volatile("ee.set_bit_gpio_out 0x2"); } while (0)
+#define SWCLK_CLR() do { asm volatile("ee.clr_bit_gpio_out 0x2"); } while (0)
+// bit 0 (SWDIO)
+#define SWDIO_SET() do { asm volatile("ee.set_bit_gpio_out 0x1"); } while (0)
+#define SWDIO_CLR() do { asm volatile("ee.clr_bit_gpio_out 0x1"); } while (0)
+#define SWDIO_GET_IN() ({ dedic_gpio_cpu_ll_read_in() & 0x1; })
+#elif defined CONFIG_IDF_TARGET_ESP32C3
+#define SWCLK_SET() do { RV_SET_CSR(CSR_GPIO_OUT_USER, 2); } while (0)
+#define SWCLK_CLR() do { RV_CLEAR_CSR(CSR_GPIO_OUT_USER, 2); } while (0)
+#define SWDIO_SET() do { RV_SET_CSR(CSR_GPIO_OUT_USER, 1); } while (0)
+#define SWDIO_CLR() do { RV_CLEAR_CSR(CSR_GPIO_OUT_USER, 1); } while (0)
+#define SWDIO_GET_IN() ({ RV_READ_CSR(CSR_GPIO_IN_USER) & 0x1; })
+// OEN user CSR bit 0 (SWDIO only; SWCLK is always driven while in GPIO mode)
+#define SWDIO_OUT_ENABLE() do { RV_SET_CSR(CSR_GPIO_OEN_USER, 1); } while (0)
+#define SWDIO_OUT_DISABLE() do { RV_CLEAR_CSR(CSR_GPIO_OEN_USER, 1); } while (0)
+#endif
 
 
 #endif
