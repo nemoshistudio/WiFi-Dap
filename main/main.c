@@ -1,6 +1,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_event.h>
+#include <esp_app_desc.h>
+#include <esp_system.h>
 #include <esp_netif.h>
 
 #include "tcp_server.h"
@@ -15,6 +17,8 @@
 #include "uart_tcp_bridge.h"
 #include "global_module.h"
 #include "wt_ota.h"
+#include "wt_protocol_version.h"
+#include "birdiebot_board.h"
 
 #include <sdkconfig.h>
 
@@ -91,6 +95,16 @@ void app_main()
     DAP_Setup();
 
 	global_module_init();
+
+	/* docs/versioning.md §2.4: single startup line for support/log triage. */
+	{
+		const esp_app_desc_t *app = esp_app_get_description();
+		ESP_LOGI("APP", "fw=%s proto=%d board=%s idf=%s",
+		         app ? app->version : "unknown",
+		         BIRDIEBOT_PROTOCOL_VERSION,
+		         birdiebot_board_id,
+		         esp_get_idf_version());
+	}
 
 	start_webserver();
 
