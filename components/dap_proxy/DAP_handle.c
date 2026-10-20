@@ -42,13 +42,22 @@
 #include <freertos/ringbuf.h>
 #include <freertos/semphr.h>
 
+#if DAP_PROXY_STATS
+#include <esp_timer.h>
+#endif
+
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 
-/* A 2025: 10 slots when the Wi-Fi/mDNS/OTA stack is used, 20 otherwise.  The
- * merged tree always runs the Wi-Fi + mDNS + web stack, so use 10 slots:
- * 2 directions * 516 B * 10 = ~10 KB of ring buffer RAM. */
-#define DAP_BUFFER_NUM 10
+/* A3: pipeline depth of the two USBIP<->DAP ring buffers.
+ *
+ * 2025 tree used 10 slots when the Wi-Fi/mDNS/OTA stack was enabled.  With
+ * DAP_PACKET_SIZE=1024 the host (OpenOCD CMSIS-DAP) can have several URBs in
+ * flight while the Wi-Fi round-trip is outstanding, so deepen the pipeline to
+ * 20 slots: 2 directions * (4 B + 1024 B) * 20 ~= 41 KB.  That still leaves
+ * plenty of internal heap on the 512 KB ESP32-S3 (confirmed on hardware by the
+ * A3 benchmark); item size stays DAP_HANDLE_SIZE. */
+#define DAP_BUFFER_NUM 20
 
 /* Bounded wait used when pushing a response into the OUT ring buffer, so that a
  * reset request (ring buffer ownership change) is always observed. */
@@ -57,6 +66,67 @@
  * not drain the OUT ring; after this the response is dropped instead of
  * dead-locking the DAP/TCP tasks (analysis/REPORT.md P1 #4). */
 #define DAP_RINGBUF_SEND_RETRIES 500
+
+/* --------------------------------------------------------------------------
+ * A3: optional USBIP<->DAP transaction statistics (compile-time off).
+ *
+ * Build with -DDAP_PROXY_STATS=1 to print the per-transaction latency seen by
+ * the host: the time between "OUT URB queued for the DAP task" and "the IN URB
+ * that returns the response is being answered".  This is the latency the
+ * OpenOCD CMSIS-DAP driver pays per command over Wi-Fi/USBIP, so it isolates
+ * transport/scheduling overhead from the SWD bit-banging time.
+ *
+ * Default 0: no code, no RAM cost in release builds.
+ * -------------------------------------------------------------------------- */
+#ifndef DAP_PROXY_STATS
+#define DAP_PROXY_STATS 0
+#endif
+
+#if DAP_PROXY_STATS
+static int64_t s_stats_out_us;
+static uint32_t s_stats_pairs;
+static uint32_t s_stats_sum_us;
+static uint32_t s_stats_max_us;
+#define DAP_STATS_REPORT_EVERY 128U
+
+static inline void dap_stats_mark_out(void)
+{
+    s_stats_out_us = esp_timer_get_time();
+}
+
+static inline void dap_stats_mark_in(void)
+{
+    int64_t now_us;
+    uint32_t dt_us;
+
+    if (s_stats_out_us == 0) {
+        return;
+    }
+    now_us = esp_timer_get_time();
+    if (now_us <= s_stats_out_us) {
+        s_stats_out_us = 0; /* clock wrap / reset: ignore this sample */
+        return;
+    }
+    dt_us = (uint32_t)(now_us - s_stats_out_us);
+    s_stats_out_us = 0;
+    s_stats_sum_us += dt_us;
+    if (dt_us > s_stats_max_us) {
+        s_stats_max_us = dt_us;
+    }
+    if (++s_stats_pairs >= DAP_STATS_REPORT_EVERY) {
+        printf("DAP_STATS transactions=%lu avg=%lu us max=%lu us\r\n",
+               (unsigned long)s_stats_pairs,
+               (unsigned long)(s_stats_sum_us / s_stats_pairs),
+               (unsigned long)s_stats_max_us);
+        s_stats_pairs = 0;
+        s_stats_sum_us = 0;
+        s_stats_max_us = 0;
+    }
+}
+#else
+#define dap_stats_mark_out() do { } while (0)
+#define dap_stats_mark_in()  do { } while (0)
+#endif /* DAP_PROXY_STATS */
 
 typedef struct
 {
@@ -182,6 +252,8 @@ void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
     xRingbufferSend(dap_dataIN_handle, &dap_request_packet, DAP_HANDLE_SIZE, portMAX_DELAY);
     if (kDAPTaskHandle)
         xTaskNotifyGive(kDAPTaskHandle);
+
+    dap_stats_mark_out(); /* A3: start of the host-visible transaction latency */
 }
 
 void handle_swo_trace_response(usbip_stage2_header *header)
@@ -380,6 +452,7 @@ int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num)
                 reply_len = DAP_PACKET_SIZE;
             }
             send_stage2_submit_data_fast((usbip_stage2_header *)buf, item->buf, (int32_t)reply_len);
+            dap_stats_mark_in(); /* A3: response reached the host IN URB */
 
             if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
                 --dap_respond;

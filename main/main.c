@@ -126,10 +126,18 @@ void app_main()
 
 	start_webserver();
 
+    /*
+     * A3 task tuning (ESP32-S3):
+     *  - tcp_server (USBIP/Wi-Fi front-end) stays at prio 14 on core 1;
+     *  - the DAP task now runs at prio 16 (higher than tcp_server) so that once
+     *    an OUT URB is queued, the DAP command is executed before lwIP/Wi-Fi
+     *    processing can preempt it: this cuts the jitter of the USBIP
+     *    request/response round-trip (the dominant cost for OpenOCD reads);
+     *  - both stay pinned to core 1 because the SWD/JTAG bit-banging uses
+     *    dedicated GPIO with a hard core affinity requirement.
+     */
     xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL, 14, NULL, DAP_TASK_AFFINITY);
-
-    // DAP handle task
-    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 2048, NULL, 10, NULL, DAP_TASK_AFFINITY);
+    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 2048, NULL, 16, NULL, DAP_TASK_AFFINITY);
 
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 

@@ -42,6 +42,38 @@
 
 int kSock = -1;
 
+/*
+ * A3: larger per-socket TCP buffers for the USBIP data path.
+ *
+ * USBIP is a request/response protocol with small URBs (48 B header + up to
+ * DAP_PACKET_SIZE payload) and a Wi-Fi round-trip per transaction, so a deep
+ * socket buffer absorbs scheduling jitter between the tcp_server task (core 1,
+ * prio 14) and lwIP/Wi-Fi.  Keep both values in one place for A/B tuning.
+ *
+ * Note: lwIP implements SO_RCVBUF (per-socket recv window) but SO_SNDBUF is a
+ * no-op in this stack version; the send side stays governed by
+ * CONFIG_LWIP_TCP_SND_BUF_DEFAULT (see the A3 measurement notes).
+ */
+#define DAP_PROXY_SOCK_SNDBUF (32 * 1024)
+#define DAP_PROXY_SOCK_RCVBUF (32 * 1024)
+
+/* Apply the A3 socket-buffer tuning; failures are logged but not fatal (the
+ * stack may clamp or not implement a given option). */
+static void tcp_server_tune_socket(int sock)
+{
+    int size;
+
+    size = DAP_PROXY_SOCK_SNDBUF;
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (void *)&size, sizeof(size)) != 0) {
+        printf("tcp_server: SO_SNDBUF(%d) failed: errno %d\r\n", size, errno);
+    }
+
+    size = DAP_PROXY_SOCK_RCVBUF;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (void *)&size, sizeof(size)) != 0) {
+        printf("tcp_server: SO_RCVBUF(%d) failed: errno %d\r\n", size, errno);
+    }
+}
+
 void tcp_server_task(void *pvParameters)
 {
     static uint8_t tcp_rx_buffer[4096]; /* static: keep it off the task stack */
@@ -85,6 +117,7 @@ void tcp_server_task(void *pvParameters)
 
         setsockopt(listen_sock, SOL_SOCKET, SO_KEEPALIVE, (void *)&on, sizeof(on));
         setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, (void *)&on, sizeof(on));
+        tcp_server_tune_socket(listen_sock); /* A3 */
 
         int err = bind(listen_sock, (struct sockaddr *)&destAddr, sizeof(destAddr));
         if (err != 0)
@@ -123,6 +156,7 @@ void tcp_server_task(void *pvParameters)
             }
             setsockopt(kSock, SOL_SOCKET, SO_KEEPALIVE, (void *)&on, sizeof(on));
             setsockopt(kSock, IPPROTO_TCP, TCP_NODELAY, (void *)&on, sizeof(on));
+            tcp_server_tune_socket(kSock); /* A3 */
             printf("Socket accepted\r\n");
 
             // Read header
