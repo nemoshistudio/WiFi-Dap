@@ -25,6 +25,24 @@
  *
  *---------------------------------------------------------------------------*/
 
+/*
+ * WP-105 merge notes:
+ *  - A 2025 fork baseline (the fork itself only removed the __WEAK vendor
+ *    default implementation) + C-tree IDF5/FreeRTOS adaptations.
+ *  - Hardening added for the network-exposed command path:
+ *      * DAP_Transfer request pre-validation (packet bounds + response size)
+ *      * DAP_TransferBlock request_count cap (128 KB response/request writes
+ *        were reachable from a 2-byte count before)
+ *      * JTAG_Configure count <= DAP_JTAG_DEV_CNT
+ *      * SWD_Sequence / JTAG_Sequence request+response packet bounds
+ *      * DAP_ExecuteCommand accumulated-response cap (DAP_PACKET_SIZE)
+ *      * real DAP_TransferAbort(0x07) handling
+ *      * 0x7E/0x7F handling in DAP_ProcessCommand (Atomic Commands capability
+ *        is advertised, but the USBIP path called DAP_ProcessCommand directly)
+ *  - SWJ clock: BUS_CLOCK_FIXED for esp32/s3 corrected to 80 MHz APB and the
+ *    timestamp unit mismatch fixed in DAP_config.h (TIMESTAMP_CLOCK=1 MHz).
+ */
+
 #include <string.h>
 
 #include "DAP_config.h"
@@ -59,6 +77,14 @@
 
          DAP_Data_t DAP_Data;           // DAP Data
 volatile uint8_t    DAP_TransferAbort;  // Transfer Abort Flag
+
+/* WP-105 packet/response bound helpers (defined below) */
+static uint8_t  DAP_SequenceRequestIsValid(const uint8_t *request,
+                                           uint32_t count_mask,
+                                           uint32_t capture_flag,
+                                           uint8_t request_always);
+static uint8_t  DAP_TransferRequestIsValid(const uint8_t *request);
+static uint32_t DAP_ResponseMaxSize(const uint8_t *request);
 
 
 static const char DAP_FW_Ver [] = DAP_FW_VER;
@@ -272,17 +298,31 @@ static uint32_t DAP_Disconnect(uint8_t *response) {
 // Process Reset Target command and prepare response
 //   response: pointer to response data
 //   return:   number of bytes in response
+/** Optional AIRCR.SYSRESETREQ workaround for targets whose nRESET is not
+ * wired. main/dap_configuration.h used to define this as 0 (A tree) while the
+ * C tree made the write unconditional; keep the A behaviour (the WiFi Dap
+ * board has a real nRESET line) but allow enabling it from the config. */
+#ifndef USE_FORCE_SYSRESETREQ_AFTER_FLASH
+#define USE_FORCE_SYSRESETREQ_AFTER_FLASH 0
+#endif
+
 static uint32_t DAP_ResetTarget(uint8_t *response) {
 
-	if (DAP_Data.debug_port == DAP_PORT_SWD) {
-		/* Workaround for software reset */
-		uint32_t AIRCR_REG_ADDR = 0xE000ED0C;
-		/* TODO: read AIRCR, retrieve AIRCR_PRIGROUP bits and OR to the write */
-		uint32_t AIRCR_RESET_VAL = (0x05FA << 16 | 1 << 2); /* Vector key | SYSRESETREQ bit */
-		SWD_Transfer(0x05,&AIRCR_REG_ADDR);
-		dap_os_delay(2);
-		SWD_Transfer(0x0d,&AIRCR_RESET_VAL);
-	}
+#if (USE_FORCE_SYSRESETREQ_AFTER_FLASH)
+  if (DAP_Data.debug_port == DAP_PORT_SWD) {
+    /* Workaround for software reset when nRESET is not connected */
+    uint8_t ack;
+    uint32_t AIRCR_REG_ADDR = 0xE000ED0C;
+    uint32_t AIRCR_RESET_VAL = 0x05FA << 16 | 1 << 2; /* Vector key | SYSRESETREQ bit */
+    uint8_t req = DAP_TRANSFER_APnDP | 0 | DAP_TRANSFER_A2 | 0;
+    ack = SWD_Transfer(req, &AIRCR_REG_ADDR);
+    if (ack == DAP_TRANSFER_OK) {
+      dap_os_delay(2);
+      req = DAP_TRANSFER_APnDP | 0 | DAP_TRANSFER_A2 | DAP_TRANSFER_A3;
+      SWD_Transfer(req, &AIRCR_RESET_VAL);
+    }
+  }
+#endif
 
 
   *(response+1) = RESET_TARGET();
@@ -421,7 +461,8 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
     return ((4U << 16) | 1U);
   }
 
-  // Note that the maximum IO frequency of esp8266 is less than 2MHz
+  // Note: the supported targets are esp32 (APB 80 MHz), esp32c3 (80 MHz) and
+  // esp32s3 (80 MHz); see BUS_CLOCK_FIXED below.
 
   // clock >= 10MHz -> use 40MHz SPI
   if (clock >= 10000000) {
@@ -447,13 +488,10 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
     SWD_TransferSpeed = kTransfer_GPIO_normal;
 
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-  #define BUS_CLOCK_FIXED 80000000
-#elif defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32S3
-  #define BUS_CLOCK_FIXED 100000000
-#elif defined CONFIG_IDF_TARGET_ESP32C3
-  #define BUS_CLOCK_FIXED 80000000
-#endif
+/* WP-105: the low-speed software delay loop is calibrated against the APB
+ * clock. ESP32/S3 APB is 80 MHz (the tree had 100 MHz here, which made the
+ * generated SWCLK ~25% slower than the host requested). C3 APB is 80 MHz. */
+#define BUS_CLOCK_FIXED 80000000
 
     delay = ((BUS_CLOCK_FIXED/2U) + (clock - 1U)) / clock;
     if (delay > IO_PORT_WRITE_CYCLES) {
@@ -543,6 +581,12 @@ static uint32_t DAP_SWD_Sequence(const uint8_t *request, uint8_t *response) {
   request_count  = 1U;
   response_count = 1U;
 
+  /* WP-105: reject malformed/oversized sequences before touching the target */
+  if (DAP_SequenceRequestIsValid(request, SWD_SEQUENCE_CLK, SWD_SEQUENCE_DIN, 0U) == 0U) {
+    *response = DAP_ERROR;
+    return ((2U << 16) | 1U);
+  }
+
   sequence_count = *request++;
   while (sequence_count--) {
     sequence_info = *request++;
@@ -599,6 +643,12 @@ static uint32_t DAP_JTAG_Sequence(const uint8_t *request, uint8_t *response) {
   request_count  = 1U;
   response_count = 1U;
 
+  /* WP-105: reject malformed/oversized sequences before touching the target */
+  if (DAP_SequenceRequestIsValid(request, JTAG_SEQUENCE_TCK, JTAG_SEQUENCE_TDO, 1U) == 0U) {
+    *response = DAP_ERROR;
+    return ((2U << 16) | 1U);
+  }
+
   sequence_count = *request++;
   while (sequence_count--) {
     sequence_info = *request++;
@@ -637,6 +687,13 @@ static uint32_t DAP_JTAG_Configure(const uint8_t *request, uint8_t *response) {
   uint32_t n;
 
   count = *request++;
+  /* WP-105: a malformed host packet could claim up to 255 devices and write
+   * past DAP_Data.jtag_dev.ir_length[DAP_JTAG_DEV_CNT]. Reject instead. */
+  if (count > DAP_JTAG_DEV_CNT) {
+    DAP_Data.jtag_dev.count = 0U;
+    *response = DAP_ERROR;
+    return (((count + 1U) << 16) | 1U);
+  }
   DAP_Data.jtag_dev.count = (uint8_t)count;
 
   bits = 0U;
@@ -1311,6 +1368,15 @@ static uint32_t DAP_Dummy_Transfer(const uint8_t *request, uint8_t *response) {
 static uint32_t DAP_Transfer(const uint8_t *request, uint8_t *response) {
   uint32_t num;
 
+  /* WP-105: validate the host packet before any target access. A 255-item
+   * read+timestamp transfer would otherwise write ~2 KB into the 512-byte
+   * response buffer (and a write transfer could read past the request). */
+  if (DAP_TransferRequestIsValid(request) == 0U) {
+    *(response + 0) = 0U;        // response count
+    *(response + 1) = DAP_ERROR; // response value
+    return ((2U << 16) | 2U);    // consume index+count only
+  }
+
   switch (DAP_Data.debug_port) {
 #if (DAP_SWD != 0)
     case DAP_PORT_SWD:
@@ -1550,6 +1616,20 @@ end:
 //             number of bytes in request (upper 16 bits)
 static uint32_t DAP_TransferBlock(const uint8_t *request, uint8_t *response) {
   uint32_t num;
+  uint32_t request_count;
+
+  request_count = (uint32_t)(*(request + 1)) | ((uint32_t)(*(request + 2)) << 8);
+
+  /* WP-105: cap request_count so that both the response (read: 3+4*count) and
+   * the request (write: 4+4*count) fit into one DAP packet. The limit is 127
+   * for both directions with DAP_PACKET_SIZE=512; the old code accepted
+   * 0..65535 and could write ~256 KB into a 512-byte response buffer. */
+  if (request_count > ((DAP_PACKET_SIZE - 4U) / 4U)) {
+    *(response + 0) = 0U;        // response count [7:0]
+    *(response + 1) = 0U;        // response count [15:8]
+    *(response + 2) = DAP_ERROR; // response value
+    return ((4U << 16) | 3U);
+  }
 
   switch (DAP_Data.debug_port) {
 #if (DAP_SWD != 0)
@@ -1666,18 +1746,172 @@ static uint32_t DAP_WriteAbort(const uint8_t *request, uint8_t *response) {
 }
 
 
-// Process DAP Vendor command request and prepare response
-// Default function (can be overridden)
-//   request:  pointer to request data
-//   response: pointer to response data
-//   return:   number of bytes in response (lower 16 bits)
-//             number of bytes in request (upper 16 bits)
-__WEAK uint32_t DAP_ProcessVendorCommand(const uint8_t *request, uint8_t *response) {
-  (void)request;
-  *response = ID_DAP_Invalid;
-  return ((1U << 16) | 1U);
+/* WP-105: validate a SWD/JTAG Sequence request (request points at the
+ * sequence_count byte) against a single DAP packet: the request data scan and
+ * the worst-case response must both fit into DAP_PACKET_SIZE. The response of
+ * a Sequence command is 1 status byte + div_round_up(count,8) bytes per
+ * capturing sequence; the old code let a 255-sequence packet write ~2 KB into
+ * a 512-byte response buffer.
+ *   count_mask      - SWD_SEQUENCE_CLK / JTAG_SEQUENCE_TCK
+ *   capture_flag    - SWD_SEQUENCE_DIN / JTAG_SEQUENCE_TDO
+ *   request_always  - 1 for JTAG (TDI bytes always present in the request)
+ *                     0 for SWD (request data only for non-capturing sequences)
+ * return: 1 = valid, 0 = malformed / oversized. */
+static uint8_t DAP_SequenceRequestIsValid(const uint8_t *request,
+                                          uint32_t count_mask,
+                                          uint32_t capture_flag,
+                                          uint8_t request_always)
+{
+  uint32_t sequence_count = *request++;
+  uint32_t request_len = 0U;   /* bytes after sequence_count */
+  uint32_t response_len = 1U;  /* status byte */
+  uint32_t i;
+
+  for (i = 0U; i < sequence_count; i++) {
+    uint32_t info, bytes;
+
+    if (request_len + 1U > DAP_PACKET_SIZE - 2U) {
+      return 0U;
+    }
+    info = request[request_len++];
+    bytes = info & count_mask;
+    bytes = (bytes != 0U) ? ((bytes + 7U) / 8U) : 8U;
+
+    if (request_always != 0U) {
+      if (request_len + bytes > DAP_PACKET_SIZE - 2U) {
+        return 0U;
+      }
+      request_len += bytes;
+      if ((info & capture_flag) != 0U) {
+        response_len += bytes;
+      }
+    } else if ((info & capture_flag) != 0U) {
+      response_len += bytes;
+    } else {
+      if (request_len + bytes > DAP_PACKET_SIZE - 2U) {
+        return 0U;
+      }
+      request_len += bytes;
+    }
+  }
+
+  return ((response_len <= (DAP_PACKET_SIZE - 1U)) &&
+          (request_len <= (DAP_PACKET_SIZE - 2U))) ? 1U : 0U;
 }
 
+/* WP-105: validate a DAP_Transfer request (request points at the DAP index
+ * byte). Walk every request item so that a malformed host packet can neither
+ * read past the request packet nor produce a response larger than one packet.
+ * A read item produces 4 data bytes (+4 timestamp); a write/match item carries
+ * 4 bytes of data in the request. */
+static uint8_t DAP_TransferRequestIsValid(const uint8_t *request)
+{
+  uint32_t count = *(request + 1);
+  uint32_t request_len = 2U;   /* index + count */
+  uint32_t response_len = 2U;  /* response count + response value */
+  uint32_t i;
+
+  for (i = 0U; i < count; i++) {
+    uint8_t value;
+
+    if (request_len + 1U > DAP_PACKET_SIZE - 1U) {
+      return 0U;
+    }
+    value = request[request_len++];
+
+    if ((value & DAP_TRANSFER_RnW) != 0U) {
+      if ((value & DAP_TRANSFER_MATCH_VALUE) != 0U) {
+        /* Read with value match: the match value is in the request and the
+         * matched data is NOT returned in the response (only the status). */
+        if (request_len + 4U > DAP_PACKET_SIZE - 1U) {
+          return 0U;
+        }
+        request_len += 4U;
+      } else {
+        /* Read data (4 bytes) + optional timestamp (4 bytes) */
+        response_len += 4U;
+        if ((value & DAP_TRANSFER_TIMESTAMP) != 0U) {
+          response_len += 4U;
+        }
+      }
+    } else {
+      /* Write data (4 bytes in request); a write with TIMESTAMP also returns
+       * a 4-byte timestamp in the response. */
+      if (request_len + 4U > DAP_PACKET_SIZE - 1U) {
+        return 0U;
+      }
+      request_len += 4U;
+      if (((value & DAP_TRANSFER_MATCH_MASK) == 0U) &&
+          ((value & DAP_TRANSFER_TIMESTAMP) != 0U)) {
+        response_len += 4U;
+      }
+    }
+  }
+
+  if (request_len > DAP_PACKET_SIZE - 1U) {
+    return 0U;
+  }
+  return (response_len <= (DAP_PACKET_SIZE - 1U)) ? 1U : 0U;
+}
+
+/* WP-105: the __WEAK default DAP_ProcessVendorCommand() implementation was
+ * removed (as in the A tree); DAP_vendor.c provides the real handler and the
+ * weak fallback is dead code that hides a missing vendor implementation. */
+
+/* WP-105: conservative worst-case response size (in bytes, including the
+ * command echo byte) of a single DAP command. DAP_ExecuteCommand uses it to
+ * stop before the accumulated 0x7F response overflows the DAP packet. */
+static uint32_t DAP_ResponseMaxSize(const uint8_t *request)
+{
+  uint32_t cmd = request[0];
+  uint32_t count;
+
+  if ((cmd >= ID_DAP_Vendor0) && (cmd <= ID_DAP_Vendor31)) {
+    /* Vendor handler decides its own size (elaphureLink may write a whole
+     * packet); only allow a vendor command as a single command. */
+    return DAP_PACKET_SIZE;
+  }
+
+  switch (cmd) {
+    case ID_DAP_Info:
+      return 2U + 64U; /* echo + length + max string (60 + NUL) */
+    case ID_DAP_Transfer:
+      /* request layout: cmd, DAP index, count, items... */
+      return 3U + ((uint32_t)request[2] * 8U);
+    case ID_DAP_TransferBlock:
+      count = (uint32_t)request[1] | ((uint32_t)request[2] << 8);
+      return ((request[3] & DAP_TRANSFER_RnW) != 0U) ? (3U + count * 4U) : 3U;
+    case ID_DAP_SWD_Sequence:
+    case ID_DAP_JTAG_Sequence:
+      /* echo + status + div_round_up(bits,8) per capturing sequence; upper
+       * bound 8 bytes per sequence (handlers reject anything above a packet) */
+      return 2U + ((uint32_t)request[1] * 8U);
+    case ID_DAP_JTAG_IDCODE:
+      return 6U;
+    case ID_DAP_QueueCommands:
+    case ID_DAP_ExecuteCommands:
+      /* Nested batch commands are handled recursively; the size of their
+       * response is bounded by DAP_PACKET_SIZE (handled one at a time). */
+      return DAP_PACKET_SIZE;
+    case ID_DAP_ResetTarget:
+      return 3U;
+    case ID_DAP_HostStatus:
+    case ID_DAP_Connect:
+    case ID_DAP_Disconnect:
+    case ID_DAP_Delay:
+    case ID_DAP_SWJ_Pins:
+    case ID_DAP_SWJ_Clock:
+    case ID_DAP_SWJ_Sequence:
+    case ID_DAP_SWD_Configure:
+    case ID_DAP_JTAG_Configure:
+    case ID_DAP_TransferConfigure:
+    case ID_DAP_TransferAbort:
+    case ID_DAP_WriteABORT:
+      return 2U;
+    default:
+      return 8U;
+  }
+}
 
 // Process DAP command request and prepare response
 //   request:  pointer to request data
@@ -1759,6 +1993,24 @@ uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
       num = DAP_WriteAbort(request, response);
       break;
 
+    case ID_DAP_TransferAbort:
+      /* WP-105: real 0x07 implementation. The flag was already consumed by
+       * every Transfer retry loop but nothing ever set it; a host calling
+       * DAP_TransferAbort could not actually stop a pending transfer. */
+      DAP_TransferAbort = 1U;
+      *response = DAP_OK;
+      num = 1U;
+      break;
+
+    case ID_DAP_QueueCommands:
+    case ID_DAP_ExecuteCommands:
+      /* WP-105: the USBIP transport rewrites 0x7E to 0x7F and calls
+       * DAP_ProcessCommand directly, so both must be handled here or the
+       * advertised "Atomic Commands" capability is a lie. DAP_ExecuteCommand()
+       * writes the command/count header itself: pass the un-advanced pointers
+       * (request/response were already incremented by the echo). */
+      return DAP_ExecuteCommand(request - 1U, response - 1U);
+
 #if ((SWO_UART != 0) || (SWO_MANCHESTER != 0))
     case ID_DAP_SWO_Transport:
       num = SWO_Transport(request, response);
@@ -1816,19 +2068,37 @@ uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
 //   return:   number of bytes in response (lower 16 bits)
 //             number of bytes in request (upper 16 bits)
 uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response) {
-  uint32_t cnt, num, n;
+  uint32_t cnt, num, n, processed, used;
+  uint8_t *response_count;
 
   if (*request == ID_DAP_ExecuteCommands) {
     *response++ = *request++;
+    response_count = response;  /* count byte written before parsing */
     cnt = *request++;
     *response++ = (uint8_t)cnt;
     num = (2U << 16) | 2U;
+    processed = 0U;
+    used = 2U;                  /* command + count bytes already written */
+
     while (cnt--) {
+      uint32_t max_size = DAP_ResponseMaxSize(request);
+
+      /* WP-105: a batch of individually valid commands can still overflow the
+       * single-packet response. Stop before writing anything for the command
+       * that would exceed DAP_PACKET_SIZE and report the processed count. */
+      if ((max_size > DAP_PACKET_SIZE) || ((used + max_size) > DAP_PACKET_SIZE)) {
+        break;
+      }
+
       n = DAP_ProcessCommand(request, response);
       num += n;
+      used += (uint16_t) n;
+      processed++;
       request  += (uint16_t)(n >> 16);
       response += (uint16_t) n;
     }
+
+    *response_count = (uint8_t)processed;
     return (num);
   }
 

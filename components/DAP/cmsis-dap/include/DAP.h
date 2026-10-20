@@ -345,7 +345,7 @@ extern void     DAP_Setup (void);
       ;
   }
 #else
-  #if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32S3
+  #if defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32S3
 __STATIC_FORCEINLINE void PIN_DELAY_SLOW(int32_t delay)
 {
   __asm__ volatile(
@@ -372,14 +372,30 @@ __STATIC_FORCEINLINE void PIN_DELAY_SLOW(int32_t delay)
 #define DELAY_FAST_CYCLES       0U      // Number of cycles: 0..3
 #endif
 __STATIC_FORCEINLINE void PIN_DELAY_FAST (void) {
-#if (DELAY_FAST_CYCLES >= 1U)
+#if defined CONFIG_IDF_TARGET_ESP32S3
+  // A 2025 fork: 10 cycles -> about 24 MHz SWCLK in the no-delay branch
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+#elif defined CONFIG_IDF_TARGET_ESP32C3
+  // A 2025 fork: 6 cycles -> about 26.67 MHz (RISC-V)
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+#elif (DELAY_FAST_CYCLES >= 1U)
   __NOP();
-#endif
 #if (DELAY_FAST_CYCLES >= 2U)
   __NOP();
 #endif
 #if (DELAY_FAST_CYCLES >= 3U)
   __NOP();
+#endif
 #endif
 }
 

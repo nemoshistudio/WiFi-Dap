@@ -7,12 +7,16 @@
  *          2021-3-10 Support 3-wire SPI
  *          2022-9-15 Support ESP32C3
  *          2024-6-9  Fix DAP_SPI_WriteBits issue
- * @version 0.5
- * @date 2024-6-9
+ *          2026-10   WP-104 merge: fix the ReadBits final-byte mask and the
+ *                    WriteBits FIFO word-count/uint8 truncation, drop ESP8266
+ * @version 0.6
+ * @date 2026-10-20
  *
  * @copyright MIT License
  *
  */
+
+#include "sdkconfig.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -25,29 +29,16 @@
 #include "cmsis-dap/include/spi_switch.h"
 #include "cmsis-dap/include/gpio_common.h"
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-    #define DAP_SPI SPI1
-#elif defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
     #define DAP_SPI SPI2
-#elif defined CONFIG_IDF_TARGET_ESP32C3
+#elif defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3
     #define DAP_SPI GPSPI2
-#elif defined CONFIG_IDF_TARGET_ESP32S3
-	#define DAP_SPI GPSPI2
 #else
-    #error unknown hardware
+    #error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 only"
 #endif
 
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-    #define SET_MOSI_BIT_LEN(x) DAP_SPI.user1.usr_mosi_bitlen = x
-    #define SET_MISO_BIT_LEN(x) DAP_SPI.user1.usr_miso_bitlen = x
-    #define START_AND_WAIT_SPI_TRANSMISSION_DONE() \
-        do {                                       \
-            DAP_SPI.cmd.usr = 1;                   \
-            while (DAP_SPI.cmd.usr) continue;      \
-        } while(0)
-
-#elif defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
     #define SET_MOSI_BIT_LEN(x) DAP_SPI.mosi_dlen.usr_mosi_dbitlen = x
     #define SET_MISO_BIT_LEN(x) DAP_SPI.miso_dlen.usr_miso_dbitlen = x
     #define START_AND_WAIT_SPI_TRANSMISSION_DONE() \
@@ -83,14 +74,30 @@ __STATIC_FORCEINLINE int div_round_up(int A, int B)
 
 /**
  * @brief Write bits. LSB & little-endian
- *        Note: No check. The pointer must be valid.
- * @param count Number of bits to be written (<= 64 bits, no length check)
- * @param buf Data Buf
+ *
+ * WP-104 fixes (inherited from the reference implementation):
+ *  1. `data_buf` is a uint32_t[16] FIFO (64 bytes), so the number of 32-bit
+ *     words to write is div_round_up(div_round_up(count, 8), 4), not
+ *     div_round_up(count, 8). The old code wrote up to 32 words for
+ *     count > 128 bits and corrupted the SPI register block.
+ *  2. `count` used to be a uint8_t, so DAP_SWJ_Sequence(count=256 -> byte 0)
+ *     truncated to 0 and sent stale FIFO data with a 255-bit length. The
+ *     parameter is now uint32_t and the caller-visible range is clamped to
+ *     DAP_SPI_WRITE_BITS_MAX (the hardware FIFO is 64 bytes = 512 bits).
+ *  3. The staging buffer is zero-initialised (count is not a multiple of 32
+ *     bits, the unused FIFO bits must not be stale stack data).
+ *
+ * @param count Number of bits to be written, 1..DAP_SPI_WRITE_BITS_MAX
+ * @param buf   Data buffer (>= div_round_up(count,8) bytes)
  */
-void DAP_SPI_WriteBits(const uint8_t count, const uint8_t *buf)
+void DAP_SPI_WriteBits(uint32_t count, const uint8_t *buf)
 {
-    uint32_t data[16];
-    int nbytes, i;
+    uint32_t data[16] = {0};
+    uint32_t nbytes, nwords, i;
+
+    if (count == 0U || count > DAP_SPI_WRITE_BITS_MAX || buf == NULL) {
+        return;
+    }
 
     DAP_SPI.user.usr_command = 0;
     DAP_SPI.user.usr_addr = 0;
@@ -98,12 +105,13 @@ void DAP_SPI_WriteBits(const uint8_t count, const uint8_t *buf)
     // have data to send
     DAP_SPI.user.usr_mosi = 1;
     DAP_SPI.user.usr_miso = 0;
-    SET_MOSI_BIT_LEN(count - 1);
+    SET_MOSI_BIT_LEN(count - 1U);
 
-    nbytes = div_round_up(count, 8);
+    nbytes = (uint32_t)div_round_up((int)count, 8);
     memcpy(data, buf, nbytes);
 
-    for (i = 0; i < nbytes; i++) {
+    nwords = (uint32_t)div_round_up((int)nbytes, 4);
+    for (i = 0; i < nwords; i++) {
         DAP_SPI.data_buf[i] = data[i];
     }
 
@@ -114,15 +122,24 @@ void DAP_SPI_WriteBits(const uint8_t count, const uint8_t *buf)
 
 /**
  * @brief Read bits. LSB & little-endian
- *        Note: No check. The pointer must be valid.
- * @param count Number of bits to be read (<= 64 bits, no length check)
- * @param buf Data Buf
+ *
+ * WP-104 fix: the final-byte mask used to be ((2 >> (count % 8)) - 1), which
+ * returned 1 for count%8==0 (8/16/32/64-bit reads - the common case), 0 for
+ * count%8==1 and 0xFF for count%8>=2. It is now ((1 << (count%8)) - 1) with
+ * 0xFF for a whole-byte remainder, so DAP_SWD_Sequence reads are correct.
+ *
+ * @param count Number of bits to be read, 1..DAP_SPI_READ_BITS_MAX (64)
+ * @param buf   Data buffer (>= div_round_up(count,8) bytes)
  */
-void DAP_SPI_ReadBits(const uint8_t count, uint8_t *buf) {
-    int i;
+void DAP_SPI_ReadBits(uint32_t count, uint8_t *buf) {
+    uint32_t i, nbytes;
     uint32_t data_buf[2];
 
     uint8_t * pData = (uint8_t *)data_buf;
+
+    if (count == 0U || count > DAP_SPI_READ_BITS_MAX || buf == NULL) {
+        return;
+    }
 
     DAP_SPI.user.usr_mosi = 0;
     DAP_SPI.user.usr_miso = 1;
@@ -142,15 +159,19 @@ void DAP_SPI_ReadBits(const uint8_t count, uint8_t *buf) {
     data_buf[0] = DAP_SPI.data_buf[0];
     data_buf[1] = DAP_SPI.data_buf[1];
 
-    for (i = 0; i < div_round_up(count, 8); i++)
+    nbytes = (uint32_t)div_round_up((int)count, 8);
+    for (i = 0; i < nbytes; i++)
     {
         buf[i] = pData[i];
     }
-    // last byte use mask:
-    buf[i-1] = buf[i-1] & ((2 >> (count % 8)) - 1);
+    // last byte use mask: keep only the meaningful low bits (count%8 == 0
+    // means the last byte is full -> 0xFF)
+    if ((count % 8U) != 0U) {
+        buf[nbytes - 1U] &= (uint8_t)((1U << (count % 8U)) - 1U);
+    }
 }
 
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
 /**
  * @brief Step1: Packet Request
  *
@@ -186,7 +207,7 @@ __FORCEINLINE void DAP_SPI_Send_Header(const uint8_t packetHeaderData, uint8_t *
 
     dataBuf = DAP_SPI.data_buf[0];
     *ack = (dataBuf >> 1) & 0b111;
-} // defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
+} // defined CONFIG_IDF_TARGET_ESP32
 #elif defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3
 __FORCEINLINE void DAP_SPI_Send_Header(const uint8_t packetHeaderData, uint8_t *ack, uint8_t TrnAfterACK)
 {
@@ -257,7 +278,7 @@ __FORCEINLINE void DAP_SPI_Read_Data(uint32_t *resData, uint8_t *resParity)
     *resParity = (dataBuf >> (0U + 32U)) & 1U; // 1bit parity
 }
 
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
 /**
  * @brief Step2: Write Data
  *
@@ -294,7 +315,7 @@ __FORCEINLINE void DAP_SPI_Write_Data(uint32_t data, uint8_t parity)
 #endif
 
 
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32S3
+#if defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32S3
 /**
  * @brief Generate Clock Cycle
  *

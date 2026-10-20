@@ -32,11 +32,21 @@
  * @change: 2021-2-10 Support GPIO and SPI
  *          2021-2-18 Try to support SWO
  *          2024-1-28 Update to CMSIS-DAP v2.1.0
- * @version 0.3
- * @date 2024-1-28
+ * @version 0.4
+ * @date 2026-10-20
  *
- * @copyright Copyright (c) 2021-2024
+ * @copyright Copyright (c) 2021-2026
  *
+ * WP-101 merge (A 2025 fork + C IDF5 baseline):
+ *  - Board pins come from components/board/include/birdiebot_board.h only
+ *    (no more per-target PIN_* pin tables in this file).
+ *  - A's dedicated-GPIO hooks (SWCLK_SET/SWDIO_SET/...), SWDIO direction
+ *    control, pad drive strength and DAP.h low-speed timing fixes are kept.
+ *  - C's IDF5 API forms and rtc/esp_timer based timestamp are adapted: the
+ *    timestamp source is esp_timer_get_time() (1 us ticks) so that
+ *    TIMESTAMP_CLOCK and TIMESTAMP_GET share one unit (DAP_SWJ_Pins wait).
+ *  - C3 CPU_CLOCK typo fixed (160 MHz), DEFAULT SWJ clock = 1 MHz.
+ *  - ESP8266 support removed.
  */
 
 
@@ -48,21 +58,29 @@
 
 #include "main/dap_configuration.h"
 
+/* Single source of truth for SWD/JTAG/LED pins (WP-006 / docs/board-pins.md).
+ * Requires "board" and "esp_timer" in components/DAP/CMakeLists.txt REQUIRES. */
+#include "birdiebot_board.h"
+
 #include "cmsis-dap/include/cmsis_compiler.h"
 #include "cmsis-dap/include/gpio_op.h"
 #include "cmsis-dap/include/spi_switch.h"
 
-#include <soc/rtc.h>
+/* TIMESTAMP_GET() source: esp_timer_get_time() returns microseconds */
+#include "esp_timer.h"
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-  #include "gpio.h"
-  #include "esp8266/include/esp8266/gpio_struct.h"
-  #include "esp8266/pin_mux_register.h"
-#elif defined CONFIG_IDF_TARGET_ESP32
-#elif defined CONFIG_IDF_TARGET_ESP32C3
-#elif defined CONFIG_IDF_TARGET_ESP32S3
-#else
-  #error unknown hardware
+#if !defined CONFIG_IDF_TARGET_ESP32 && !defined CONFIG_IDF_TARGET_ESP32C3 && !defined CONFIG_IDF_TARGET_ESP32S3
+  #error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 only (ESP8266 was removed)"
+#endif
+
+/* The selected board must match the IDF target (Kconfig already restricts the
+ * choices; this catches a stale sdkconfig after set-target). */
+#if defined CONFIG_IDF_TARGET_ESP32 && (BIRDIEBOT_BOARD_TARGET_ID != 1)
+  #error "selected board is not an ESP32 board"
+#elif defined CONFIG_IDF_TARGET_ESP32C3 && (BIRDIEBOT_BOARD_TARGET_ID != 2)
+  #error "selected board is not an ESP32-C3 board"
+#elif defined CONFIG_IDF_TARGET_ESP32S3 && (BIRDIEBOT_BOARD_TARGET_ID != 3)
+  #error "selected board is not an ESP32-S3 board"
 #endif
 
 
@@ -91,14 +109,14 @@ This information includes:
 
 /// Processor Clock of the Cortex-M MCU used in the Debug Unit.
 /// This value is used to calculate the SWD/JTAG clock speed.
-#ifdef CONFIG_IDF_TARGET_ESP8266
-  #define CPU_CLOCK 160000000 ///< Specifies the CPU Clock in Hz.
-  // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<160MHz
-#elif defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
   #define CPU_CLOCK 240000000
   // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<240MHz
 #elif defined CONFIG_IDF_TARGET_ESP32C3
-  #define CPU_CLOCK 16000000
+  /* WP-101: the C tree had 16000000 (16 MHz) here, a typo. The C3 CPU runs at
+   * 160 MHz; this value feeds Delayms()/CLOCK_DELAY() and the default SWD
+   * clock calculation. */
+  #define CPU_CLOCK 160000000
   // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<160MHz
 #elif defined CONFIG_IDF_TARGET_ESP32S3
   #define CPU_CLOCK 240000000
@@ -135,8 +153,13 @@ This information includes:
 /// Default communication speed on the Debug Access Port for SWD and JTAG mode.
 /// Used to initialize the default SWD/JTAG clock frequency.
 /// The command \ref DAP_SWJ_Clock can be used to overwrite this default setting.
-#define DAP_DEFAULT_SWJ_CLOCK 1000000U ///< Default SWD/JTAG clock frequency in Hz.
-// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<1MHz
+/* Project contract (docs/board-pins.md §5): 1 MHz default, NOT the fork's
+ * 4 MHz debug value. Keep a literal fallback in case an old board header is
+ * used without the board contract macro. */
+#ifndef BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ
+  #define BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 1000000U
+#endif
+#define DAP_DEFAULT_SWJ_CLOCK BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ ///< Default SWD/JTAG clock frequency in Hz.
 
 /// Maximum Package Buffers for Command and Response data.
 /// This configuration settings is used to optimize the communication performance with the
@@ -173,8 +196,11 @@ This information includes:
 #define SWO_STREAM SWO_FUNCTION_ENABLE ///< SWO Streaming Trace: 1 = available, 0 = not available.
 
 /// Clock frequency of the Test Domain Timer. Timer value is returned with \ref TIMESTAMP_GET.
-#define TIMESTAMP_CLOCK 5000000U ///< Timestamp clock in Hz (0 = timestamps not supported).
-// <<<<<<<<<<<<<<<<<<<<<5MHz
+/// WP-101: TIMESTAMP_GET() now returns esp_timer_get_time() microseconds, so the
+/// declared clock must be 1 MHz (it used to claim 5 MHz while rtc_time_get()
+/// returned RTC slow-clock ticks, i.e. a ~150x unit mismatch in SWJ_Pins waits).
+#define TIMESTAMP_CLOCK 1000000U ///< Timestamp clock in Hz (0 = timestamps not supported).
+// <<<<<<<<<<<<<<<<<<<<<1MHz
 
 /// Indicate that UART Communication Port is available.
 /// This information is returned by the command \ref DAP_Info as part of <b>Capabilities</b>.
@@ -201,8 +227,8 @@ This information includes:
 
 #define TARGET_DEVICE_VENDOR    ""                 ///< String indicating the Silicon Vendor
 #define TARGET_DEVICE_NAME      ""                 ///< String indicating the Target Device
-#define TARGET_BOARD_VENDOR     "kerms"       ///< String indicating the Board Vendor
-#define TARGET_BOARD_NAME       "ESP wireless tool" ///< String indicating the Board Name
+#define TARGET_BOARD_VENDOR     "WiFi Dap"          ///< String indicating the Board Vendor
+#define TARGET_BOARD_NAME       "WiFi Dap" ///< String indicating the Board Name
 
 #if TARGET_FIXED != 0
 #include <string.h>
@@ -342,55 +368,23 @@ __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
 ///@}
 
 
-// Note: DO NOT modify these pins: PIN_SWDIO  PIN_SWDIO_MOSI  PIN_SWCLK
-// Modify the following pins carefully: PIN_TDO
-#ifdef CONFIG_IDF_TARGET_ESP8266
-  #define PIN_SWDIO 12      // SPI MISO
-  #define PIN_SWDIO_MOSI 13 // SPI MOSI
-  #define PIN_SWCLK 14
-  #define PIN_TDO 16        // device TDO -> Host Data Input (use RTC pin 16)
-  #define PIN_TDI 4
-  #define PIN_nTRST 0       // optional
-  #define PIN_nRESET 5
-
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
-#elif defined CONFIG_IDF_TARGET_ESP32
-  #define PIN_SWDIO 12      // SPI MISO
-  #define PIN_SWDIO_MOSI 13 // SPI MOSI
-  #define PIN_SWCLK 14
-  #define PIN_TDO 19        // device TDO -> Host Data Input
-  #define PIN_TDI 18
-  #define PIN_nTRST 25       // optional
-  #define PIN_nRESET 26
-
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
-#elif defined CONFIG_IDF_TARGET_ESP32C3
-  #define PIN_SWDIO _      // SPI MISO
-  #define PIN_SWDIO_MOSI 7 // SPI MOSI
-  #define PIN_SWCLK 6
-  #define PIN_TDO 3        // device TDO -> Host Data Input
-  #define PIN_TDI 5
-  #define PIN_nTRST 4       // optional
-  #define PIN_nRESET 10
-
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
-#elif defined CONFIG_IDF_TARGET_ESP32S3
-  #define PIN_SWDIO _      // SPI MISO
-  #define PIN_SWDIO_MOSI 11 // SPI MOSI
-  #define PIN_SWCLK 12
-  #define PIN_TDO 9        // device TDO -> Host Data Input
-  #define PIN_TDI 10
-  #define PIN_nTRST 14       // optional
-  #define PIN_nRESET 13
-
-  #define PIN_LED_CONNECTED _ // won't be used
-  #define PIN_LED_RUNNING _ // won't be used
-#else
-#error "not a supported target"
-#endif
+/*
+ * Pin assignment (WP-101):
+ *   PIN_SWCLK, PIN_SWDIO_MOSI, PIN_TDO, PIN_TDI, PIN_nTRST, PIN_nRESET,
+ *   PIN_LED_CONNECTED, PIN_LED_RUNNING, BIRDIEBOT_BOARD_HAS_STATUS_LEDS
+ * are provided by components/board/include/birdiebot_board.h according to the
+ * Kconfig-selected board. Do not add per-target pin tables here: the build
+ * must not hard-code pins outside components/board/boards/<board>.h
+ * (docs/board-pins.md §2 "宏命名契约").
+ *
+ * Notes:
+ *  - USE_SPI_SIO=1 (main/dap_configuration.h) means the SWDIO pin is a single
+ *    bidirectional line: input sampling and output driving both use
+ *    PIN_SWDIO_MOSI. PIN_SWDIO is only a compatibility alias in the board
+ *    header (the A fork's separate ESP32 MISO pin is not used).
+ *  - LED macros are "_" (undeclared) on boards without LEDs: always guard with
+ *    BIRDIEBOT_BOARD_HAS_STATUS_LEDS / BIRDIEBOT_BOARD_HAS_WIFI_LED.
+ */
 
 
 //**************************************************************************************************
@@ -435,72 +429,22 @@ of the same I/O port. The following SWDIO I/O Pin functions are provided:
  * - TDO to ***input*** mode.
  *
  */
-#ifdef CONFIG_IDF_TARGET_ESP8266
 __STATIC_INLINE void PORT_JTAG_SETUP(void)
 {
-  gpio_pin_reg_t pin_reg;
+  /* WP-101: never inherit the SPI/IO_MUX state from a previous SWD session.
+   * DAP_SPI_Deinit() puts SWCLK/SWDIO back to GPIO mode and (on C3/S3) maps
+   * them to the CPU dedicated-GPIO channels used by the PIN_* accessors below;
+   * without this, JTAG cold-start on S3/C3 would write CPU GPIO registers that
+   * are not routed to the pads (analysis R9). */
+  DAP_SPI_Deinit();
 
-
-  // set TCK, TMS pin
-  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_GPIO14); // GPIO14 is SPI CLK pin (Clock)
-  GPIO.enable_w1ts |= (0x1 << 14); // PP Output
-  pin_reg.val = READ_PERI_REG(GPIO_PIN_REG(14));
-  pin_reg.pullup = 1;
-  WRITE_PERI_REG(GPIO_PIN_REG(14), pin_reg.val);
-
-  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTCK_U, FUNC_GPIO13); // GPIO13 is SPI MOSI pin (Master Data Out)
-  GPIO.enable_w1ts |= (0x1 << 13);
-  GPIO.pin[13].driver = 1; // OD output
-  pin_reg.val = READ_PERI_REG(GPIO_PIN_REG(13));
-  pin_reg.pullup = 0;
-  WRITE_PERI_REG(GPIO_PIN_REG(13), pin_reg.val);
-
-
-  // use RTC pin 16
-  // output disable
-  WRITE_PERI_REG(PAD_XPD_DCDC_CONF, ((READ_PERI_REG(PAD_XPD_DCDC_CONF) & (uint32_t)0xffffffbc)) | (uint32_t)0x1); 	// mux configuration for XPD_DCDC and rtc_gpio0 connection
-  CLEAR_PERI_REG_MASK(RTC_GPIO_CONF, 0x1);    // mux configuration for out enable
-  CLEAR_PERI_REG_MASK(RTC_GPIO_ENABLE, 0x1);  // out disable
-  // pulldown disable
-  pin_reg.val = READ_PERI_REG(GPIO_PIN_REG(PIN_TDO));
-  pin_reg.rtc_pin.pulldown = 0;
-  WRITE_PERI_REG(GPIO_PIN_REG(PIN_TDO), pin_reg.val);
-
-
-
-  // gpio_set_direction(PIN_TDI, GPIO_MODE_OUTPUT);
-  GPIO.enable_w1ts |= (0x1 << PIN_TDI);
-  GPIO.pin[PIN_TDI].driver = 0;
-  pin_reg.val = READ_PERI_REG(GPIO_PIN_REG(PIN_TDI));
-  pin_reg.pullup = 0;
-  WRITE_PERI_REG(GPIO_PIN_REG(PIN_TDI), pin_reg.val);
-
-  // gpio_set_direction(PIN_nTRST, GPIO_MODE_OUTPUT_OD);
-  // gpio_set_direction(PIN_nRESET, GPIO_MODE_OUTPUT_OD);
-  GPIO.enable_w1tc |= (0x1 << PIN_nTRST);
-  GPIO.pin[PIN_nTRST].driver = 1;
-  GPIO.enable_w1tc |= (0x1 << PIN_nRESET);
-  GPIO.pin[PIN_nRESET].driver = 1;
-
-  // gpio_set_pull_mode(PIN_nTRST, GPIO_PULLUP_ONLY);
-  // gpio_set_pull_mode(PIN_nRESET, GPIO_PULLUP_ONLY);
-  GPIO_PULL_UP_ONLY_SET(PIN_nTRST);
-  GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-}
-#elif defined CONFIG_IDF_TARGET_ESP32
-__STATIC_INLINE void PORT_JTAG_SETUP(void)
-{
-  // set TCK, TMS pin
-  //// FIXME: esp32
-  //DAP_SPI_Deinit();
-
-
+  /* TCK/TMS are the shared SWCLK/SWDIO pins and are already configured by
+   * DAP_SPI_Deinit(); configure the JTAG-only pins here. */
+#if defined CONFIG_IDF_TARGET_ESP32
   // PIN_TDO output disable
   GPIO.enable_w1tc = (0x1 << PIN_TDO);
   // PIN_TDO input enable
   PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_TDO]);
-
-
 
   // gpio_set_direction(PIN_TDI, GPIO_MODE_OUTPUT);
   GPIO.enable_w1ts = (0x1 << PIN_TDI);
@@ -518,19 +462,11 @@ __STATIC_INLINE void PORT_JTAG_SETUP(void)
   // gpio_set_pull_mode(PIN_nRESET, GPIO_PULLUP_ONLY);
   GPIO_PULL_UP_ONLY_SET(PIN_nTRST);
   GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-}
 #elif defined CONFIG_IDF_TARGET_ESP32C3
-__STATIC_INLINE void PORT_JTAG_SETUP(void)
-{
-  // set TCK, TMS pin
-
-
   // PIN_TDO output disable
   GPIO.enable_w1tc.enable_w1tc = (0x1 << PIN_TDO);
   // PIN_TDO input enable
   PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_TDO]);
-
-
 
   // gpio_set_direction(PIN_TDI, GPIO_MODE_OUTPUT);
   GPIO.enable_w1ts.enable_w1ts = (0x1 << PIN_TDI);
@@ -548,31 +484,26 @@ __STATIC_INLINE void PORT_JTAG_SETUP(void)
   // gpio_set_pull_mode(PIN_nRESET, GPIO_PULLUP_ONLY);
   GPIO_PULL_UP_ONLY_SET(PIN_nTRST);
   GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-}
 #elif defined CONFIG_IDF_TARGET_ESP32S3
-__STATIC_INLINE void PORT_JTAG_SETUP(void)
-{
-	// set TCK, TMS pin
+  // PIN_TDO output disable
+  gpio_ll_output_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDO);
+  // PIN_TDO input enable
+  gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDO);
 
-	// PIN_TDO output disable
-	gpio_ll_output_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDO);
-	// PIN_TDO input enable
-	gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDO);
+  // PIN_TDI output
+  gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDI);
+  gpio_ll_od_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDI);
+  gpio_ll_pulldown_dis(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDI);
 
-	// PIN_TDI output
-	gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDI);
-	gpio_ll_od_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDI);
-	gpio_ll_pulldown_dis(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDI);
+  gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nTRST);
+  gpio_ll_od_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nTRST);
+  gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
+  gpio_ll_od_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
 
-	gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nTRST);
-	gpio_ll_od_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nTRST);
-	gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
-	gpio_ll_od_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
-
-	GPIO_PULL_UP_ONLY_SET(PIN_nTRST);
-	GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-}
+  GPIO_PULL_UP_ONLY_SET(PIN_nTRST);
+  GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
 #endif
+}
 
 /**
  * @brief Setup SWD I/O pins: SWCLK, SWDIO, and nRESET.
@@ -598,17 +529,11 @@ __STATIC_INLINE void PORT_SWD_SETUP(void)
  */
 __STATIC_INLINE void PORT_OFF(void)
 {
-  // Will be called when the DAP disconnected
-  DAP_SPI_Disable();
-
-#if defined CONFIG_IDF_TARGET_ESP8266
-  // gpio_set_direction(PIN_nRESET, GPIO_MODE_OUTPUT_OD);
-  GPIO.enable_w1tc |= (0x1 << PIN_nRESET);
-  GPIO.pin[PIN_nRESET].driver = 1;
-
-  // gpio_set_pull_mode(PIN_nRESET, GPIO_PULLUP_ONLY);
-  GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-#elif defined CONFIG_IDF_TARGET_ESP32
+  // Will be called when the DAP disconnected.
+  // WP-101: DAP_SPI_Disable() was a no-op and was removed together with
+  // DAP_SPI_Enable() (WP-103). The pins are put back to GPIO mode by
+  // DAP_SPI_Deinit() on the next SWJ_Clock/Connect.
+#if defined CONFIG_IDF_TARGET_ESP32
   // gpio_set_direction(PIN_nRESET, GPIO_MODE_OUTPUT_OD);
   GPIO.enable_w1tc = (0x1 << PIN_nRESET);
   GPIO.pin[PIN_nRESET].pad_driver = 1;
@@ -650,7 +575,12 @@ __STATIC_FORCEINLINE uint32_t PIN_SWCLK_TCK_IN(void)
  */
 __STATIC_FORCEINLINE void PIN_SWCLK_TCK_SET(void)
 {
+#if defined SWCLK_SET
+  // A 2025 fork: CPU dedicated-GPIO single-instruction output (S3 ee.* / C3 CSR)
+  SWCLK_SET();
+#else
   GPIO_SET_LEVEL_HIGH(PIN_SWCLK);
+#endif
 }
 
 /**
@@ -660,7 +590,11 @@ __STATIC_FORCEINLINE void PIN_SWCLK_TCK_SET(void)
  */
 __STATIC_FORCEINLINE void PIN_SWCLK_TCK_CLR(void)
 {
+#if defined SWCLK_CLR
+  SWCLK_CLR();
+#else
   GPIO_SET_LEVEL_LOW(PIN_SWCLK);
+#endif
 }
 
 // SWDIO/TMS Pin I/O --------------------------------------
@@ -672,8 +606,12 @@ __STATIC_FORCEINLINE void PIN_SWCLK_TCK_CLR(void)
  */
 __STATIC_FORCEINLINE uint32_t PIN_SWDIO_TMS_IN(void)
 {
-  // Note that we only use mosi in GPIO mode
+  // Note that we only use mosi in GPIO mode (USE_SPI_SIO=1 / single-wire SWDIO)
+#if defined SWDIO_GET_IN
+  return SWDIO_GET_IN();
+#else
   return GPIO_GET_LEVEL(PIN_SWDIO_MOSI);
+#endif
 }
 
 /**
@@ -683,7 +621,11 @@ __STATIC_FORCEINLINE uint32_t PIN_SWDIO_TMS_IN(void)
  */
 __STATIC_FORCEINLINE void PIN_SWDIO_TMS_SET(void)
 {
+#if defined SWDIO_SET
+  SWDIO_SET();
+#else
   GPIO_SET_LEVEL_HIGH(PIN_SWDIO_MOSI);
+#endif
 }
 
 /**
@@ -693,7 +635,11 @@ __STATIC_FORCEINLINE void PIN_SWDIO_TMS_SET(void)
  */
 __STATIC_FORCEINLINE void PIN_SWDIO_TMS_CLR(void)
 {
+#if defined SWDIO_CLR
+  SWDIO_CLR();
+#else
   GPIO_SET_LEVEL_LOW(PIN_SWDIO_MOSI);
+#endif
 }
 
 /**
@@ -703,8 +649,7 @@ __STATIC_FORCEINLINE void PIN_SWDIO_TMS_CLR(void)
  */
 __STATIC_FORCEINLINE uint32_t PIN_SWDIO_IN(void)
 {
-  // Note that we only use mosi in GPIO mode
-  return GPIO_GET_LEVEL(PIN_SWDIO_MOSI);
+  return PIN_SWDIO_TMS_IN();
 }
 
 /**
@@ -722,15 +667,11 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT(uint32_t bit)
 	  */
   if ((bit & 1U) == 1)
   {
-    //set bit
-    GPIO_SET_LEVEL_HIGH(PIN_SWDIO_MOSI);
-
+    PIN_SWDIO_TMS_SET();
   }
   else
   {
-    //reset bit
-    GPIO_SET_LEVEL_LOW(PIN_SWDIO_MOSI);
-
+    PIN_SWDIO_TMS_CLR();
   }
 }
 
@@ -742,10 +683,18 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT(uint32_t bit)
 __STATIC_FORCEINLINE void PIN_SWDIO_OUT_ENABLE(void)
 {
   // set \ref gpio_set_direction -> OUTPUT
-  // GPIO.enable_w1ts |= (0x1 << PIN_SWDIO_MOSI);
-  // GPIO.pin[PIN_SWDIO_MOSI].driver = 0;
-  do {}while (0);
-
+#if defined CONFIG_IDF_TARGET_ESP32
+  GPIO.enable_w1ts = (0x01 << PIN_SWDIO_MOSI);
+#elif defined CONFIG_IDF_TARGET_ESP32C3
+  // A 2025 fork: dedicated-GPIO OEN user CSR bit 0
+  SWDIO_OUT_ENABLE();
+#elif defined CONFIG_IDF_TARGET_ESP32S3
+  /* WP-101: the fork left this empty. DAP_SPI_Deinit() routes SWDIO to
+   * CORE1_GPIO_OUT0 and selects the GPIO peripheral as pad OEN source
+   * (oen_sel=1), so the pad output enable must be toggled here during the SWD
+   * turnaround; otherwise host and target both drive SWDIO (analysis R2). */
+  gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
+#endif
 }
 
 /**
@@ -755,25 +704,19 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT_ENABLE(void)
  */
 __STATIC_FORCEINLINE void PIN_SWDIO_OUT_DISABLE(void)
 {
-  // may be unuse.
-  // set \ref gpio_set_dircetion -> INPUT
-  // esp8266 input is always connected
-  // GPIO.enable_w1tc |= (0x1 << PIN_SWDIO_MOSI);
-  // GPIO.pin[PIN_SWDIO_MOSI].driver = 0;
-#ifdef CONFIG_IDF_TARGET_ESP8266
-  GPIO.out_w1ts |= (0x1 << PIN_SWDIO_MOSI);
-#elif defined CONFIG_IDF_TARGET_ESP32
+  // set \ref gpio_set_direction -> INPUT
+#if defined CONFIG_IDF_TARGET_ESP32
   // Note that the input of esp32 is not always connected.
   PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI]);
-  GPIO.out_w1ts = (0x1 << PIN_SWDIO_MOSI);
+  GPIO.enable_w1tc = (0x01 << PIN_SWDIO_MOSI);
 #elif defined CONFIG_IDF_TARGET_ESP32C3
-  // Note that the input of esp32c3 is not always connected.
+  // A 2025 fork: dedicated-GPIO OEN user CSR bit 0
+  SWDIO_OUT_DISABLE();
   PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI]);
-  GPIO.out_w1ts.out_w1ts = (0x1 << PIN_SWDIO_MOSI);
 #elif defined CONFIG_IDF_TARGET_ESP32S3
-	// Note that the input is not always connected.
-	gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
-	gpio_ll_set_level(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, 1);
+  // Release the pad: SWDIO becomes input only during the ACK / data phase.
+  gpio_ll_output_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
+  gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
 #endif
 }
 
@@ -818,11 +761,9 @@ __STATIC_FORCEINLINE void PIN_TDI_OUT(uint32_t bit)
  */
 __STATIC_FORCEINLINE uint32_t PIN_TDO_IN(void)
 {
-#ifdef CONFIG_IDF_TARGET_ESP8266
-  return READ_PERI_REG(RTC_GPIO_IN_DATA) & 0x1;
-#elif defined CONFIG_IDF_TARGET_ESP32
+#if defined CONFIG_IDF_TARGET_ESP32
   return ((GPIO.in >> PIN_TDO) & 0x1) ? 1 : 0;
-#elif defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3
+#else
   return GPIO_GET_LEVEL(PIN_TDO);
 #endif
 }
@@ -879,8 +820,8 @@ __STATIC_FORCEINLINE void PIN_nRESET_OUT(uint32_t bit)
   {
     //set bit
     GPIO_SET_LEVEL_HIGH(PIN_nRESET);
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
-    GPIO.enable_w1tc |= (0x01 << PIN_nRESET);
+#if defined CONFIG_IDF_TARGET_ESP32
+    GPIO.enable_w1tc = (0x01 << PIN_nRESET);
 #elif defined CONFIG_IDF_TARGET_ESP32C3
     GPIO.enable_w1tc.enable_w1tc |= (0x01 << PIN_nRESET);
 #elif defined CONFIG_IDF_TARGET_ESP32S3
@@ -890,8 +831,8 @@ __STATIC_FORCEINLINE void PIN_nRESET_OUT(uint32_t bit)
   else
   {
     //reset bit
-#if defined CONFIG_IDF_TARGET_ESP8266 || defined CONFIG_IDF_TARGET_ESP32
-    GPIO.enable_w1ts |= (0x01 << PIN_nRESET);
+#if defined CONFIG_IDF_TARGET_ESP32
+    GPIO.enable_w1ts = (0x01 << PIN_nRESET);
 #elif defined CONFIG_IDF_TARGET_ESP32C3
     GPIO.enable_w1ts.enable_w1ts |= (0x01 << PIN_nRESET);
 #elif defined CONFIG_IDF_TARGET_ESP32S3
@@ -931,7 +872,19 @@ It is recommended to provide the following LEDs for status indication:
  */
 __STATIC_INLINE void LED_CONNECTED_OUT(uint32_t bit)
 {
+#if BIRDIEBOT_BOARD_HAS_STATUS_LEDS
+  if (bit)
+  {
+    GPIO_SET_LEVEL_HIGH(PIN_LED_CONNECTED);
+  }
+  else
+  {
+    GPIO_SET_LEVEL_LOW(PIN_LED_CONNECTED);
+  }
+#else
+  /* no Connected LED on the selected board */
   (void)(bit);
+#endif
 }
 
 /**
@@ -943,17 +896,19 @@ __STATIC_INLINE void LED_CONNECTED_OUT(uint32_t bit)
  */
 __STATIC_INLINE void LED_RUNNING_OUT(uint32_t bit)
 {
+#if BIRDIEBOT_BOARD_HAS_STATUS_LEDS
+  if (bit)
+  {
+    GPIO_SET_LEVEL_HIGH(PIN_LED_RUNNING);
+  }
+  else
+  {
+    GPIO_SET_LEVEL_LOW(PIN_LED_RUNNING);
+  }
+#else
+  /* no Running LED on the selected board */
   (void)(bit);
-  // if (bit)
-  // {
-  //   //set bit
-  //   GPIO.out_w1ts |= (0x1 << PIN_LED_RUNNING);
-  // }
-  // else
-  // {
-  //   //reset bit
-  //   GPIO.out_w1tc |= (0x1 << PIN_LED_RUNNING);
-  // }
+#endif
 }
 
 ///@}
@@ -977,7 +932,11 @@ default, the DWT timer is used.  The frequency of this timer is configured with 
  */
 __STATIC_INLINE uint32_t TIMESTAMP_GET(void)
 {
-  return rtc_time_get();
+  /* WP-101: esp_timer_get_time() returns microseconds since boot, matching
+   * TIMESTAMP_CLOCK=1 MHz. The 64-bit value is truncated to 32 bits like the
+   * CMSIS-DAP reference timer (all in-protocol users only look at differences).
+   * Note: this is called from the DAP task context only (DAP_SWJ_Pins wait). */
+  return (uint32_t)esp_timer_get_time();
 }
 
 ///@}
@@ -1007,15 +966,26 @@ __STATIC_INLINE void DAP_SETUP(void)
   GPIO_FUNCTION_SET(PIN_nTRST);
   GPIO_FUNCTION_SET(PIN_nRESET);
 
-  // GPIO_FUNCTION_SET(PIN_LED_RUNNING);
+  /**
+   * The drive strength has a significant impact on signal integrity.
+   * In actual use, it is necessary to perform signal measurements
+   * on the board and select the appropriate drive strength.
+   * (A 2025 fork: 5 mA for esp32c3/esp32s3; revisit after hardware tests.)
+   */
+#if defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3
+  gpio_ll_set_drive_capability(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, GPIO_DRIVE_CAP_0);
+  gpio_ll_set_drive_capability(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, GPIO_DRIVE_CAP_0);
+#endif
 
-
-  // Configure: LED as output (turned off)
-
-  // GPIO_SET_DIRECTION_NORMAL_OUT(PIN_LED_RUNNING);
-
-  // LED_CONNECTED_OUT(0);
-  // LED_RUNNING_OUT(0);
+  // Configure status LEDs as output and turn them off (board-dependent).
+#if BIRDIEBOT_BOARD_HAS_STATUS_LEDS
+  GPIO_FUNCTION_SET(PIN_LED_CONNECTED);
+  GPIO_SET_DIRECTION_NORMAL_OUT(PIN_LED_CONNECTED);
+  GPIO_FUNCTION_SET(PIN_LED_RUNNING);
+  GPIO_SET_DIRECTION_NORMAL_OUT(PIN_LED_RUNNING);
+  LED_CONNECTED_OUT(0);
+  LED_RUNNING_OUT(0);
+#endif
 
   PORT_OFF();
 }
