@@ -6,24 +6,12 @@ export default {
     connected: "已连接",
     connecting: "连接中",
     use: "使用",
-    author: "作者",
-    studioYunSi: "允斯工作室",
-    authorEmail: "作者邮箱",
-    TencentQQGroup: "QQ群",
-    Discord: "Discord",
-    BiliBili: "哔哩哔哩",
 
-    suggestion: "建议",
-    feature: "需求",
     version: "版本",
     releaseTime: "发布时间",
     credit: "鸣谢",
     aboutWebHost: "关于网页版上位机",
     aboutDebugger: "关于调试器",
-    officialWebsite: "官网",
-    email: "邮箱",
-    note: "备注",
-    welcomeMessage: "欢迎来打扰啊~",
     serialNumber: "序列号",
 
     ws: {
@@ -38,7 +26,6 @@ export default {
         about: "关于",
         uart: "UART",
         widget: "组件",
-        feedback: "反馈",
         close: "关闭",
         update: "更新",
         fullscreen: "全屏",
@@ -99,8 +86,8 @@ export default {
             "<p>ANSI转义码对终端和文本有很多作用，比如改变文本颜色等。</p>\n" +
             "<p>\n" +
             "  简单了解->\n" +
-            "  <a target=\"_blank\" href=\"https://yunsi.studio/wireless-debugger/docs/uart-webhost/ansi-escape-code\">\n" +
-            "    https://yunsi.studio/wireless-debugger/docs/uart-webhost/ansi-escape-code\n" +
+            "  <a target=\"_blank\" href=\"https://en.wikipedia.org/wiki/ANSI_escape_code\">\n" +
+            "    https://en.wikipedia.org/wiki/ANSI_escape_code\n" +
             "  </a>\n" +
             "</p>",
         filter: "过滤",
@@ -386,5 +373,49 @@ export default {
     system: {
         reboot: '重启设备',
         rebooting: '正在重启…',
+    },
+
+
+    target: {
+        title: '目标烧录',
+        description: '通过无线 DAP 直接烧录目标芯片固件',
+        detect: '检测目标',
+        detecting: '检测中…',
+        detectFailed: '检测失败：{err}',
+        notDetected: '未检测到目标芯片，请检查接线与供电',
+        notSupported: '当前固件不支持目标烧录',
+        family: '芯片系列',
+        cpuid: 'CPUID',
+        idcode: 'DBGMCU IDCODE',
+        uid: 'UID',
+        flashBase: 'Flash 地址',
+        flashSize: 'Flash 大小',
+        running: '运行状态',
+        securityHint: '仅限可信内网使用；烧录期间请勿同时使用 OpenOCD/USBIP',
+        selectFile: '选择固件文件',
+        fileName: '文件名',
+        fileSize: '文件大小',
+        sha256: 'SHA-256',
+        hashComputing: '正在计算 SHA-256…',
+        invalidFile: '请选择 .bin 固件文件',
+        emptyFile: '固件文件为空',
+        fileTooLarge: '固件超过目标 Flash 容量（{size}）',
+        start: '开始烧录',
+        confirmFlashTitle: '确认烧录',
+        confirmFlash: '确认将固件 {size} 烧录到目标芯片？',
+        noTargetHint: '请先检测目标芯片',
+        selectFirst: '请先选择固件文件',
+        flashing: '烧录中…',
+        flashingHint: '烧录期间请勿刷新页面或断开连接（暂不支持中止）',
+        uploadProgress: '上传进度',
+        deviceStatus: '设备状态',
+        success: '烧录成功',
+        failed: '烧录失败：{err}',
+        result: '烧录结果',
+        written: '已写入',
+        reset: '复位目标',
+        resetting: '复位中…',
+        resetSuccess: '复位命令已发送',
+        resetFailed: '复位失败：{err}',
     },
 }

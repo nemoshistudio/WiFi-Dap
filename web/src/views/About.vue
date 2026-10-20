@@ -3,7 +3,6 @@ import {computed} from "vue";
 import {useSystemStore} from "@/stores/useSystemStore";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
-import {AUTHOR_NAME, PROJECT_HOMEPAGE} from "@/constants/brand";
 import {PROTOCOL_VERSION} from "@/api";
 
 const sysStore = useSystemStore();
@@ -91,14 +90,20 @@ function copyVersionInfo() {
           <el-descriptions-item :label="translate('about.hardwareVersion')">{{ sysStore.hwInfo.ver }}</el-descriptions-item>
           <el-descriptions-item :label="translate('about.manufactureDate')">{{ sysStore.hwInfo.date }}</el-descriptions-item>
           <el-descriptions-item :label="translate('serialNumber')">{{ sysStore.sysInfo.sn }}</el-descriptions-item>
-          <el-descriptions-item :label="translate('officialWebsite')">
-            <a target="_blank" :href="PROJECT_HOMEPAGE">{{ PROJECT_HOMEPAGE }}</a>
-          </el-descriptions-item>
         </el-descriptions>
 
         <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
-          <el-descriptions-item label="windowsair">
-            <a target="_blank" href="https://github.com/windowsair/wireless-esp8266-dap">wireless-esp8266-dap</a>
+          <el-descriptions-item label="windowsair/wireless-esp8266-dap">
+            <a target="_blank" href="https://github.com/windowsair/wireless-esp8266-dap">https://github.com/windowsair/wireless-esp8266-dap</a>
+          </el-descriptions-item>
+          <el-descriptions-item label="windowsair/elaphureLink">
+            <a target="_blank" href="https://github.com/windowsair/elaphureLink">https://github.com/windowsair/elaphureLink</a>
+          </el-descriptions-item>
+          <el-descriptions-item label="espressif/esp-idf">
+            <a target="_blank" href="https://github.com/espressif/esp-idf">https://github.com/espressif/esp-idf</a>
+          </el-descriptions-item>
+          <el-descriptions-item label="openocd-org/openocd">
+            <a target="_blank" href="https://github.com/openocd-org/openocd">https://github.com/openocd-org/openocd</a>
           </el-descriptions-item>
         </el-descriptions>
       </el-collapse-item>
@@ -110,6 +115,12 @@ function copyVersionInfo() {
         </el-descriptions>
 
         <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
+          <el-descriptions-item label="kerms/wireless-esp32-tools">
+            <a target="_blank" href="https://github.com/kerms/wireless-esp32-tools">https://github.com/kerms/wireless-esp32-tools</a>
+          </el-descriptions-item>
+          <el-descriptions-item label="kerms/wireless-esp32-tools-web-host">
+            <a target="_blank" href="https://github.com/kerms/wireless-esp32-tools-web-host">https://github.com/kerms/wireless-esp32-tools-web-host</a>
+          </el-descriptions-item>
           <el-descriptions-item label="vuejs"><a target="_blank" href="https://github.com/vuejs/vue/blob/main/LICENSE">MIT</a>
           </el-descriptions-item>
           <el-descriptions-item label="typescript"><a
@@ -135,21 +146,6 @@ function copyVersionInfo() {
       </el-collapse-item>
     </el-collapse>
 
-    <el-descriptions :title="translate('author') + ' :' + AUTHOR_NAME" border :column="1"
-                     class="mt-5 description-style">
-      <el-descriptions-item :label="translate('officialWebsite')">
-        <a target="_blank" href="https://yunsi.studio/">https://yunsi.studio/</a>
-      </el-descriptions-item>
-      <el-descriptions-item label="github">
-        <a target="_blank" href="https://github.com/kerms">https://github.com/kerms</a>
-      </el-descriptions-item>
-      <el-descriptions-item :label="translate('email')">kerms@niazo.org</el-descriptions-item>
-      <el-descriptions-item label="BiliBili">
-        <a target="_blank" href="https://space.bilibili.com/3461571571353885">3461571571353885</a>
-      </el-descriptions-item>
-      <el-descriptions-item :label="translate('TencentQQGroup')">642246000</el-descriptions-item>
-      <el-descriptions-item :label="translate('note')">{{ translate('welcomeMessage') }}</el-descriptions-item>
-    </el-descriptions>
   </div>
   <el-divider></el-divider>
 </template>

@@ -202,8 +202,8 @@ const menuItems: ComputedRef<Item[]> = computed(() => ([
     name: translate("page.wifi"),
     href: "/wifi",
   }, {
-    name: translate("page.feedback"),
-    href: "/feedback",
+    name: translate("target.title"),
+    href: "/target",
   },
 ]));
 
@@ -213,6 +213,9 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
       name: translate("page.wifi"),
       href: "/wifi",
     }, {
+      name: translate("target.title"),
+      href: "/target",
+    }, {
       name: translate("page.uart"),
       href: "/uart",
     }, {
@@ -221,9 +224,6 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
     }, {
       name: translate("page.about"),
       href: "/about",
-    }, {
-      name: translate("page.feedback"),
-      href: "/feedback",
     },
   ];
   if (isOTAEnabled()) {

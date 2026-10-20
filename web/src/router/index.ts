@@ -1,6 +1,6 @@
 import {createRouter, createWebHashHistory, type RouteLocationNormalizedLoaded} from 'vue-router'
 import Wifi from '@/views/Wifi.vue'
-import Feedback from '@/views/Feedback.vue'
+import TargetFlash from '@/views/TargetFlash.vue'
 import About from '@/views/About.vue'
 import Uart from '@/views/Uart.vue'
 import Page404 from '@/views/404.vue'
@@ -39,8 +39,8 @@ function translateRouteTitle(name: unknown): string {
             return translate('page.widget');
         case 'about':
             return translate('page.about');
-        case 'feedback':
-            return translate('page.feedback');
+        case 'targetFlash':
+            return translate('target.title');
         case 'update':
             return translate('page.update');
         default:
@@ -88,6 +88,11 @@ const router = createRouter({
             name: 'uart',
             component: Uart,
         }, {
+            path: '/target:ext(.*)',
+            meta: { titleKey: 'target.title' },
+            name: 'targetFlash',
+            component: TargetFlash,
+        }, {
             path: '/widget:ext(.*)',
             meta: { titleKey: 'page.widget' },
             name: 'widget',
@@ -98,11 +103,6 @@ const router = createRouter({
             meta: { titleKey: 'page.about' },
             name: 'about',
             component: About,
-        }, {
-            path: '/feedback:ext(.*)',
-            meta: { titleKey: 'page.feedback' },
-            name: 'feedback',
-            component: Feedback,
         }, {
             path: '/update:ext(.*)',
             meta: { titleKey: 'page.update' },

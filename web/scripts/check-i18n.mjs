@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 306
-const EXPECTED_BASELINE = 180
-const EXPECTED_ADDED = 126
+const EXPECTED_TOTAL = 333
+const EXPECTED_BASELINE = 167
+const EXPECTED_ADDED = 166
 
 const errors = []
 const warnings = []
@@ -50,16 +50,15 @@ if (args.includes('--help') || args.includes('-h')) {
 const keys = (prefix, names) => names.map((name) => (prefix ? `${prefix}.${name}` : name))
 
 const BASELINE_KEYS = [
-    // 基线平铺 key（23）
+    // 基线平铺 key（11：已按需求删除作者/联系方式相关 12 个）
     ...keys('', [
-        'emoji.flag', 'disconnected', 'connected', 'connecting', 'use', 'author',
-        'studioYunSi', 'authorEmail', 'TencentQQGroup', 'Discord', 'BiliBili',
-        'suggestion', 'feature', 'version', 'releaseTime', 'credit', 'aboutWebHost',
-        'aboutDebugger', 'officialWebsite', 'email', 'note', 'welcomeMessage', 'serialNumber',
+        'emoji.flag', 'disconnected', 'connected', 'connecting', 'use',
+        'version', 'releaseTime', 'credit', 'aboutWebHost',
+        'aboutDebugger', 'serialNumber',
     ]),
     ...keys('common', ['debuggerConnected', 'ok']),
     ...keys('ws', ['disconnected', 'connected', 'connecting']),
-    ...keys('page', ['home', 'wifi', 'about', 'uart', 'widget', 'feedback', 'close', 'update', 'fullscreen', 'windowed']),
+    ...keys('page', ['home', 'wifi', 'about', 'uart', 'widget', 'close', 'update', 'fullscreen', 'windowed']),
     ...keys('wifi', [
         'settings', 'setFailed', 'setSuccess', 'connection', 'scanning', 'scan', 'scanDone',
         'warnWifiName', 'password', 'connectInfoHTML', 'connect', 'mode', 'save', 'station',
@@ -127,6 +126,15 @@ const ADDED_KEYS = [
         'instance', 'connectFailed', 'overflowWarning', 'binaryError', 'remoteUnsupported',
         'invalidHex', 'hexMode', 'hexdumpMode', 'highlightRx', 'highlightTx',
         'sendShortcut', 'noResponse',
+    ]),
+    ...keys('target', [
+        'title', 'description', 'detect', 'detecting', 'detectFailed', 'notDetected',
+        'notSupported', 'family', 'cpuid', 'idcode', 'uid', 'flashBase', 'flashSize',
+        'running', 'securityHint', 'selectFile', 'fileName', 'fileSize', 'sha256',
+        'hashComputing', 'invalidFile', 'emptyFile', 'fileTooLarge', 'start',
+        'confirmFlashTitle', 'confirmFlash', 'noTargetHint', 'selectFirst', 'flashing',
+        'flashingHint', 'uploadProgress', 'deviceStatus', 'success', 'failed', 'result',
+        'written', 'reset', 'resetting', 'resetSuccess', 'resetFailed',
     ]),
 ]
 
