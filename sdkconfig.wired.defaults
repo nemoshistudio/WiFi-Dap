@@ -1,0 +1,32 @@
+# WiFi Dap -- wired DAP build variant (C1: USB-NCM MVP).
+#
+# Only used by scripts/build-wired.sh (which appends this file to the normal
+# per-target defaults). The default `scripts/build_all.sh` build does NOT use
+# it: the default Wi-Fi-only firmware and its sdkconfig.defaults.* stay
+# unchanged.
+#
+# Wire protocol: TinyUSB CDC-NCM device + static device IP 192.168.7.1/24;
+# the existing DAP proxy keeps listening on TCP 3240 (host keeps usbip+OpenOCD).
+#
+# Console: USB-OTG and USB-Serial/JTAG are mutually exclusive, so the wired
+# build disables the USB-Serial/JTAG secondary console and keeps UART0.
+CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y
+
+# esp_tinyusb: network class = CDC-NCM (see components/wired_dap/idf_component.yml)
+CONFIG_TINYUSB_NET_MODE_NCM=y
+
+# Keep the USB-Serial/JTAG controller free for the USB-OTG (NCM) peripheral.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# TinyUSB task scheduling (IDF NCM example defaults for ESP32-S3):
+# run on core 0 so the DAP/bit-banging tasks keep core 1.
+CONFIG_TINYUSB_TASK_AFFINITY_CPU0=y
+CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK=y
+
+# Descriptors: development VID/PID (Espressif VID + default TinyUSB PID).
+# Production must use an assigned/owned VID:PID before shipping.
+CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID=y
+CONFIG_TINYUSB_DESC_USE_DEFAULT_PID=y
+CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="WiFi Dap"
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="WiFi Dap (Wired NCM)"
+CONFIG_TINYUSB_DEBUG_LEVEL=1

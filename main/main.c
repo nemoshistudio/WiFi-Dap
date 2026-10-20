@@ -19,6 +19,7 @@
 #include "wt_ota.h"
 #include "project_components/wt_common/wt_protocol_version.h"
 #include "components/board/include/birdiebot_board.h"
+#include "birdiebot_wired_dap.h"
 
 #include <sdkconfig.h>
 
@@ -117,6 +118,19 @@ void app_main()
 	wt_storage_init();
 	ESP_ERROR_CHECK(esp_netif_init());
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+	/* C1 wired build: bring up the USB-NCM netif before network services start.
+	 * Default (CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NONE) builds compile this out. */
+	{
+		esp_err_t wired_err = birdiebot_wired_dap_init();
+		if (wired_err != ESP_OK) {
+			ESP_LOGW("BIRDIEBOT", "wired DAP (USB-NCM) init failed: %s; continuing Wi-Fi only",
+			         esp_err_to_name(wired_err));
+		}
+	}
+#endif
+
 	wt_mdns_init();
 
 	wifi_manager_init();
