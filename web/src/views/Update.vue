@@ -7,7 +7,8 @@
         v-if="!hasToken"
         class="mt-2"
         type="warning"
-        :title="translate('ota.upload.labWarning')"
+        :title="translate('common.labWarning')"
+        :description="translate('ota.upload.labWarning')"
         :closable="false"
         show-icon
     />

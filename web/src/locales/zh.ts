@@ -154,6 +154,12 @@ export default {
         binaryError: "二进制帧发送失败（{code}）",
         remoteUnsupported: "固件不支持该串口配置项",
         invalidHex: "十六进制格式错误",
+        hexMode: 'HEX 模式',
+        hexdumpMode: 'HEXDUMP 模式',
+        highlightRx: '高亮接收',
+        highlightTx: '高亮发送',
+        sendShortcut: '发送快捷键',
+        noResponse: '无响应',
     },
 
     wifi: {
@@ -259,6 +265,11 @@ export default {
         addCommand: '添加命令',
         loopInterval: '循环间隔',
         uartViewOnce: 'UART视图组件只能添加一次。'
+,
+        commandLabel: '命令',
+        commandValue: '命令内容',
+        responsePrefix: '响应前缀',
+        resetConfirm: '确认重置组件？',
     },
 
     common: {
@@ -290,6 +301,8 @@ export default {
         details: '详情',
         required: '必填',
         actions: '操作',
+        select: '选择',
+        labWarning: '未启用鉴权，仅限可信局域网',
     },
 
     navbar: {

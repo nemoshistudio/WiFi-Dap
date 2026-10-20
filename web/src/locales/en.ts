@@ -150,6 +150,12 @@ export default {
         binaryError: "Failed to send binary frame ({code})",
         remoteUnsupported: "Firmware does not support this UART setting",
         invalidHex: "Invalid hex input",
+        hexMode: 'HEX mode',
+        hexdumpMode: 'HEXDUMP mode',
+        highlightRx: 'Highlight RX',
+        highlightTx: 'Highlight TX',
+        sendShortcut: 'Send shortcut',
+        noResponse: 'No response',
     },
 
     wifi: {
@@ -255,6 +261,11 @@ export default {
         addCommand: 'Add Command',
         loopInterval: 'Loop Interval',
         uartViewOnce: 'UART View Widget can only be added once.'
+,
+        commandLabel: 'Command',
+        commandValue: 'Command value',
+        responsePrefix: 'Response prefix',
+        resetConfirm: 'Reset widget?',
     },
 
     common: {
@@ -286,6 +297,8 @@ export default {
         details: 'Details',
         required: 'Required',
         actions: 'Actions',
+        select: 'Select',
+        labWarning: 'No auth enabled; trusted LAN only',
     },
 
     navbar: {

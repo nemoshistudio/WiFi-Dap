@@ -10,7 +10,7 @@
         v-if="!hasToken"
         class="mb-3"
         type="info"
-        :title="translate('auth.labMode')"
+        :title="translate('common.labWarning')"
         :closable="false"
         show-icon
     >

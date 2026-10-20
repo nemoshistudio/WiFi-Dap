@@ -137,8 +137,8 @@ const runCommands = async () => {
   // Update responses in UI
   commandsToRun.forEach((command, index) => {
     if (index < responses.length) {
-      // 无响应时显示语言中立占位符（避免硬编码英文文案）
-      command.props.response = responses[index] || '-'
+      // 无响应占位（i18n 契约：uart.noResponse）
+      command.props.response = responses[index] || translate('uart.noResponse')
     }
   })
 }

@@ -225,20 +225,20 @@ export const useWidgetStore = defineStore('widget', () => {
 
   const resetToDefault = () => {
     ElMessageBox.confirm(
-      'This will reset your layout to the default settings. Are you sure?',
-      'Warning',
+      translate('widget.resetConfirm'),
+      translate('widget.resetToDefault'),
       {
-        confirmButtonText: 'OK',
-        cancelButtonText: 'Cancel',
+        confirmButtonText: translate('common.confirm'),
+        cancelButtonText: translate('common.cancel'),
         type: 'warning'
       }
     )
       .then(() => {
         layout.value = getDefaultLayout()
-        globalNotify('Layout reset to default.', 'success')
+        globalNotify(translate('common.success'), 'success')
       })
       .catch(() => {
-        globalNotify('Layout reset cancelled.', 'info')
+        globalNotify(translate('common.cancel'), 'info')
       })
   }
 
