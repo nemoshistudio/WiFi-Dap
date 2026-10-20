@@ -1,0 +1,19 @@
+menu "WiFi Dap proxy (USBIP / WebSocket-DAP)"
+
+    config BIRDIEBOT_DAP_WS_ENABLE
+        bool "Enable the legacy WebSocket-DAP transport (TCP 3240)"
+        default y
+        help
+            Accepts a WebSocket-DAP session on the DAP proxy port
+            (components/dap_proxy/websocket_server.c): the client upgrades
+            from HTTP with "GET ", then sends binary frames whose payload is a
+            CMSIS-DAP command packet.
+
+            This is an unauthenticated, plain-text transport: enable it only
+            on a trusted LAN (docs/INTEGRATION-PLAN.md P7.1).  Disable it to
+            run USBIP and elaphureLink only; the port stays open for those
+            two protocols.
+
+            Default: y (laboratory mode, same as the fork).
+
+endmenu

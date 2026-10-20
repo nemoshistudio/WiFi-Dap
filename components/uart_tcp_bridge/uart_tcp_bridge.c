@@ -17,70 +17,61 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
  * @file uart_bridge.c
  * @author windowsair
  * @brief UART TCP bridge
- * @version 0.1
+ * @version 0.2
  * @date 2021-11-16
+ *
+ * WiFi Dap merge notes (WP-114)
+ * ------------------------------
+ *  - Implementation taken from the A 2025 tree (main/uart_bridge.c, which is
+ *    base + the ESP32-S3 UART1 TX=10/RX=9 support and the 2025 connection-close
+ *    fix) and componentized on top of the C/IDF5 platform layer (printf/LWIP
+ *    netconn API/driver/uart.h).
+ *  - All pins/ports come from components/board/include/birdiebot_board.h:
+ *    BIRDIEBOT_UART_BRIDGE_UART_NUM, UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN,
+ *    BIRDIEBOT_UART_BRIDGE_PORT (1346) and UART_BRIDGE_BAUDRATE (115200).
+ *    The C tree's duplicated-and-unused UART_PORT/UART_HW/PORT_* macro block is
+ *    gone; so is the ESP8266 branch (the project builds ESP32/C3/S3 only).
+ *  - Double delete fixed: the close-on-receive-error path uses the A 2025
+ *    `if (is_conn_valid) { close_tcp_netconn(); uart_bridge_reset(); }` guard.
+ *    The old C code could call close_tcp_netconn() on a netconn whose
+ *    pending_err already marked it closed/deleted (double netconn_delete).
+ *  - Event queue created exactly once: uart_bridge_init() is idempotent and is
+ *    the only place that allocates it (the old code created it in both
+ *    uart_bridge_init() and uart_bridge_task(), leaking the first queue).
+ *  - ESP_ERROR_CHECK() removed from the runtime uart_get_buffered_data_len()
+ *    calls (P3 in analysis/REPORT.md): a transient UART error no longer aborts
+ *    the device; only the one-time setup uses ESP_ERROR_CHECK().
  *
  * @copyright Copyright (c) 2021
  *
  */
 
-#include <string.h>
+#include "sdkconfig.h"
+
+#include <stdbool.h>
 #include <stdint.h>
-#include <sys/param.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/queue.h"
-#include "esp_system.h"
-#include "esp_log.h"
+
 #include "driver/uart.h"
+#include "esp_log.h"
 
 #include "lwip/err.h"
 #include "lwip/netbuf.h"
 #include "lwip/api.h"
 #include "lwip/tcp.h"
 
+#include "birdiebot_board.h"
 #include "uart_tcp_bridge.h"
 
-#if defined CONFIG_IDF_TARGET_ESP32S3
-#define UART_PORT UART_NUM_1
-	#define UART_HW (&UART1)
-	#define PORT_RX_PIN 18
-	#define PORT_TX_PIN 17
-#elif defined CONFIG_IDF_TARGET_ESP32C3
-	#define UART_PORT UART_NUM_0
-	#define UART_HW (&UART0)
-	#define PORT_RX_PIN 20
-	#define PORT_TX_PIN 21
-#elif defined CONFIG_IDF_TARGET_ESP32
-#define UART_PORT UART_NUM_2
-	#define UART_HW (&UART2)
-	#define PORT_RX_PIN 16
-	#define PORT_TX_PIN 17
-#else
-#error "Unknown target"
-#endif
+#if CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE
 
-#ifdef CONFIG_IDF_TARGET_ESP8266
-    #define UART_BRIDGE_TX UART_NUM_0
-    #define UART_BRIDGE_RX UART_NUM_1
-#elif defined CONFIG_IDF_TARGET_ESP32
-    #define UART_BRIDGE_TX UART_NUM_2
-    #define UART_BRIDGE_RX UART_NUM_2
-    #define UART_BRIDGE_TX_PIN 23
-    #define UART_BRIDGE_RX_PIN 22
-#elif defined CONFIG_IDF_TARGET_ESP32C3
-    #define UART_BRIDGE_TX UART_NUM_1
-    #define UART_BRIDGE_RX UART_NUM_1
-    #define UART_BRIDGE_TX_PIN 21
-    #define UART_BRIDGE_RX_PIN 20
-#elif defined CONFIG_IDF_TARGET_ESP32S3
-	#define UART_BRIDGE_TX UART_NUM_1
-    #define UART_BRIDGE_RX UART_NUM_1
-    #define UART_BRIDGE_TX_PIN 17
-    #define UART_BRIDGE_RX_PIN 18
-#else
-    #error unknown hardware
-#endif
+/* The bridge owns one UART instance for both directions (board contract). */
+#define UART_BRIDGE_UART BIRDIEBOT_UART_BRIDGE_UART_NUM
 
 #define EVENTS_QUEUE_SIZE 10
 #define UART_BUF_SIZE     512
@@ -107,15 +98,35 @@ static struct netconn *uart_netconn = NULL;
 static bool is_conn_valid = false; // lock free
 static bool is_first_time_recv = false;
 
-void uart_bridge_close() {
-    netconn_events events;
-    events.type = NETCONN_EVT_WIFI_DISCONNECTED;
-    xQueueSend(uart_server_events, &events, 1000);
+void uart_bridge_init(void)
+{
+    /* Fixes the duplicated queue creation of the A/C tree: only this function
+     * allocates the event queue, and it is safe to call more than once. */
+    if (uart_server_events == NULL) {
+        uart_server_events = xQueueCreate(EVENTS_QUEUE_SIZE, sizeof(netconn_events));
+    }
 }
 
-static void uart_bridge_reset() {
+void uart_bridge_close(void)
+{
+    netconn_events events;
+
+    if (uart_server_events == NULL) {
+        return;
+    }
+
+    memset(&events, 0, sizeof(events));
+    events.type = NETCONN_EVT_WIFI_DISCONNECTED;
+    /* Do not block the caller (WiFi event handler) for long: the event only
+     * carries "close the current bridge connection". */
+    (void)xQueueSend(uart_server_events, &events, pdMS_TO_TICKS(100));
+}
+
+static void uart_bridge_reset(void)
+{
     uart_netconn = NULL;
     is_conn_valid = false;
+    is_first_time_recv = false;
 }
 
 static int num_digits(int n) {
@@ -161,7 +172,7 @@ static void netCallback(struct netconn *conn, enum netconn_evt evt, uint16_t len
     }
 
     // Send the event to the queue
-    xQueueSend(uart_server_events, &events, pdMS_TO_TICKS(1000));
+    (void)xQueueSend(uart_server_events, &events, pdMS_TO_TICKS(1000));
 }
 
 /*
@@ -192,7 +203,7 @@ static void close_tcp_netconn(struct netconn *nc) {
     netconn_delete(nc);
 }
 
-static void uart_bridge_setup() {
+static void uart_bridge_setup(void) {
     uart_config_t uart_config = {
         .baud_rate = UART_BRIDGE_BAUDRATE,
         .data_bits = UART_DATA_8_BITS,
@@ -200,41 +211,84 @@ static void uart_bridge_setup() {
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE};
 
-    if (UART_BRIDGE_TX == UART_BRIDGE_RX) {
-	    ESP_ERROR_CHECK(uart_param_config(UART_BRIDGE_RX, &uart_config));
-	    ESP_ERROR_CHECK(uart_driver_install(UART_BRIDGE_RX, UART_BUF_SIZE, UART_BUF_SIZE, 0, NULL, 0));
-    } else {
-        uart_param_config(UART_BRIDGE_RX, &uart_config);
-        uart_param_config(UART_BRIDGE_TX, &uart_config);
+    ESP_ERROR_CHECK(uart_param_config(UART_BRIDGE_UART, &uart_config));
+    ESP_ERROR_CHECK(uart_driver_install(UART_BRIDGE_UART, UART_BUF_SIZE, UART_BUF_SIZE, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_set_pin(UART_BRIDGE_UART,
+                                 UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-        uart_driver_install(UART_BRIDGE_RX, UART_BUF_SIZE, 0, 0, NULL, 0); // RX only
-        uart_driver_install(UART_BRIDGE_TX, 0, UART_BUF_SIZE, 0, NULL, 0); // TX only
+    ESP_LOGI(UART_TAG, "bridge ready: uart%d TX=%d RX=%d port=%d baud=%d",
+             (int)UART_BRIDGE_UART, UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN,
+             BIRDIEBOT_UART_BRIDGE_PORT, UART_BRIDGE_BAUDRATE);
+}
+
+/*
+ *  Forward whatever the target UART has buffered to the TCP client.
+ *  A UART read error is logged (not fatal): aborting the device on a transient
+ *  driver error was one of the P3 findings in analysis/REPORT.md.
+ */
+static void uart_bridge_flush_to_tcp(struct netconn *conn) {
+    size_t uart_buf_len = 0;
+
+    if (conn == NULL) {
+        return;
     }
 
-#if defined CONFIG_IDF_TARGET_ESP32 || defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3
-	ESP_ERROR_CHECK(uart_set_pin(UART_BRIDGE_TX, UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN, -1, -1));
-#endif
+    if (uart_get_buffered_data_len(UART_BRIDGE_UART, &uart_buf_len) != ESP_OK) {
+        ESP_LOGW(UART_TAG, "uart_get_buffered_data_len failed");
+        return;
+    }
 
+    if (uart_buf_len > UART_BUF_SIZE) {
+        uart_buf_len = UART_BUF_SIZE;
+    }
+    if (uart_buf_len == 0) {
+        return;
+    }
+
+    uart_buf_len = uart_read_bytes(UART_BRIDGE_UART, uart_read_buffer, uart_buf_len, pdMS_TO_TICKS(5));
+    netconn_write(conn, uart_read_buffer, uart_buf_len, NETCONN_COPY);
 }
 
-void uart_bridge_init() {
-    uart_server_events = xQueueCreate(EVENTS_QUEUE_SIZE, sizeof(netconn_events));
+/* Apply the optional "first packet is the baud rate" convention. */
+static bool uart_bridge_maybe_set_baud(const char *buffer, uint16_t len) {
+    if (!is_first_time_recv) {
+        return false;
+    }
+
+    is_first_time_recv = false;
+
+    if (len > 1 && len < 8) {
+        char tmp_buff[8];
+        memcpy(tmp_buff, buffer, len);
+        tmp_buff[len] = '\0';
+        int baudrate = atoi(tmp_buff);
+        if (baudrate > 0 && baudrate < 2000000 && num_digits(baudrate) == (int)len) {
+            ESP_LOGI(UART_TAG, "change baud:%d", baudrate);
+            uart_set_baudrate(UART_BRIDGE_UART, baudrate);
+            return true;
+        }
+    }
+
+    return false;
 }
 
-void uart_bridge_task() {
-    uart_bridge_setup();
-    uart_server_events = xQueueCreate(EVENTS_QUEUE_SIZE, sizeof(netconn_events));
-
-    struct netconn *nc = NULL; // To create servers
-
-    set_tcp_server_netconn(&nc, UART_BRIDGE_PORT, netCallback);
-
-    struct netbuf *netbuf = NULL; // To store incoming Data
-    struct netconn *nc_in = NULL; // To accept incoming netconn
-    //
+void uart_bridge_task(void) {
+    struct netconn *nc = NULL;     // To create servers
+    struct netbuf *netbuf = NULL;  // To store incoming Data
+    struct netconn *nc_in = NULL;  // To accept incoming netconn
     char *buffer;
     uint16_t len_buf;
-    size_t uart_buf_len;
+
+    uart_bridge_init();
+    uart_bridge_setup();
+
+    set_tcp_server_netconn(&nc, BIRDIEBOT_UART_BRIDGE_PORT, netCallback);
+    if (nc == NULL) {
+        ESP_LOGE(UART_TAG, "failed to create the bridge server socket");
+        vTaskDelete(NULL);
+        return;
+    }
 
     while (1) {
         netconn_events events;
@@ -243,11 +297,7 @@ void uart_bridge_task() {
         if (ret != pdTRUE) {
             // timeout
             if (is_conn_valid) {
-                ESP_ERROR_CHECK(uart_get_buffered_data_len(UART_BRIDGE_RX, &uart_buf_len));
-                uart_buf_len = uart_buf_len > UART_BUF_SIZE ? UART_BUF_SIZE : uart_buf_len;
-                uart_buf_len = uart_read_bytes(UART_BRIDGE_RX, uart_read_buffer, uart_buf_len, pdMS_TO_TICKS(5));
-                // then send data
-                netconn_write(uart_netconn, uart_read_buffer, uart_buf_len, NETCONN_COPY);
+                uart_bridge_flush_to_tcp(uart_netconn);
             }
         } else if (events.type == NETCONN_EVT_WIFI_DISCONNECTED) { // WIFI disconnected
             if (is_conn_valid) {
@@ -256,7 +306,8 @@ void uart_bridge_task() {
             }
         } else if (events.nc->state == NETCONN_LISTEN) {
             if (is_conn_valid) {
-                netconn_accept(events.nc, &nc_in);
+                /* Only one client is served at a time: reject the new one. */
+                (void)netconn_accept(events.nc, &nc_in);
                 if (nc_in)
                     close_tcp_netconn(nc_in);
                 continue;
@@ -268,26 +319,19 @@ void uart_bridge_task() {
                     netconn_delete(nc_in);
                 continue;
             }
-	        printf("uart bridge accepted\n");
 
             ip_addr_t client_addr; // Address port
             uint16_t client_port;  // Client port
             netconn_peer(nc_in, &client_addr, &client_port);
+            ESP_LOGI(UART_TAG, "bridge accepted");
 
             uart_netconn = nc_in;
             is_conn_valid = true;
             is_first_time_recv = true;
         } else if (events.nc->state != NETCONN_LISTEN) {
-            // if (events.nc && events.nc->pcb.tcp)
-            //     tcp_nagle_disable(events.nc->pcb.tcp);
-
             uart_netconn = events.nc;
-            // read data from UART
-            ESP_ERROR_CHECK(uart_get_buffered_data_len(UART_BRIDGE_RX, &uart_buf_len));
-            uart_buf_len = uart_buf_len > UART_BUF_SIZE ? UART_BUF_SIZE : uart_buf_len;
-            uart_buf_len = uart_read_bytes(UART_BRIDGE_RX, uart_read_buffer, uart_buf_len, pdMS_TO_TICKS(5));
-            // then send data
-            netconn_write(events.nc, uart_read_buffer, uart_buf_len, NETCONN_COPY);
+            // read data from UART and forward it
+            uart_bridge_flush_to_tcp(events.nc);
 
             // try to get data
             if ((netconn_recv(events.nc, &netbuf)) == ERR_OK) // data incoming ?
@@ -295,32 +339,38 @@ void uart_bridge_task() {
                 do {
                     netbuf_data(netbuf, (void *)&buffer, &len_buf);
                     // write to uart
-                    if (is_first_time_recv) { // change bard rate
-                        if (len_buf > 1 && len_buf < 8) {
-                            char tmp_buff[8];
-                            memcpy(tmp_buff, buffer, len_buf);
-                            tmp_buff[len_buf] = '\0';
-                            int baudrate = atoi(tmp_buff);
-                            if (baudrate > 0 && baudrate < 2000000 && num_digits(baudrate) == len_buf) {
-                                ESP_LOGI(UART_TAG, "change baud:%d", baudrate);
-                                uart_set_baudrate(UART_BRIDGE_RX, baudrate);
-                                uart_set_baudrate(UART_BRIDGE_TX, baudrate);
-                                is_first_time_recv = false;
-                                continue;
-                            }
-                        }
-                        is_first_time_recv = false;
+                    if (!uart_bridge_maybe_set_baud(buffer, len_buf)) {
+                        uart_write_bytes(UART_BRIDGE_UART, (const char *)buffer, len_buf);
                     }
-                    uart_write_bytes(UART_BRIDGE_TX, (const char *)buffer, len_buf);
                 } while (netbuf_next(netbuf) >= 0);
                 netbuf_delete(netbuf);
             } else {
-                if (events.nc->pending_err == ERR_CLSD) {
-                    continue; // The same hacky way to treat a closed connection
+                /* A 2025 close fix: only close a connection that is still
+                 * regarded as valid.  The old code closed the netconn even when
+                 * its pending_err already marked it closed/deleted (double
+                 * netconn_delete, analysis/REPORT.md P3). */
+                if (is_conn_valid) {
+                    close_tcp_netconn(events.nc);
+                    uart_bridge_reset();
                 }
-                close_tcp_netconn(events.nc);
-                uart_bridge_reset();
             }
         }
     }
 }
+
+#else /* !CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE */
+
+/*
+ * The bridge is disabled: keep the symbols used by app_main() so the fixed
+ * task creation and any API caller still link.  The task exits immediately.
+ */
+void uart_bridge_init(void) {}
+
+void uart_bridge_close(void) {}
+
+void uart_bridge_task(void) {
+    ESP_LOGW("UART", "UART TCP bridge disabled (CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE=n)");
+    vTaskDelete(NULL);
+}
+
+#endif /* CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE */

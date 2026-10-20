@@ -1,0 +1,17 @@
+menu "WiFi Dap UART TCP bridge"
+
+    config BIRDIEBOT_UART_BRIDGE_ENABLE
+        bool "Enable the UART TCP bridge (TCP 1346)"
+        default y
+        help
+            Forwards a raw TCP connection on port 1346 to the target UART
+            (115200-8N1 by default, A 2025 defaults; the old 1234/74880 values
+            are deprecated) and back.  UART instance and TX/RX pins come from
+            the selected board (components/board, docs/board-pins.md).
+
+            The bridge is unauthenticated and plain-text: enable it only on a
+            trusted LAN (docs/INTEGRATION-PLAN.md P7.1).
+
+            Default: y (laboratory mode, same as the fork).
+
+endmenu

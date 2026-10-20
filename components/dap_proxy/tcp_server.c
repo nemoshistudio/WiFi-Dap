@@ -1,13 +1,28 @@
 /**
  * @file tcp_server.c
- * @brief Handle main tcp tasks
- * @version 0.1
+ * @brief Handle main tcp tasks (USBIP / elaphureLink / legacy WebSocket-DAP)
+ * @version 0.2
  * @date 2020-01-22
+ *
+ * WiFi Dap merge notes (WP-112)
+ * ------------------------------
+ *  - Logic merged from the A 2025 version / base (identical) with the
+ *    C/IDF5 platform layer (BSD sockets, printf, component includes).
+ *  - The legacy WebSocket-DAP dispatch (A: CONFIG_USE_WEBSOCKET_DAP) is gated
+ *    by the BIRDIEBOT_DAP_WS_ENABLE Kconfig option (default y,
+ *    analysis/INTEGRATION-PLAN.md P7.1); elaphureLink and USBIP stay
+ *    unconditional.
+ *  - Ring buffer lifecycle is owned by the DAP task.  This task only posts
+ *    dap_handle_request_reset(RESET_HANDLE); it never frees DAP ring buffers.
+ *  - The listen socket is closed on every error path (fd leak, REPORT P3 #11)
+ *    and kSock is reset to -1 after closing an accepted connection.
  *
  * @copyright Copyright (c) 2020
  *
  */
 #include <stdint.h>
+
+#include "sdkconfig.h"
 
 #include "usbip_server.h"
 #include "DAP_handle.h"
@@ -20,10 +35,10 @@
 
 #include "lwip/err.h"
 #include "lwip/sockets.h"
-#include "websocket_server.h"
 
-extern TaskHandle_t kDAPTaskHandle;
-extern int kRestartDAPHandle;
+#if CONFIG_BIRDIEBOT_DAP_WS_ENABLE
+#include "websocket_server.h"
+#endif
 
 int kSock = -1;
 
@@ -75,6 +90,7 @@ void tcp_server_task(void *pvParameters)
         if (err != 0)
         {
             printf("Socket unable to bind: errno %d\r\n", errno);
+            close(listen_sock);
             break;
         }
         printf("Socket binded\r\n");
@@ -83,6 +99,7 @@ void tcp_server_task(void *pvParameters)
         if (err != 0)
         {
             printf("Error occured during listen: errno %d\r\n", errno);
+            close(listen_sock);
             break;
         }
         printf("Socket listening\r\n");
@@ -99,6 +116,9 @@ void tcp_server_task(void *pvParameters)
             if (kSock < 0)
             {
                 printf("Unable to accept connection: errno %d\r\n", errno);
+                /* Do not leak the listen socket when accept() fails
+                 * (analysis/REPORT.md P3 #11). */
+                close(listen_sock);
                 break;
             }
             setsockopt(kSock, SOL_SOCKET, SO_KEEPALIVE, (void *)&on, sizeof(on));
@@ -129,7 +149,11 @@ void tcp_server_task(void *pvParameters)
                     usbip_state = WAIT_IMPORT;
                 usbip_worker(tcp_rx_buffer, sizeof(tcp_rx_buffer), &usbip_state);
             } else if (header == 0x47455420) { // string "GET "
+#if CONFIG_BIRDIEBOT_DAP_WS_ENABLE
                 websocket_worker(kSock, tcp_rx_buffer, sizeof(tcp_rx_buffer));
+#else
+                printf("WebSocket-DAP is disabled (CONFIG_BIRDIEBOT_DAP_WS_ENABLE=n)\r\n");
+#endif
             } else {
                 printf("Unknown protocol\n");
             }
@@ -140,13 +164,14 @@ cleanup:
                 printf("Shutting down socket and restarting...\r\n");
                 //shutdown(kSock, 0);
                 close(kSock);
+                kSock = -1;
 
                 // Restart DAP Handle
                 el_process_buffer_free();
 
-                kRestartDAPHandle = RESET_HANDLE;
-                if (kDAPTaskHandle)
-                    xTaskNotifyGive(kDAPTaskHandle);
+                /* The DAP task frees/recreates the ring buffers itself; this
+                 * task only posts the request (see DAP_handle.h). */
+                dap_handle_request_reset(RESET_HANDLE);
 
                 //shutdown(listen_sock, 0);
                 //close(listen_sock);

@@ -240,8 +240,6 @@ static void handleGetDescriptor(usbip_stage2_header *header)
         break;
 
     case USB_DT_STRING:
-        //os_printf("* GET 0x03 STRING DESCRIPTOR\r\n");
-
         if (header->u.cmd_submit.request.wValue.u8lo == 0)
         {
 	        printf("** REQUESTED list of supported languages\r\n");
@@ -249,8 +247,6 @@ static void handleGetDescriptor(usbip_stage2_header *header)
         }
         else if (header->u.cmd_submit.request.wValue.u8lo != 0xee)
         {
-            //os_printf("low bit : %d\r\n", (int)header->u.cmd_submit.request.wValue.u8lo);
-            //os_printf("high bit : %d\r\n", (int)header->u.cmd_submit.request.wValue.u8hi);
             int slen = strlen(strings_list[header->u.cmd_submit.request.wValue.u8lo]);
             int wslen = slen * 2;
             int buff_len = sizeof(usb_string_descriptor) + wslen;
@@ -316,7 +312,7 @@ static void handleGetDescriptor(usbip_stage2_header *header)
         break;
 #else
     case USB_DT_HID_REPORT:
-        os_printf("* GET 0x22 HID REPORT DESCRIPTOR\r\n");
+        printf("* GET 0x22 HID REPORT DESCRIPTOR\r\n");
         send_stage2_submit_data(header, 0, (void *)kHidReportDescriptor, sizeof(kHidReportDescriptor));
         break;
 #endif
