@@ -137,8 +137,11 @@ int wifi_cred_evict_index(const birdiebot_wifi_cred_t *table, uint8_t count, uin
  * last success first, then priority ascending, last_success_ts descending
  * (0 last), index ascending. Entries whose skip_mask[idx] != 0 are skipped
  * (runtime "credential failed this power cycle" marks, §4.5).
+ * All candidates are collected and fully sorted first, then the result is
+ * truncated to @p max, so @p max < count still yields the correct top-N order
+ * (same behaviour as before for the default max == count == BIRDIEBOT_WIFI_CRED_MAX).
  * @param skip_mask optional array of BIRDIEBOT_WIFI_CRED_MAX bytes, or NULL.
- * @return number of indices written (<= max).
+ * @return number of indices written (<= max, <= number of eligible candidates).
  */
 int wifi_cred_rotate_order(const birdiebot_wifi_cred_t *table, uint8_t count, uint8_t last_idx,
                            const uint8_t *skip_mask, uint8_t *order, uint8_t max);

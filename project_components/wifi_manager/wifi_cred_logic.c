@@ -124,9 +124,20 @@ int wifi_cred_find_ssid(const birdiebot_wifi_cred_t *table, uint8_t count, const
 	return -1;
 }
 
-/* priority ascending, last_success_ts descending (0 last), index ascending */
-static bool cred_is_better_candidate(const birdiebot_wifi_cred_t *table, uint8_t lhs, uint8_t rhs)
+/* Rotation ordering key (contract §5.1): last successful credential first,
+ * then priority ascending, last_success_ts descending (0 last), index ascending.
+ * @param pin_last true when last_idx is a real, non-skipped candidate. */
+static bool cred_order_before(const birdiebot_wifi_cred_t *table, uint8_t lhs, uint8_t rhs,
+                              bool pin_last, uint8_t last_idx)
 {
+	if (pin_last) {
+		bool lhs_last = (lhs == last_idx);
+		bool rhs_last = (rhs == last_idx);
+
+		if (lhs_last != rhs_last) {
+			return lhs_last;
+		}
+	}
 	if (table[lhs].priority != table[rhs].priority) {
 		return table[lhs].priority < table[rhs].priority;
 	}
@@ -175,7 +186,10 @@ int wifi_cred_evict_index(const birdiebot_wifi_cred_t *table, uint8_t count, uin
 int wifi_cred_rotate_order(const birdiebot_wifi_cred_t *table, uint8_t count, uint8_t last_idx,
                            const uint8_t *skip_mask, uint8_t *order, uint8_t max)
 {
+	uint8_t candidates[BIRDIEBOT_WIFI_CRED_MAX];
 	uint8_t n = 0;
+	uint8_t out;
+	bool pin_last;
 
 	if (table == NULL || order == NULL || max == 0 || count == 0) {
 		return 0;
@@ -184,36 +198,40 @@ int wifi_cred_rotate_order(const birdiebot_wifi_cred_t *table, uint8_t count, ui
 		count = BIRDIEBOT_WIFI_CRED_MAX;
 	}
 
-	/* 1. last successful credential first (no scan needed). */
-	if (last_idx < count && (skip_mask == NULL || skip_mask[last_idx] == 0)) {
-		order[n++] = last_idx;
-	}
+	pin_last = (last_idx < count) &&
+	           (skip_mask == NULL || skip_mask[last_idx] == 0);
 
-	/* 2. all others: priority asc -> last_success_ts desc -> idx asc.
-	 * BIRDIEBOT_WIFI_CRED_MAX is small (<= 8): simple insertion sort. The
-	 * last-success entry (if present) is pinned at order[0] and is never
-	 * reordered (contract §5.1 step 1). */
-	{
-		uint8_t pinned = n;
-		for (uint8_t i = 0; i < count && n < max; ++i) {
-			uint8_t pos;
-
-			if (i == last_idx) {
-				continue;
-			}
-			if (skip_mask != NULL && skip_mask[i] != 0) {
-				continue;
-			}
-			pos = n;
-			while (pos > pinned && cred_is_better_candidate(table, i, order[pos - 1])) {
-				order[pos] = order[pos - 1];
-				--pos;
-			}
-			order[pos] = i;
-			++n;
+	/* 1. collect *every* eligible candidate first (max may be < count). */
+	for (uint8_t i = 0; i < count; ++i) {
+		if (skip_mask != NULL && skip_mask[i] != 0) {
+			continue;
 		}
+		candidates[n++] = i;
 	}
-	return (int)n;
+
+	/* 2. fully sort all candidates; last success is ranked first, the rest by
+	 * priority asc -> last_success_ts desc -> idx asc (contract §5.1).
+	 * BIRDIEBOT_WIFI_CRED_MAX is small (<= 8): insertion sort. */
+	for (uint8_t i = 1; i < n; ++i) {
+		uint8_t key = candidates[i];
+		uint8_t pos = i;
+
+		while (pos > 0 &&
+		       cred_order_before(table, key, candidates[pos - 1], pin_last, last_idx)) {
+			candidates[pos] = candidates[pos - 1];
+			--pos;
+		}
+		candidates[pos] = key;
+	}
+
+	/* 3. only now truncate to max, so the result is the true top-N.
+	 * (The previous implementation truncated while inserting, which could
+	 * return a non-top-N rotation order when max < count.) */
+	out = (n < max) ? n : max;
+	for (uint8_t i = 0; i < out; ++i) {
+		order[i] = candidates[i];
+	}
+	return (int)out;
 }
 
 uint32_t wifi_cred_normalize_ts(uint64_t unix_seconds)

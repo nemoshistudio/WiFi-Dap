@@ -296,6 +296,63 @@ static void test_rotation(void)
 	CHECK(wifi_cred_rotate_order(table, 4, 0, NULL, NULL, 4) == 0, "NULL order handled");
 }
 
+/*
+ * Regression: max < count must still return the true top-N order. The first
+ * implementation truncated while inserting, so a better candidate that came
+ * after the truncation point was never considered (Lead host-test report:
+ * 3 entries with max=2 returned [1,0] instead of [2,1]).
+ */
+static void test_rotation_top_n(void)
+{
+	uint8_t order[BIRDIEBOT_WIFI_CRED_MAX];
+	birdiebot_wifi_cred_t table[3];
+	int count;
+
+	group("rotation top-N (max < count regression)");
+	table[0] = make_cred("x0", "password0", 0, 100);
+	table[1] = make_cred("x1", "password1", 100, 10);
+	table[2] = make_cred("x2", "password2", 200, 10);
+
+	/* 3 entries, max=2: full order is [2,1,0], so the top-2 is [2,1]. */
+	count = wifi_cred_rotate_order(table, 3, BIRDIEBOT_WIFI_CRED_NONE, NULL, order, 2);
+	CHECK(count == 2, "max=2 with 3 candidates returns 2 entries");
+	CHECK(count == 2 && order[0] == 2 && order[1] == 1,
+	      "max=2 returns true top-N [2,1] (not the buggy [1,0])");
+
+	/* max=1: only the very best candidate. */
+	count = wifi_cred_rotate_order(table, 3, BIRDIEBOT_WIFI_CRED_NONE, NULL, order, 1);
+	CHECK(count == 1 && order[0] == 2, "max=1 returns the best candidate [2]");
+
+	/* last success is pinned first and consumes one of the max slots. */
+	count = wifi_cred_rotate_order(table, 3, 0, NULL, order, 2);
+	CHECK(count == 2 && order[0] == 0 && order[1] == 2,
+	      "pinned last success [0] + best other [2] with max=2");
+	count = wifi_cred_rotate_order(table, 3, 0, NULL, order, 1);
+	CHECK(count == 1 && order[0] == 0, "max=1 keeps the pinned last success");
+	count = wifi_cred_rotate_order(table, 3, 2, NULL, order, 3);
+	CHECK(count == 3 && order[0] == 2 && order[1] == 1 && order[2] == 0,
+	      "max == count still returns the full order (default behaviour)");
+
+	/* skip mask applies before the full sort/truncation. */
+	{
+		uint8_t skip[BIRDIEBOT_WIFI_CRED_MAX] = {0, 1, 0};
+		count = wifi_cred_rotate_order(table, 3, BIRDIEBOT_WIFI_CRED_NONE, skip, order, 5);
+		CHECK(count == 2 && order[0] == 2 && order[1] == 0,
+		      "skipped candidate is excluded before sorting/truncation");
+	}
+	/* skipped last_idx must not stay pinned. */
+	{
+		uint8_t skip[BIRDIEBOT_WIFI_CRED_MAX] = {0, 1, 0};
+		count = wifi_cred_rotate_order(table, 3, 1, skip, order, 2);
+		CHECK(count == 2 && order[0] == 2 && order[1] == 0,
+		      "skipped last_idx is neither pinned nor returned");
+	}
+	/* max larger than eligible candidates is clamped to the candidate count. */
+	count = wifi_cred_rotate_order(table, 3, BIRDIEBOT_WIFI_CRED_NONE, NULL, order, 8);
+	CHECK(count == 3 && order[0] == 2 && order[1] == 1 && order[2] == 0,
+	      "max > count is clamped to count without changing the order");
+}
+
 int main(void)
 {
 	printf("TAP version 13\n");
@@ -310,6 +367,7 @@ int main(void)
 	test_default_ap_ssid();
 	test_eviction();
 	test_rotation();
+	test_rotation_top_n();
 
 	printf("1..%d\n", g_test_no);
 	printf("# %d/%d checks passed", g_test_no - g_failed, g_test_no);
