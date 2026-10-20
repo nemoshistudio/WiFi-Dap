@@ -10,8 +10,7 @@ idf_component_register(
         SRCS ${SOURCES}
         INCLUDE_DIRS "."
         REQUIRES esp_http_server
-        PRIV_REQUIRES request_runner api_router json memory_pool utils html SSDP
+        PRIV_REQUIRES request_runner api_router json memory_pool utils html SSDP ws_router wt_common
 )
 
 idf_component_set_property(${COMPONENT_NAME} WHOLE_ARCHIVE ON)
-

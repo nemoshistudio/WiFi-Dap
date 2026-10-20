@@ -7,15 +7,19 @@
 #include "web_uri_module.h"
 #include "api_json_router.h"
 #include "memory_pool.h"
+#include "wt_ws_router.h"
+#include "wt_data_def.h"
 
 #include <esp_http_server.h>
 #include <esp_log.h>
 
 #include <cJSON.h>
 #include <errno.h>
+#include <string.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <lwipopts.h>
 #include <lwip/netdb.h>
 
@@ -33,6 +37,9 @@
 #define MSG_UNSUPPORTED_CMD    ERROR_MSG_TEMPLATE("Unsupported cmd", 4)
 #define MSG_PROPERTY_ERROR     ERROR_MSG_TEMPLATE("Property error", 5)
 #define MSG_BUSY_ERROR         ERROR_MSG_TEMPLATE("Resource busy", 6)
+#define MSG_UNAUTHORIZED       ERROR_MSG_TEMPLATE("unauthorized", 7)
+/* docs/ws-binary-router.md §3.2: malformed/oversized inbound binary frame. */
+#define MSG_BINARY_ERROR       "{\"error\":\"Bad binary frame\",\"code\":2}"
 
 #define GET_FD_IDX(fd) ((fd) - LWIP_SOCKET_OFFSET)
 
@@ -61,6 +68,13 @@ struct ws_ctx_t {
 	uint8_t valid_fd[CONFIG_LWIP_MAX_SOCKETS];
 	int8_t client_count;
 
+	/* protects clients[]/valid_fd[]/client_count: open/close happen in the
+	 * httpd task while heartbeat and the ws_router tx task iterate the list. */
+	struct {
+		SemaphoreHandle_t mutex;
+		StaticSemaphore_t xMutexBuffer;
+	} list_lock;
+
 	struct {
 		SemaphoreHandle_t mutex;
 		StaticSemaphore_t xMutexBuffer;
@@ -78,6 +92,11 @@ static inline int ws_send_frame_safe(httpd_handle_t hd, int fd, httpd_ws_frame_t
 static void ws_async_resp(void *arg);
 static void async_send_out_cb(void *arg, int module_status);
 static void json_to_text(ws_msg_t *msg);
+
+/* Binary data path (docs/ws-binary-router.md / docs/protocol.md §3). */
+static int ws_bin_tx_port(const uint8_t *frame, size_t len);
+static void ws_broadcast_frame(httpd_ws_frame_t *pkt);
+static void ws_send_binary_error(httpd_req_t *req);
 
 /* Heartbeat related */
 static inline int8_t ws_add_fd(httpd_handle_t hd, int fd);
@@ -131,7 +150,15 @@ static esp_err_t ws_req_handler(httpd_req_t *req)
 	ws_pkt->payload = ws_msg->payload;
 	switch (ws_pkt->type) {
 	case HTTPD_WS_TYPE_CONTINUE:
-		ESP_LOGE(TAG, "WS Continue not handled");
+		/* No fragment aggregation (docs/ws-binary-router.md §3/§5): only
+		 * FIN=1 frames are routed. Drain the fragment payload so the WS
+		 * stream does not desync, then answer with the binary error frame. */
+		ESP_LOGE(TAG, "WS Continue not handled (len %u)", (unsigned)ws_pkt->len);
+		if (httpd_ws_recv_frame(req, ws_pkt, ws_pkt->len) != ESP_OK) {
+			ESP_LOGE(TAG, "ws recv continue data error");
+			return ws_on_close(req, ws_pkt, ws_msg);
+		}
+		ws_send_binary_error(req);
 		goto end;
 	case HTTPD_WS_TYPE_TEXT:
 		/* read incoming data */
@@ -223,6 +250,7 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 end:
 	cJSON_Delete(ws_msg->json.in);
 put_buf:
+	ws_pkt->final = 1;
 	ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), ws_pkt);
 	memory_pool_put(ws_msg);
 	return err;
@@ -248,6 +276,10 @@ void ws_set_err_msg(httpd_ws_frame_t *p_frame, api_json_req_status_e ret)
 		p_frame->len = strlen(MSG_PROPERTY_ERROR);
 		p_frame->payload = (uint8_t *)MSG_PROPERTY_ERROR;
 		break;
+	case API_JSON_UNAUTHORIZED:
+		p_frame->len = strlen(MSG_UNAUTHORIZED);
+		p_frame->payload = (uint8_t *)MSG_UNAUTHORIZED;
+		break;
 	default:
 		p_frame->len = strlen(MSG_INTERNAL_ERROR);
 		p_frame->payload = (uint8_t *)MSG_INTERNAL_ERROR;
@@ -257,10 +289,84 @@ void ws_set_err_msg(httpd_ws_frame_t *p_frame, api_json_req_status_e ret)
 
 _Static_assert(sizeof(httpd_ws_frame_t) <= 16, "bin_data_internal padding not sufficient for httpd_ws_frame_t");
 
+/* Reply with docs/ws-binary-router.md §3.2 error frame (text, FIN=1). */
+static void ws_send_binary_error(httpd_req_t *req)
+{
+	httpd_ws_frame_t pkt = {
+		.type = HTTPD_WS_TYPE_TEXT,
+		.final = 1,
+		.payload = (uint8_t *)MSG_BINARY_ERROR,
+		.len = strlen(MSG_BINARY_ERROR),
+	};
+	ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &pkt);
+}
+
+/**
+ * @brief Inbound WS binary frame: validate, split the 4-byte header, dispatch.
+ *
+ * Contract (docs/ws-binary-router.md §3.2 / docs/protocol.md §3):
+ *   - only FIN=1 complete frames enter the router (no fragment aggregation);
+ *   - frame length must be >= 4 (header) and <= wt_ws_router_max_payload();
+ *   - payload is only valid during the callback, the router does not retain it;
+ *   - on any validation/dispatch error answer MSG_BINARY_ERROR.
+ * uri_ws does not implement any business logic: it only validates and routes.
+ */
 int ws_on_binary_data(httpd_req_t *req, ws_msg_t *ws_msg)
 {
-	(void) req;
+	httpd_ws_frame_t *ws_pkt = &ws_msg->ws_pkt;
+	const size_t hdr_len = sizeof(wt_bin_data_hdr_t);
+	const size_t max_payload = wt_ws_router_max_payload();
+	int err;
+
+	/* Always drain the frame payload first so the httpd WS stream stays in
+	 * sync even when the frame is rejected below. */
+	err = httpd_ws_recv_frame(req, ws_pkt, ws_pkt->len);
+	if (unlikely(err != ESP_OK)) {
+		ESP_LOGE(TAG, "ws recv binary data error: %s", esp_err_to_name(err));
+		return ws_on_close(req, ws_pkt, ws_msg);
+	}
+
+	if (unlikely(ws_pkt->final != 1 || ws_pkt->len < hdr_len ||
+	             max_payload == 0 || ws_pkt->len > max_payload)) {
+		ESP_LOGE(TAG, "bad binary frame: final=%d len=%u max=%u",
+		         (int)ws_pkt->final, (unsigned)ws_pkt->len, (unsigned)max_payload);
+		ws_send_binary_error(req);
+		memory_pool_put(ws_msg);
+		return ESP_OK;
+	}
+
+	const uint8_t *frame = ws_pkt->payload;
+	int ret = wt_ws_router_rx(frame[0], frame[1], frame[2],
+	                          frame + hdr_len, ws_pkt->len - hdr_len);
+	if (unlikely(ret != 0)) {
+		ESP_LOGW(TAG, "binary frame not dispatched: type=0x%02x module=%u sub=%u len=%u",
+		         frame[0], frame[1], frame[2],
+		         (unsigned)(ws_pkt->len - hdr_len));
+		ws_send_binary_error(req);
+	}
+
 	memory_pool_put(ws_msg);
+	return ESP_OK;
+}
+
+/**
+ * @brief WS transport tx port registered with wt_ws_router.
+ *
+ * Called by the ws_router send task (never from the httpd callback) with a
+ * complete binary frame (4B header + payload). The frame buffer is owned by the
+ * router and valid for the duration of the call only: httpd_ws_send_frame_async
+ * copies it while sending synchronously, so no retention is needed.
+ */
+static int ws_bin_tx_port(const uint8_t *frame, size_t len)
+{
+	httpd_ws_frame_t pkt = {
+		.type = HTTPD_WS_TYPE_BINARY,
+		.final = 1,
+		.payload = (uint8_t *)frame, /* httpd_ws_frame_t payload is non-const */
+		.len = len,
+	};
+
+	ws_broadcast_frame(&pkt);
 	return 0;
 }
 
@@ -358,8 +464,12 @@ void json_to_text(ws_msg_t *ws_msg)
  * */
 static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 {
+	int8_t ret = 0;
+
+	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
 	if (ws_ctx.client_count >= CONFIG_LWIP_MAX_SOCKETS) {
-		return 1;
+		ret = 1;
+		goto out;
 	}
 
 	uint8_t idx = GET_FD_IDX(fd);
@@ -367,7 +477,9 @@ static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 	ws_ctx.clients[idx].hd = hd;
 	ws_ctx.valid_fd[ws_ctx.client_count] = fd;
 	ws_ctx.client_count++;
-	return 0;
+out:
+	xSemaphoreGive(ws_ctx.list_lock.mutex);
+	return ret;
 }
 
 /**
@@ -376,14 +488,16 @@ static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
  */
 static inline void ws_rm_fd(int fd)
 {
+	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
 	for (int i = 0; i < ws_ctx.client_count; ++i) {
 		if (ws_ctx.valid_fd[i] != fd) {
 			continue;
 		}
 		ws_ctx.valid_fd[i] = ws_ctx.valid_fd[ws_ctx.client_count - 1];
 		ws_ctx.client_count--;
-		return;
+		break;
 	}
+	xSemaphoreGive(ws_ctx.list_lock.mutex);
 }
 
 static inline int ws_send_frame_safe(httpd_handle_t hd, int fd, httpd_ws_frame_t *frame)
@@ -395,24 +509,48 @@ static inline int ws_send_frame_safe(httpd_handle_t hd, int fd, httpd_ws_frame_t
 	return err;
 }
 
+/**
+ * @brief Send one frame to every connected WS client.
+ *
+ * Takes a snapshot of the fd list under list_lock, then sends outside of the
+ * lock (sending can block on slow sockets). Dead clients are dropped from the
+ * list and their sockets closed, mirroring the previous heartbeat behaviour.
+ * Any task (heartbeat / ws_router tx task) may call this.
+ */
+static void ws_broadcast_frame(httpd_ws_frame_t *pkt)
+{
+	uint8_t fds[CONFIG_LWIP_MAX_SOCKETS];
+	httpd_handle_t hds[CONFIG_LWIP_MAX_SOCKETS];
+	int count;
+
+	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
+	count = ws_ctx.client_count;
+	for (int i = 0; i < count; ++i) {
+		fds[i] = ws_ctx.valid_fd[i];
+		hds[i] = ws_ctx.clients[GET_FD_IDX(fds[i])].hd;
+	}
+	xSemaphoreGive(ws_ctx.list_lock.mutex);
+
+	for (int i = 0; i < count; ++i) {
+		int err = ws_send_frame_safe(hds[i], fds[i], pkt);
+		if (unlikely(err)) {
+			ESP_LOGE(TAG, "broadcast send err (fd %d): %s", fds[i], esp_err_to_name(err));
+			ws_rm_fd(fds[i]);
+			httpd_sess_trigger_close(hds[i], fds[i]);
+		}
+	}
+}
+
 static inline void ws_broadcast_heartbeat()
 {
 	static httpd_ws_frame_t ws_pkt = {
 		.len = 0,
 		.payload = NULL,
 		.type = HTTPD_WS_TYPE_TEXT,
+		.final = 1,
 	};
 
-	int err;
-	for (int i = 0; i < ws_ctx.client_count; ++i) {
-		uint8_t idx = GET_FD_IDX(ws_ctx.valid_fd[i]);
-		err = ws_send_frame_safe(ws_ctx.clients[idx].hd, ws_ctx.clients[idx].fd, &ws_pkt);
-		if (err) {
-			ws_rm_fd(ws_ctx.clients[idx].fd);
-			httpd_sess_trigger_close(ws_ctx.clients[idx].hd, ws_ctx.clients[idx].fd);
-			ESP_LOGE(TAG, "hb send err: %s", esp_err_to_name(err));
-		}
-	}
+	ws_broadcast_frame(&ws_pkt);
 }
 
 _Noreturn
@@ -443,18 +581,25 @@ static const httpd_uri_t uri_api = {
 static int WS_REQ_INIT(const httpd_uri_t **uri_conf)
 {
 	*uri_conf = &uri_api;
-	xTaskCreate(heartbeat_task, "hb task", 2048, NULL, 3, &ws_ctx.task_heartbeat);
 
 	ws_ctx.client_count = 0;
+	ws_ctx.list_lock.mutex = xSemaphoreCreateMutexStatic(&ws_ctx.list_lock.xMutexBuffer);
 	for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; ++i) {
 		ws_ctx.lock[i].mutex = xSemaphoreCreateMutexStatic(&ws_ctx.lock[i].xMutexBuffer);
 	}
+
+	/* Register the WS binary send port before the server starts handling frames
+	 * (docs/ws-binary-router.md §2: must be called before start_webserver()). */
+	wt_ws_router_set_tx_port(ws_bin_tx_port);
+
+	xTaskCreate(heartbeat_task, "hb task", 2048, NULL, 3, &ws_ctx.task_heartbeat);
 	return 0;
 }
 
 static int WS_REQ_EXIT(const httpd_uri_t **uri_conf)
 {
 	*uri_conf = &uri_api;
+	wt_ws_router_set_tx_port(NULL);
 	vTaskDelete(ws_ctx.task_heartbeat);
 	ws_ctx.task_heartbeat = NULL;
 	return 0;

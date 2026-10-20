@@ -11,71 +11,51 @@
 
 #define TAG "web server"
 
-#define MAKE_U32(b0, b1, b2, b3) ((b0) | (b1) << 8 | (b2) << 16 | (b3)  << 24)
-#define URI_WS_STR MAKE_U32('/', 'w', 's', '\0')
-#define URI_API_STR MAKE_U32('/', 'a', 'p', 'i')
+#define WEB_WS_URI "/ws"
 
 static httpd_handle_t http_server = NULL;
 
 /**
- * 3 types of ref:
- *   - 1. "/"
- *   - 2. "/entry"
- *   - 3. "/dir/"
- * 4 types of target
- *   - 1. "/.*"
- *   - 2. "/entry"
- *   - 2. "/dir/"
- *   - 3. "/dir/.*"
- * */
+ * Custom URI matcher (docs/protocol.md §1), 3 types of ref:
+ *   - 1. "/"        : SPA entry, matches every GET path not matched earlier
+ *   - 2. "/entry"   : exact match
+ *   - 3. "/dir/"    : prefix match
+ * plus the WS endpoint, which must match "/ws" and "/ws?<query>" (the auth
+ * token may be passed as /ws?token=<pair_code>; never match /ws.<asset>).
+ */
 static bool uri_match(const char *reference_uri, const char *uri_to_match, size_t match_upto)
 {
-	const uint32_t *ptr32_ref = (const uint32_t *) reference_uri;
-	const uint32_t *ptr32_target = (const uint32_t *) uri_to_match;
-	size_t ref_length;
+	size_t ref_length = strlen(reference_uri);
 
-	/* optimized for /ws quick access */
-	if (likely(match_upto == 3)) {
-		if (likely(*ptr32_ref == URI_WS_STR)) {
-			ESP_LOGI(TAG, "cmp ws");
-			return *ptr32_target == *ptr32_ref;
+	/* WS endpoint: "/ws" or "/ws?token=..." (query string is allowed). */
+	if (ref_length == sizeof(WEB_WS_URI) - 1 &&
+	    memcmp(reference_uri, WEB_WS_URI, ref_length) == 0) {
+		if (match_upto < ref_length || memcmp(uri_to_match, WEB_WS_URI, ref_length) != 0) {
+			return false;
 		}
+		return match_upto == ref_length || uri_to_match[ref_length] == '?';
 	}
 
-	/* ref should be shorter than target */
-	ref_length = strlen(reference_uri);
+	/* ref should not be longer than the target */
 	if (ref_length > match_upto) {
-		ESP_LOGI(TAG, "no match length ref %s t: %s", reference_uri, uri_to_match);
 		return false;
 	}
 
-	// strict matching "/entry" for ref = "/entry"
+	/* strict matching "/entry" for ref = "/entry" */
 	if (ref_length == match_upto) {
-		if (memcmp(reference_uri, uri_to_match, ref_length) == 0) {
-			ESP_LOGI(TAG, "strict match %s", reference_uri);
-			return true;
-		}
+		return memcmp(reference_uri, uri_to_match, ref_length) == 0;
 	}
 
-	// if ref = /dir/ targets are /dir/ and /dir/*
-	if (reference_uri[ref_length - 1] == '/' && ref_length > 1) {
-		if (memcmp(reference_uri, uri_to_match, ref_length) == 0) {
-			ESP_LOGI(TAG, "match /dir/");
-			return true;
-		} else {
-			ESP_LOGI(TAG, "no match /dir/");
-			return false;
-		}
+	/* if ref = /dir/ targets are /dir/ and /dir/... */
+	if (ref_length > 1 && reference_uri[ref_length - 1] == '/') {
+		return memcmp(reference_uri, uri_to_match, ref_length) == 0;
 	}
 
-	/* Fall back to root pages */
-	// match /* when ref if /
-	if (reference_uri[ref_length - 1] == '/') {
-		ESP_LOGI(TAG, "match /");
+	/* Fall back to the SPA entry: handler "/" matches every other GET path. */
+	if (ref_length == 1 && reference_uri[0] == '/') {
 		return true;
 	}
 
-	ESP_LOGI(TAG, "fall back false %s t: %s", reference_uri, uri_to_match);
 	return false;
 }
 
@@ -117,12 +97,6 @@ void start_webserver(void)
 
 	ESP_LOGI(TAG, "Registering URI handlers");
 	uri_module_init(http_server);
-}
-
-static esp_err_t stop_webserver(httpd_handle_t server)
-{
-	// Stop the httpd server
-	return httpd_stop(server);
 }
 
 int server_is_running()

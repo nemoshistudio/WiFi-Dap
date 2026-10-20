@@ -36,6 +36,9 @@ typedef enum api_json_req_status_e {
 	API_JSON_UNSUPPORTED_CMD = 4,
 	API_JSON_PROPERTY_ERR = 5,
 	API_JSON_BUSY = 6,
+	/* docs/protocol.md §1.1: auth enabled and token missing/invalid.
+	 * The AUTH check itself is wired at the uri_ws/uri_api layer (Lead, WP-209). */
+	API_JSON_UNAUTHORIZED = 7,
 } api_json_req_status_e;
 
 typedef int (*api_json_on_req)(uint16_t cmd, api_json_req_t *req, api_json_module_async_t *rsp);

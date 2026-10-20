@@ -24,6 +24,16 @@ typedef int (*wt_ws_rx_cb_t)(uint8_t data_type, uint8_t module, uint8_t sub_mod,
 /** 注册模块的入站二进制回调；成功 0，同模块重复注册 -1。回调须快速返回。 */
 int wt_ws_router_register_rx(uint8_t module, wt_ws_rx_cb_t cb);
 
+/** WS 发送端口：由 uri_ws.c 在 start_webserver 前注册；router 广播时调用。
+ *  frame 指向完整 WS 二进制帧缓冲（4B 头 + payload），返回 0 成功。 */
+typedef int (*wt_ws_tx_port_t)(const uint8_t *frame, size_t len);
+int wt_ws_router_set_tx_port(wt_ws_tx_port_t port);
+
+/** 入站二进制帧入口：uri_ws 收到 FIN=1 完整帧并校验长度后调用。
+ *  返回 0 已分发；-1 无处理者/参数错误（uri_ws 回错误帧）。 */
+int wt_ws_router_rx(uint8_t data_type, uint8_t module, uint8_t sub_mod,
+                    const uint8_t *payload, size_t len);
+
 /** 广播二进制帧给所有 WS 客户端；payload 被复制；任一线程可调用；队列满 -1。 */
 int wt_ws_router_broadcast(uint8_t data_type, uint8_t module, uint8_t sub_mod,
                            const uint8_t *payload, size_t len);

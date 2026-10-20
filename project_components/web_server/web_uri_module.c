@@ -59,13 +59,16 @@ int uri_module_add(uint8_t priority, uri_module_func init, uri_module_func exit)
 	module_arr[module_count].module.init = init;
 	module_arr[module_count].module.priority = priority;
 
+	/* Keep the list sorted ascending by priority (smaller priority is called
+	 * first, see web_uri_module.h): insert before the first module whose
+	 * priority is larger, or at the tail when none is. */
 	uri_module_list_t *item;
 	dl_list_for_each(item, &list_head, uri_module_list_t, list) {
-		if (item->module.priority <= priority) {
+		if (item->module.priority > priority) {
 			break;
 		}
 	}
-	dl_list_add(&item->list, &module_arr[module_count].list);
+	dl_list_add(item->list.prev, &module_arr[module_count].list);
 	module_count++;
 	return 0;
 }
