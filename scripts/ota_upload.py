@@ -5,7 +5,7 @@
 Pure Python standard library (no pip packages). Two modes:
 
   upload :  POST http://<host>/api/ota/upload  (Content-Type application/octet-stream,
-            Content-Length, optional X-SHA256, optional Authorization: Bearer)
+            Content-Length, optional X-SHA256)
   --info :  connect to ws://<host>/ws and query OTA module 5 GET_INFO
             ({"module":5,"cmd":1}) to print the running slot/version.
 
@@ -21,9 +21,6 @@ Examples:
 
   # info only (running slot/version/status)
   python3 scripts/ota_upload.py --host 192.168.1.1 --info
-
-  # auth enabled (BIRDIEBOT_WEB_AUTH=y): same pair code as the Web UI token
-  python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --token 12345678
 
   # error injection: send a deliberately wrong X-SHA256 (device must answer 422)
   python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin \
@@ -51,7 +48,7 @@ import socket
 import struct
 import sys
 import time
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -141,8 +138,8 @@ def print_info(info: dict) -> None:
 # ---------------------------------------------------------------------------
 
 class WsClient:
-    def __init__(self, host: str, port: int, timeout: float, token: str | None = None):
-        path = WS_PATH + (f"?token={quote(token)}" if token else "")
+    def __init__(self, host: str, port: int, timeout: float):
+        path = WS_PATH
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
         self._buf = b""
@@ -260,16 +257,9 @@ class WsClient:
         return self.recv_json(timeout)
 
 
-def ws_get_info(host: str, port: int, token: str | None, timeout: float) -> dict:
-    client = WsClient(host, port, timeout, token)
+def ws_get_info(host: str, port: int, timeout: float) -> dict:
+    client = WsClient(host, port, timeout)
     try:
-        if token:
-            # Query ?token= is the primary auth mechanism; the AUTH first frame
-            # is also accepted by the firmware, so send it and ignore its reply.
-            try:
-                client.request({"module": 0, "cmd": 0, "token": token}, timeout=3.0)
-            except (TimeoutError, ConnectionError, OSError):
-                pass
         reply = client.request({"module": 5, "cmd": 1}, timeout=5.0)
     finally:
         client.close()
@@ -278,13 +268,13 @@ def ws_get_info(host: str, port: int, token: str | None, timeout: float) -> dict
     return reply
 
 
-def fetch_info_with_retry(host: str, port: int, token: str | None,
+def fetch_info_with_retry(host: str, port: int,
                           timeout: float, wait_seconds: float) -> dict:
     deadline = time.time() + wait_seconds
     last_error: Exception | None = None
     while time.time() < deadline:
         try:
-            return ws_get_info(host, port, token, timeout)
+            return ws_get_info(host, port, timeout)
         except (OSError, ConnectionError, TimeoutError, ValueError) as exc:
             last_error = exc
             time.sleep(1.0)
@@ -351,8 +341,6 @@ def run_upload(args: argparse.Namespace, host: str, port: int) -> int:
         connection.putheader("Connection", "close")
         if send_sha:
             connection.putheader("X-SHA256", send_sha)
-        if args.token:
-            connection.putheader("Authorization", f"Bearer {args.token}")
         connection.endheaders()
 
         sent = 0
@@ -413,7 +401,7 @@ def run_upload(args: argparse.Namespace, host: str, port: int) -> int:
         print(f"\nwaiting up to {wait_seconds:.0f}s for the device to reboot and "
               "answer WS OTA/GET_INFO ...")
         try:
-            info = fetch_info_with_retry(host, port, args.token, args.timeout, wait_seconds)
+            info = fetch_info_with_retry(host, port, args.timeout, wait_seconds)
         except (TimeoutError, OSError, ConnectionError) as exc:
             eprint(f"warning: upload succeeded but GET_INFO after reboot failed: {exc}")
             return EXIT_OK
@@ -429,7 +417,7 @@ def run_upload(args: argparse.Namespace, host: str, port: int) -> int:
 def run_info(args: argparse.Namespace, host: str, port: int) -> int:
     print(f"== OTA GET_INFO via ws://{host}:{port}{WS_PATH} ==")
     try:
-        info = ws_get_info(host, port, args.token, args.timeout)
+        info = ws_get_info(host, port, args.timeout)
     except (OSError, ConnectionError, TimeoutError, ValueError) as exc:
         eprint(f"ota_upload.py: WS OTA/GET_INFO failed: {exc}")
         return EXIT_FAIL
@@ -460,8 +448,6 @@ def build_parser() -> argparse.ArgumentParser:
                              "use a wrong value to test the 422 path")
     parser.add_argument("--no-sha256", action="store_true",
                         help="do not send X-SHA256 (device still verifies esp_ota_end)")
-    parser.add_argument("--token", help="pair code for Authorization: Bearer / WS ?token= "
-                                        "(needed when BIRDIEBOT_WEB_AUTH=y)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                         help=f"socket/upload timeout in seconds (default {DEFAULT_TIMEOUT:.0f})")
     parser.add_argument("--info", action="store_true",

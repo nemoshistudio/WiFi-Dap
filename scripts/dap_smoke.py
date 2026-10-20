@@ -413,22 +413,15 @@ def ws_upgrade(host: str, port: int, path: str, timeout: float, retries: int,
     }
 
 
-def probe_ws_json(host: str, port: int, path: str, timeout: float, retries: int,
-                  token: str | None) -> dict:
-    query = f"{path}"
-    if token:
-        query = f"{path}?token={token}"
-    sock, conn, status, info = ws_upgrade(host, port, query, timeout, retries, None)
+def probe_ws_json(host: str, port: int, path: str, timeout: float, retries: int) -> dict:
+    sock, conn, status, info = ws_upgrade(host, port, path, timeout, retries, None)
     try:
         if status != 101:
-            raise SmokeError(f"WS upgrade returned HTTP {status} (expected 101)"
-                             + ("; auth is enabled? use --token/--allow-auth" if status == 401 else ""))
+            raise SmokeError(f"WS upgrade returned HTTP {status} (expected 101)")
         if not info["accept_ok"]:
             raise SmokeError("WS handshake Sec-WebSocket-Accept mismatch")
         conn.send_text(json.dumps(FM_INFO_REQUEST))
         msg = conn.recv_json_text(timeout)
-        if msg.get("code") == 7 or msg.get("err") == "unauthorized":
-            raise SmokeError("WS /ws unauthorized (auth enabled; pass --token or --allow-auth)")
         return {"upgrade": info, "fm_info": msg}
     finally:
         try:
@@ -585,10 +578,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="also probe USBIP OP_REQ_IMPORT (attach reply)")
     parser.add_argument("--with-ws-dap", action="store_true",
                         help="also probe the legacy WebSocket-DAP transport on the proxy port")
-    parser.add_argument("--token", default=None,
-                        help="Web auth pairing token (only needed when CONFIG_BIRDIEBOT_WEB_AUTH=y)")
-    parser.add_argument("--allow-auth", action="store_true",
-                        help="treat 401/unauthorized as 'auth enabled, skipped' instead of failure")
     parser.add_argument("--expect", action="append", default=[], metavar="KEY=VALUE",
                         help="override expectation (keys: vid,pid,busid,protocol_version,http_marker)")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON summary")
@@ -633,14 +622,8 @@ def main(argv: list[str] | None = None) -> int:
             skipped.append("http")
 
         if not args.skip_ws:
-            try:
-                run("ws", probe_ws_json, args.host, args.http_port, "/ws",
-                    args.timeout, args.retries, args.token)
-            except SmokeError as exc:
-                if args.allow_auth and ("401" in str(exc) or "unauthorized" in str(exc)):
-                    skipped.append("ws (auth enabled)")
-                else:
-                    raise
+            run("ws", probe_ws_json, args.host, args.http_port, "/ws",
+                args.timeout, args.retries)
         else:
             skipped.append("ws")
 

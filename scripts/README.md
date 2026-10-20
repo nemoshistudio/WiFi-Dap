@@ -193,10 +193,8 @@ scripts/gen_web_assets.sh --src web/dist-gz --out build/web-assets --install
 
 ```bash
 # 基本用法（AP 模式默认 192.168.1.1；STA 模式用路由器分配 IP / mDNS 名）
+# 固件已移除登录/鉴权功能，只需保证测试机在可信内网、能访问设备 80/3240 端口。
 scripts/device_smoke.sh --host 192.168.1.1
-
-# 开鉴权（BIRDIEBOT_WEB_AUTH=y）时带 pair code
-scripts/device_smoke.sh --host 192.168.1.1 --token 123456
 
 # 只测其中一类 / 机器可读 summary（stdout 只有 JSON，诊断在 stderr）
 scripts/device_smoke.sh --host 192.168.1.1 --skip-dap --json
@@ -207,15 +205,14 @@ scripts/device_smoke.sh --host 192.168.1.1 --skip-ws
 | --- | --- |
 | `--host <ip>` | 设备地址（必填；裸 IP/主机名，不带 scheme） |
 | `--port N` | HTTP/WebSocket 端口（默认 80；USBIP 探测仍用 3240） |
-| `--token T` | 鉴权 pair code（`BIRDIEBOT_WEB_AUTH=y` 构建需要） |
 | `--skip-dap` | 跳过 `dap_smoke.py`（USBIP/HTTP/WS 握手） |
 | `--skip-ws` | 跳过两个 `e2e_ws_client.py` 步骤 |
 | `--json` | 输出机器可读 summary：`steps[]`（name/status/exit_code/duration_ms/command/output_tail）、`summary`、`result`、`device_reachable`、未连接时 `hint` |
 | `-h` | 帮助 |
 
 退出码：`0` 全部 PASS；`1` 任一步失败**或设备不可达**；`2` 参数错误。
-设备不可达时先做 3s TCP 预检并打印排查提示（设备未上电/未连 AP/IP 或端口错/防火墙/
-鉴权），然后以 SKIP 记录各步骤并返回 1。
+设备不可达时先做 3s TCP 预检并打印排查提示（设备未上电/未连 AP/IP 或端口错/防火墙），
+然后以 SKIP 记录各步骤并返回 1。
 
 **分工与前置**
 
@@ -245,8 +242,7 @@ python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --info
 # 只查 OTA/GET_INFO（running/running_ver/free/slot_size/status/rollback/sha256）
 python3 scripts/ota_upload.py --host 192.168.1.1 --info
 
-# 鉴权开启（BIRDIEBOT_WEB_AUTH=y）/ 错误注入（错误 X-SHA256 期望 HTTP 422）
-python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --token 12345678
+# 错误注入（错误 X-SHA256 期望 HTTP 422）
 python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --sha256 00…00
 ```
 
@@ -256,7 +252,6 @@ python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --sha256 00…00
 | `--file` | 要上传的 app `.bin`（`build/esp32s3/birdiebot_wifi_dap.bin`，非 merge/zip） |
 | `--sha256` | 可选 `X-SHA256`（64 hex）；默认=文件 hash，传错误值即 422 错误注入 |
 | `--no-sha256` | 不发 `X-SHA256`（设备仍用 `esp_ota_end()` 校验） |
-| `--token` | 鉴权 pair code：HTTP `Authorization: Bearer` / WS `?token=` |
 | `--timeout` | socket/上传超时秒数（默认 300，契约会话上限） |
 | `--info` | 只查 `GET_INFO`；与 `--file` 同用时上传后轮询重连验证新版本 |
 | `--info-wait` | 上传后等待 GET_INFO 的秒数（默认 20，0=不等待） |
@@ -349,12 +344,11 @@ CC=clang scripts/test_wifi_cred_logic.sh     # 指定宿主编译器
   `last_success` 归一化、默认 AP SSID（MAC 末 2 字节大写）。
 - 退出码：0 全过；1 断言失败；2 用法/工具链/编译错误。`TEST_BIN=/path` 可指定输出文件。
 
-### 设备只读校验（纯 Python 标准库，带 token 支持）
+### 设备只读校验（纯 Python 标准库）
 
 ```bash
 python3 scripts/test_wifi_device_readonly.py --host 192.168.1.1
-python3 scripts/test_wifi_device_readonly.py --host dap.local --token 123456
-BIRDIEBOT_TOKEN=123456 python3 scripts/test_wifi_device_readonly.py --host dap.local --json
+python3 scripts/test_wifi_device_readonly.py --host dap.local --json
 ```
 
 - 只连接 `/ws` 并发送 **GET 命令 + 非法请求探针**（cmd 12/13/14 的非法 payload 必须被
