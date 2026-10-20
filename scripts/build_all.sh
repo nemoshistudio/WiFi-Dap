@@ -216,12 +216,14 @@ for target in "${TARGETS[@]}"; do
 
     if [ "$need_set_target" -eq 1 ]; then
         log "idf.py set-target $target (SDKCONFIG_DEFAULTS=$(defaults_file "$target"), SDKCONFIG=$sdkconfig_rel)"
+        # All -D options must precede the idf.py command (set-target), otherwise
+        # idf.py treats them as unknown commands.
         set_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel"
                  -D "SDKCONFIG_DEFAULTS=$(defaults_file "$target")"
-                 -D "SDKCONFIG=$sdkconfig_rel"
-                 set-target "$target")
+                 -D "SDKCONFIG=$sdkconfig_rel")
         [ -n "$FW_VERSION" ] && set_cmd+=(-D "BIRDIEBOT_FW_VERSION=$FW_VERSION")
         set_cmd+=(-D "BIRDIEBOT_FW_RELEASE=$([ "$RELEASE" -eq 1 ] && echo ON || echo OFF)")
+        set_cmd+=(set-target "$target")
         if ! run_locked "${set_cmd[@]}" >>"$log_file" 2>&1; then
             rc=1
         fi
