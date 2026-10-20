@@ -30,6 +30,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <lwipopts.h>
 
 #include <nvs.h>
@@ -56,8 +57,19 @@
 
 #if BIRDIEBOT_AUTH_ENABLED
 
+/* AUTH failure rate limiting (security review P1-4): at most
+ * AUTH_FAIL_MAX failures per AUTH_FAIL_WINDOW_MS per socket fd. */
+#define AUTH_FAIL_MAX       5
+#define AUTH_FAIL_WINDOW_MS 60000
+
+typedef struct {
+	uint32_t window_start_ms;
+	uint8_t failures;
+} auth_fail_state_t;
+
 static char s_token[BIRDIEBOT_AUTH_TOKEN_MAX + 1];
 static bool s_ws_authed[AUTH_WS_MAX];
+static auth_fail_state_t s_ws_fail[AUTH_WS_MAX];
 static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf;
 static bool s_inited;
@@ -90,7 +102,47 @@ static void auth_ws_set(int fd, bool authed)
 	}
 	auth_lock();
 	s_ws_authed[idx] = authed;
+	if (authed) {
+		memset(&s_ws_fail[idx], 0, sizeof(s_ws_fail[idx]));
+	}
 	auth_unlock();
+}
+
+/** Reset the AUTH failure counter of one fd (successful auth / new connection). */
+static void auth_ws_reset_failures(int fd)
+{
+	int idx = auth_fd_index(fd);
+
+	if (idx < 0) {
+		return;
+	}
+	auth_lock();
+	memset(&s_ws_fail[idx], 0, sizeof(s_ws_fail[idx]));
+	auth_unlock();
+}
+
+/** Record one AUTH failure; returns true when the fd is now rate limited. */
+static bool auth_ws_note_failure(int fd)
+{
+	int idx = auth_fd_index(fd);
+	bool limited = false;
+	uint32_t now = (uint32_t) (xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+	if (idx < 0) {
+		return true;
+	}
+	auth_lock();
+	if (s_ws_fail[idx].window_start_ms == 0 ||
+	    (uint32_t) (now - s_ws_fail[idx].window_start_ms) > AUTH_FAIL_WINDOW_MS) {
+		s_ws_fail[idx].window_start_ms = now;
+		s_ws_fail[idx].failures = 0;
+	}
+	if (s_ws_fail[idx].failures < 0xFF) {
+		s_ws_fail[idx].failures++;
+	}
+	limited = s_ws_fail[idx].failures > AUTH_FAIL_MAX;
+	auth_unlock();
+	return limited;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -139,6 +191,22 @@ static void auth_nvs_store_token(const char *token)
 	}
 }
 
+/** Minimum length of an auto-generated token (128-bit = 32 hex chars, P1-4). */
+#define AUTH_TOKEN_MIN_GENERATED_LEN 32
+
+/** Generate a 128-bit token as 32 lowercase hex chars (requires out_len >= 33). */
+static void auth_generate_token(char *out, size_t out_len)
+{
+	uint32_t words[4];
+
+	for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); ++i) {
+		words[i] = esp_random();
+	}
+	snprintf(out, out_len, "%08lx%08lx%08lx%08lx",
+	         (unsigned long) words[0], (unsigned long) words[1],
+	         (unsigned long) words[2], (unsigned long) words[3]);
+}
+
 static void auth_token_init(void)
 {
 	const char *source;
@@ -150,23 +218,43 @@ static void auth_token_init(void)
 			ESP_LOGW(TAG, "CONFIG_BIRDIEBOT_WEB_TOKEN too long, truncated to %d chars",
 			         BIRDIEBOT_AUTH_TOKEN_MAX);
 		}
+		if (strlen(s_token) < AUTH_TOKEN_MIN_GENERATED_LEN) {
+			ESP_LOGW(TAG, "CONFIG_BIRDIEBOT_WEB_TOKEN is shorter than %d chars; "
+			         "use at least 32 hex chars (128-bit) on non-lab deployments",
+			         AUTH_TOKEN_MIN_GENERATED_LEN);
+		}
 		source = "Kconfig BIRDIEBOT_WEB_TOKEN";
-	} else if (auth_nvs_load_token(s_token, sizeof(s_token))) {
+	} else if (auth_nvs_load_token(s_token, sizeof(s_token)) &&
+	           strlen(s_token) >= AUTH_TOKEN_MIN_GENERATED_LEN) {
 		source = "stored in wt_nvs";
 	} else {
-		snprintf(s_token, sizeof(s_token), "%08lx", (unsigned long) esp_random());
+		/* Security review P1-4: 128-bit token (32 hex chars) generated from four
+		 * esp_random() words. A legacy 8-hex token loaded from NVS is rotated
+		 * once, since 32-bit pairing codes are brute-forceable. */
+		auth_generate_token(s_token, sizeof(s_token));
 		auth_nvs_store_token(s_token);
-		source = "random, persisted in wt_nvs";
+		source = "random 128-bit, persisted in wt_nvs";
 	}
 
-	/* The pairing code must be discoverable by the user: print it once. It is
-	 * a secret, so this is the only place where it is logged. */
+	/* The pairing code must be discoverable by the user (serial console), so it
+	 * is printed once at start-up. WARNING: the log line itself is a secret -
+	 * do not paste serial logs/screenshots into public reports. */
 	ESP_LOGW(TAG, "Web auth ENABLED; pairing token: %s (%s)", s_token, source);
+	ESP_LOGW(TAG, "SECURITY: the pairing token above is secret; serial logs/screenshots leak it");
 	ESP_LOGW(TAG, "WS: /ws?token=<token> or first frame SYSTEM/0/AUTH; HTTP: Authorization: Bearer <token>");
+	ESP_LOGW(TAG, "Note: this protects only ports 80/WS-API; TCP 3240 (USBIP/WS-DAP) and 1346 (UART bridge) are unauthenticated");
 }
+
+#endif /* BIRDIEBOT_AUTH_ENABLED - token generation/persistence */
 
 /* ------------------------------------------------------------------------- */
 /* Host / Origin validation (DNS-rebinding hardening)                        */
+/*                                                                           */
+/* NOTE (security review P1-2): this policy is ALWAYS compiled and enforced, */
+/* independently of CONFIG_BIRDIEBOT_WEB_AUTH. A browser page can open a     */
+/* WebSocket cross-origin without a CORS preflight (CSWSH) and DNS rebinding */
+/* is possible without token auth, so /ws upgrades, /api and upcoming        */
+/* endpoints (/api/ota/upload) are Host/Origin checked in lab mode too.      */
 /* ------------------------------------------------------------------------- */
 
 static bool auth_read_header(httpd_req_t *req, const char *name, char *buf, size_t buf_len)
@@ -237,6 +325,7 @@ static bool auth_headers_ok(httpd_req_t *req)
 	return auth_host_header_ok(req) && auth_origin_header_ok(req);
 }
 
+#if BIRDIEBOT_AUTH_ENABLED
 static bool auth_request_token_ok(httpd_req_t *req)
 {
 	char header[384];
@@ -279,6 +368,7 @@ void birdiebot_auth_init(void)
 
 	s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
 	memset(s_ws_authed, 0, sizeof(s_ws_authed));
+	memset(s_ws_fail, 0, sizeof(s_ws_fail));
 	auth_token_init();
 	s_inited = true;
 #endif
@@ -286,22 +376,26 @@ void birdiebot_auth_init(void)
 
 int birdiebot_auth_http_check(httpd_req_t *req)
 {
-#if BIRDIEBOT_AUTH_ENABLED
-	if (req == NULL || !s_inited) {
-		return BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED;
+	if (req == NULL) {
+		return BIRDIEBOT_AUTH_HTTP_FORBIDDEN;
 	}
+
+	/* P1-2: Host/Origin is enforced even with CONFIG_BIRDIEBOT_WEB_AUTH=n
+	 * (CSWSH / DNS rebinding hardening is independent from the token). */
 	if (!auth_headers_ok(req)) {
 		return BIRDIEBOT_AUTH_HTTP_FORBIDDEN;
+	}
+
+#if BIRDIEBOT_AUTH_ENABLED
+	if (!s_inited) {
+		return BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED;
 	}
 	if (!auth_request_token_ok(req)) {
 		ESP_LOGW(TAG, "HTTP request rejected: missing/invalid token");
 		return BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED;
 	}
-	return BIRDIEBOT_AUTH_HTTP_OK;
-#else
-	(void) req;
-	return BIRDIEBOT_AUTH_HTTP_OK;
 #endif
+	return BIRDIEBOT_AUTH_HTTP_OK;
 }
 
 bool birdiebot_auth_http_ok(httpd_req_t *req)
@@ -311,15 +405,16 @@ bool birdiebot_auth_http_ok(httpd_req_t *req)
 
 bool birdiebot_auth_ws_origin_ok(httpd_req_t *req)
 {
-#if BIRDIEBOT_AUTH_ENABLED
-	if (req == NULL || !s_inited) {
+	/* P1-2: always enforced (also in lab mode) to block CSWSH/DNS rebinding. */
+	if (req == NULL) {
 		return false;
 	}
 	return auth_headers_ok(req);
-#else
-	(void) req;
-	return true;
-#endif
+}
+
+bool birdiebot_auth_host_origin_ok(httpd_req_t *req)
+{
+	return birdiebot_auth_ws_origin_ok(req);
 }
 
 int birdiebot_auth_ws_query_ok(httpd_req_t *req, int fd)
@@ -392,6 +487,7 @@ void birdiebot_auth_ws_open(int fd)
 {
 #if BIRDIEBOT_AUTH_ENABLED
 	auth_ws_set(fd, false);
+	auth_ws_reset_failures(fd);
 #else
 	(void) fd;
 #endif
@@ -401,6 +497,26 @@ void birdiebot_auth_ws_close(int fd)
 {
 #if BIRDIEBOT_AUTH_ENABLED
 	auth_ws_set(fd, false);
+	auth_ws_reset_failures(fd);
+#else
+	(void) fd;
+#endif
+}
+
+bool birdiebot_auth_ws_note_auth_failure(int fd)
+{
+#if BIRDIEBOT_AUTH_ENABLED
+	return auth_ws_note_failure(fd);
+#else
+	(void) fd;
+	return false;
+#endif
+}
+
+void birdiebot_auth_ws_reset_auth_failures(int fd)
+{
+#if BIRDIEBOT_AUTH_ENABLED
+	auth_ws_reset_failures(fd);
 #else
 	(void) fd;
 #endif

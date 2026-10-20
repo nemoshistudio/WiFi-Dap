@@ -12,7 +12,14 @@
  * (`CONFIG_BIRDIEBOT_WEB_AUTH=n`): every check below returns true and the
  * request path is unchanged (laboratory mode).
  *
- * When enabled (`CONFIG_BIRDIEBOT_WEB_AUTH=y`):
+ * Host/Origin validation is ALWAYS enforced (also with auth disabled, security
+ * review P1-2): browsers can open cross-origin WebSockets without a CORS
+ * preflight (CSWSH) and DNS rebinding works without any token, so /ws upgrades,
+ * /api and /api/ota/upload reject Hosts that are not an IP literal / allow-list
+ * entry and Origins that are not same-origin / allow-listed.  TCP 3240
+ * (USBIP/WS-DAP) and TCP 1346 (UART bridge) are NOT covered by this component.
+ *
+ * When the token auth is enabled (`CONFIG_BIRDIEBOT_WEB_AUTH=y`):
  *   - WS `/ws`: `?token=<pair_code>` on the connect URL and/or the first frame
  *     `{"module":0,"cmd":0,"token":"..."}` (SYSTEM cmd 0 AUTH). State is kept
  *     per socket fd and cleared when the WS connection closes.
@@ -21,7 +28,11 @@
  *     `{"err":"unauthorized","code":7}`.
  *   - Host/Origin headers are validated against the request host, the
  *     configured allow-list and CONFIG_LWIP_LOCAL_HOSTNAME to block DNS
- *     rebinding (see project_components/web_server/Kconfig).
+ *     rebinding (see project_components/web_server/Kconfig).  This check runs
+ *     even when the token auth is disabled.
+ *   - The pairing token is 128-bit (32 hex chars) when auto-generated and is
+ *     persisted in wt_nvs; AUTH failures are rate limited per socket
+ *     (5/minute) and the comparison is constant time.
  *
  * Public header so other modules (e.g. a future uri_ota.c) can reuse:
  *   if (!birdiebot_auth_http_ok(req)) { ... 401 ... }
@@ -96,13 +107,21 @@ bool birdiebot_auth_http_ok(httpd_req_t *req);
 int birdiebot_auth_http_check(httpd_req_t *req);
 
 /**
- * @brief WS handshake Host/Origin check.
+ * @brief WS handshake Host/Origin check (always enforced, also with auth=n).
  *
- * @return true when auth is disabled or the headers pass the checks. On false
- *         the WS connection must be closed (HTTP 101 was already sent by the
- *         httpd handshake, so the session is closed instead of 403).
+ * @return true when the headers pass the checks. On false the WS connection
+ *         must be closed (HTTP 101 was already sent by the httpd handshake, so
+ *         the session is closed instead of returning 403).
  */
 bool birdiebot_auth_ws_origin_ok(httpd_req_t *req);
+
+/**
+ * @brief Host/Origin check for any HTTP request (always enforced).
+ *
+ * Same policy as birdiebot_auth_ws_origin_ok(); provided for endpoint handlers
+ * that only need the CSWSH/DNS-rebinding part (auth-less lab mode).
+ */
+bool birdiebot_auth_host_origin_ok(httpd_req_t *req);
 
 /**
  * @brief Validate a `?token=` query parameter at WS handshake time.
@@ -131,6 +150,17 @@ void birdiebot_auth_ws_open(int fd);
 
 /** @brief Clear the auth state of @p fd (called on WS close / dead socket). */
 void birdiebot_auth_ws_close(int fd);
+
+/**
+ * @brief Record one failed AUTH attempt on @p fd (rate limiting, P1-4).
+ *
+ * @return true when the fd is now rate limited (>5 failures/minute); the caller
+ *         should answer with code 7 and may add a short delay.
+ */
+bool birdiebot_auth_ws_note_auth_failure(int fd);
+
+/** @brief Reset the AUTH failure counter of @p fd. */
+void birdiebot_auth_ws_reset_auth_failures(int fd);
 
 #ifdef __cplusplus
 }
