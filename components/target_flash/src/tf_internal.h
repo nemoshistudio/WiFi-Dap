@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include <esp_err.h>
+#include <sdkconfig.h>
 
 #include "wt_target_flash.h"
 #include "wt_target_flash_debug.h"
@@ -126,9 +127,15 @@ typedef struct tf_family_ops {
 extern const tf_family_ops_t tf_family_stm32f4_ops;
 extern const tf_family_ops_t tf_family_stm32h7_ops;
 
-/* ---- bring-up stage tracking (RTC noinit; survives a panic reboot) ---- */
+/* ---- bring-up stage tracking (RTC noinit; debug endpoint builds only) ---- */
 void tf_stage_mark(uint32_t stage);
 uint32_t tf_stage_get(void);
+
+#ifdef CONFIG_BIRDIEBOT_TARGET_FLASH_DEBUG_HTTP
+#define TF_STAGE(stage) tf_stage_mark(stage)
+#else
+#define TF_STAGE(stage) ((void)(stage))
+#endif
 
 /* ---- helpers implemented in tf_swd.c (shared by the family modules) ---- */
 uint64_t tf_now_ms(void);
