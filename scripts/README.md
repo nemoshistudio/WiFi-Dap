@@ -15,6 +15,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `release_local.sh` | 本地发布包（app/bootloader/ptable/合并 bin + gz + SHA256SUMS），**不推送** | WP-143 |
 | `check-version-string.sh` | 版本字符串校验（release 拒绝 `-dirty`/开发后缀） | WP-143 |
 | `check-release-versions.sh` | 固件 tag / Web version / protocol / 镜像内嵌版本交叉校验 | WP-143 |
+| `device_smoke.sh` | 设备就绪**只读**冒烟：USBIP/HTTP/WS 握手 + WS ping + OTA GET_INFO，聚合 PASS/FAIL | WP-305 |
 | `ota_upload.py` | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库） | WP-205/305 |
 | `README.md` | 本文档 | — |
 
@@ -179,6 +180,51 @@ scripts/gen_web_assets.sh --src web/dist-gz --out build/web-assets --install
 - `web_version.txt` 按 `docs/versioning.md` §4.4 写 `web_version / protocol_version /
   git_tag / git_commit / build_time / index_gz_sha256 / worker_gz_sha256 (+ extras)`；
 - `--check` 忽略可变的 `build_time`，其余字段与 gz sha256 必须完全一致；未管理 gz 只告警不删除。
+
+## 设备就绪冒烟：device_smoke.sh
+
+**只读**一键冒烟（不烧录、不复位、不重启）：设备上电且 WiFi/webserver 启动后，按顺序调用
+`scripts/dap_smoke.py`（USBIP devlist + HTTP `GET /` + WS `GET_FM_INFO` 握手）与
+`scripts/e2e_ws_client.py`（`ping` + `ota-info`），聚合 PASS/FAIL/SKIP 与耗时。
+
+```bash
+# 基本用法（AP 模式默认 192.168.1.1；STA 模式用路由器分配 IP / mDNS 名）
+scripts/device_smoke.sh --host 192.168.1.1
+
+# 开鉴权（BIRDIEBOT_WEB_AUTH=y）时带 pair code
+scripts/device_smoke.sh --host 192.168.1.1 --token 123456
+
+# 只测其中一类 / 机器可读 summary（stdout 只有 JSON，诊断在 stderr）
+scripts/device_smoke.sh --host 192.168.1.1 --skip-dap --json
+scripts/device_smoke.sh --host 192.168.1.1 --skip-ws
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--host <ip>` | 设备地址（必填；裸 IP/主机名，不带 scheme） |
+| `--port N` | HTTP/WebSocket 端口（默认 80；USBIP 探测仍用 3240） |
+| `--token T` | 鉴权 pair code（`BIRDIEBOT_WEB_AUTH=y` 构建需要） |
+| `--skip-dap` | 跳过 `dap_smoke.py`（USBIP/HTTP/WS 握手） |
+| `--skip-ws` | 跳过两个 `e2e_ws_client.py` 步骤 |
+| `--json` | 输出机器可读 summary：`steps[]`（name/status/exit_code/duration_ms/command/output_tail）、`summary`、`result`、`device_reachable`、未连接时 `hint` |
+| `-h` | 帮助 |
+
+退出码：`0` 全部 PASS；`1` 任一步失败**或设备不可达**；`2` 参数错误。
+设备不可达时先做 3s TCP 预检并打印排查提示（设备未上电/未连 AP/IP 或端口错/防火墙/
+鉴权），然后以 SKIP 记录各步骤并返回 1。
+
+**分工与前置**
+
+| 工具 | 用途 | 是否写设备 |
+| --- | --- | --- |
+| `scripts/device_smoke.sh` | 设备就绪后的只读冒烟（握手/WS/OTA 信息），适合烧录后 1 分钟自检 | 否 |
+| `scripts/e2e_ws_client.py` | 深入单场景测试：`wifi-scan` / `uart-echo` / `dataflow-list` / `json`（按需） | 否（uart-echo 需回环跳线） |
+| `scripts/ota_upload.py` | OTA 写路径：HTTP 上传 app bin（设备会切槽并重启） | **是**（仅 OTA，见 `docs/hardware-test-ota.md`） |
+
+前置：设备已烧录当前固件并启动完成；PC 已连设备 AP/同 LAN；**DAP 代理端口 3240 是单连接串行**，
+dap_smoke 的 USBIP 探测会打断正在进行的调试会话——调试时请勿运行（或用 `--skip-dap`）。
+本目录若缺少 `dap_smoke.py`/`e2e_ws_client.py`（main 分支合并后才提供），对应步骤 FAIL 并提示
+合并主分支；本地无设备自测可用 `DEVICE_SMOKE_SCRIPTS_DIR=<dir>` 指向 mock 工具目录（测试钩子）。
 
 ## OTA 真机上传/查询：ota_upload.py
 
