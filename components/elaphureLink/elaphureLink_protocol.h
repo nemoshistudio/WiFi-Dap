@@ -6,10 +6,18 @@
 
 #define EL_LINK_IDENTIFIER 0x8a656c70
 
-#define EL_DAP_VERSION 0x00000001
+/* v1.0.0: supports the 0x88 vendor command channel (native DAP passthrough and
+ * async scope enter/exit). This is the version OpenOCD-elaphureLink negotiates;
+ * keep it in sync with the C-side 0x00000001 baseline only by design (the
+ * OpenOCD plugin checks that the vendor channel exists). */
+#define EL_DAP_VERSION 0x10000 // v1.0.0 support vendor command
 
 #define EL_COMMAND_HANDSHAKE 0x00000000
 
+#define EL_VENDOR_COMMAND_PERFIX        0x88
+#define EL_NATIVE_COMMAND_PASSTHROUGH   0x1
+#define EL_VENDOR_SCOPE_ENTER           0x2
+#define EL_VENDOR_SCOPE_EXIT            0x3
 
 typedef struct
 {
@@ -46,6 +54,8 @@ int el_handshake_process(int fd, void* buffer, size_t len);
  */
 void el_dap_data_process(void* buffer, size_t len);
 
+
+uint32_t el_vendor_command(const uint8_t *request, uint8_t *response);
 
 int el_dap_work(uint8_t* base, size_t len);
 

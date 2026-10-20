@@ -25,7 +25,15 @@
  *
  *---------------------------------------------------------------------------*/
 
+#include "DAP_config.h"
 #include "cmsis-dap/include/DAP.h"
+
+/* WP-108: Vendor8 (0x88) is the elaphureLink command channel (A 2025 fork).
+ * The implementation lives in components/elaphureLink; declare it here instead
+ * of including the header so that components/DAP does not need an include
+ * dependency on the elaphureLink component (the symbol is linked into the
+ * firmware because the component is always built). */
+extern uint32_t el_vendor_command(const uint8_t *request, uint8_t *response);
 
 //**************************************************************************************************
 /**
@@ -67,7 +75,12 @@ uint32_t DAP_ProcessVendorCommand(const uint8_t *request, uint8_t *response) {
     case ID_DAP_Vendor5:  break;
     case ID_DAP_Vendor6:  break;
     case ID_DAP_Vendor7:  break;
-    case ID_DAP_Vendor8:  break;
+    case ID_DAP_Vendor8:
+      /* elaphureLink: native DAP command passthrough / async scope control.
+       * Returns the response byte count (including the 0x88 echo byte that was
+       * already written above) and the request byte count in the upper 16 bits. */
+      num = el_vendor_command(request, response);
+      break;
     case ID_DAP_Vendor9:  break;
     case ID_DAP_Vendor10: break;
     case ID_DAP_Vendor11: break;
