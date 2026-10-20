@@ -1,0 +1,20 @@
+menu "WiFi Dap core (CMSIS-DAP command engine)"
+
+    config BIRDIEBOT_DAP_STATS
+        bool "Enable DAP core profiling counters + Vendor9 stats command"
+        default n
+        help
+            Debug-only instrumentation for OpenOCD/elaphureLink throughput work.
+
+            Counts per-command processing time and the gap between consecutive
+            host commands (transport round trip), the command-type histogram,
+            0x7E/0x7F batch statistics, SWD transfer count and
+            DAP_TransferBlock word counts.  A CMSIS-DAP Vendor9 command
+            (0x89, sub-command 1 = snapshot, 0 = reset) returns the counters so
+            a host-side raw-DAP client (elaphureLink port 3240) can read them
+            remotely without serial console access.
+
+            Production builds keep this disabled: no counters, no time reads,
+            no Vendor9 handler.
+
+endmenu

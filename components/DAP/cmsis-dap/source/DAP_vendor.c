@@ -27,6 +27,7 @@
 
 #include "DAP_config.h"
 #include "cmsis-dap/include/DAP.h"
+#include "cmsis-dap/include/dap_stats.h"
 
 /* WP-108: Vendor8 (0x88) is the elaphureLink command channel (A 2025 fork).
  * The implementation lives in components/elaphureLink; declare it here instead
@@ -81,7 +82,16 @@ uint32_t DAP_ProcessVendorCommand(const uint8_t *request, uint8_t *response) {
        * already written above) and the request byte count in the upper 16 bits. */
       num = el_vendor_command(request, response);
       break;
+#if CONFIG_BIRDIEBOT_DAP_STATS
+    case ID_DAP_Vendor9:
+      /* W5 profiling: sub-command 0 = reset counters, 1 = snapshot.
+       * Request payload after the command id: [sub].  Response payload after
+       * the echo: [status] or the raw dap_stats_snapshot_t. */
+      num = dap_stats_vendor_command(request, response);
+      break;
+#else
     case ID_DAP_Vendor9:  break;
+#endif
     case ID_DAP_Vendor10: break;
     case ID_DAP_Vendor11: break;
     case ID_DAP_Vendor12: break;

@@ -47,6 +47,7 @@
 
 #include "DAP_config.h"
 #include "cmsis-dap/include/DAP.h"
+#include "cmsis-dap/include/dap_stats.h"
 #include "cmsis-dap/include/spi_switch.h"
 
 #include "freertos/FreeRTOS.h"
@@ -1392,6 +1393,8 @@ static uint32_t DAP_Transfer(const uint8_t *request, uint8_t *response) {
     return ((2U << 16) | 2U);    // consume index+count only
   }
 
+  DAP_STATS_TRANSFER((uint32_t)request[2]);
+
   switch (DAP_Data.debug_port) {
 #if (DAP_SWD != 0)
     case DAP_PORT_SWD:
@@ -1653,6 +1656,8 @@ static uint32_t DAP_TransferBlock(const uint8_t *request, uint8_t *response) {
     return ((4U << 16) | 3U);
   }
 
+  DAP_STATS_BLOCK(request_count, (*(request + 3) & DAP_TRANSFER_RnW) != 0U);
+
   switch (DAP_Data.debug_port) {
 #if (DAP_SWD != 0)
     case DAP_PORT_SWD:
@@ -1897,12 +1902,54 @@ static uint32_t DAP_ResponseMaxSize(const uint8_t *request)
   switch (cmd) {
     case ID_DAP_Info:
       return 2U + 64U; /* echo + length + max string (60 + NUL) */
-    case ID_DAP_Transfer:
-      /* request layout: cmd, DAP index, count, items... */
-      return 3U + ((uint32_t)request[2] * 8U);
+    case ID_DAP_Transfer: {
+      /* Exact response size: echo + count + status + 4 bytes per read item
+       * (+4 per timestamped read).  The old worst case used 8 bytes per item
+       * (2x the real read size), which made DAP_ExecuteCommands stop queued
+       * batches early: with a 1 KiB packet OpenOCD can queue ~30-50% more
+       * DAP_Transfer commands per transfer with the exact estimate. */
+      uint32_t items = request[2];
+      const uint8_t *item = request + 3;
+      const uint8_t *limit = request + DAP_PACKET_SIZE;
+      uint32_t size = 3U; /* echo + response count + response value */
+
+      for (uint32_t i = 0; i < items; i++) {
+        uint8_t rq;
+
+        /* Malformed/oversized request: stop estimating and make the batch
+         * guard reject it (the handler validates the command when executed
+         * outside a batch). */
+        if (item >= limit) {
+          return DAP_PACKET_SIZE;
+        }
+        rq = *item++;
+        if ((rq & DAP_TRANSFER_RnW) != 0U) {
+          size += 4U;
+          if ((rq & DAP_TRANSFER_TIMESTAMP) != 0U) {
+            size += 4U;
+          }
+          if ((rq & DAP_TRANSFER_MATCH_VALUE) != 0U) {
+            item += 4U;
+          }
+        } else {
+          item += 4U; /* write data word */
+          if ((rq & DAP_TRANSFER_MATCH_VALUE) != 0U) {
+            item += 4U;
+          }
+        }
+      }
+      return size;
+    }
     case ID_DAP_TransferBlock:
-      count = (uint32_t)request[1] | ((uint32_t)request[2] << 8);
-      return ((request[3] & DAP_TRANSFER_RnW) != 0U) ? (3U + count * 4U) : 3U;
+      /* Command start layout: [cmd][DAP index][count lo][count hi][request].
+       * The previous estimator read request[1]/request[2]/request[3], i.e. it
+       * treated the DAP index as the count low byte and the count low byte as
+       * the direction: a queued read batch could then be admitted with an
+       * actual response of up to DAP_PACKET_SIZE+2 bytes (1-2 byte response
+       * buffer overflow, caught by the host ASan regression). */
+      count = (uint32_t)request[2] | ((uint32_t)request[3] << 8);
+      /* echo + count(2) + status(1) + 4*count (read) / echo+count+status (write) */
+      return ((request[4] & DAP_TRANSFER_RnW) != 0U) ? (4U + count * 4U) : 4U;
     case ID_DAP_SWD_Sequence:
     case ID_DAP_JTAG_Sequence:
       /* echo + status + div_round_up(bits,8) per capturing sequence; upper
@@ -1944,6 +1991,8 @@ static uint32_t DAP_ResponseMaxSize(const uint8_t *request)
 //             number of bytes in request (upper 16 bits)
 static uint32_t DAP_ProcessCommandDepth(const uint8_t *request, uint8_t *response, uint8_t depth) {
   uint32_t num;
+
+  DAP_STATS_COUNT_CMD(*request);
 
   if ((*request >= ID_DAP_Vendor0) && (*request <= ID_DAP_Vendor31)) {
     return DAP_ProcessVendorCommand(request, response);
@@ -2100,7 +2149,12 @@ static uint32_t DAP_ProcessCommandDepth(const uint8_t *request, uint8_t *respons
 
 // Process DAP command request and prepare response (public transport entry)
 uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
-  return DAP_ProcessCommandDepth(request, response, 0U);
+  uint32_t ret;
+
+  DAP_STATS_TOP_BEGIN();
+  ret = DAP_ProcessCommandDepth(request, response, 0U);
+  DAP_STATS_TOP_END(request[0]);
+  return ret;
 }
 
 
@@ -2111,9 +2165,10 @@ uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
 //   return:   number of bytes in response (lower 16 bits)
 //             number of bytes in request (upper 16 bits)
 static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *response, uint8_t depth) {
-  uint32_t cnt, num, n, processed, used;
+  uint32_t cnt, num, n, processed, used, cnt_requested;
   uint8_t *response_count;
   uint8_t command;
+  uint8_t hit_cap = 0U;
 
   command = *request;
   if ((command == ID_DAP_QueueCommands) || (command == ID_DAP_ExecuteCommands)) {
@@ -2123,6 +2178,7 @@ static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *respons
     *response++ = *request++;
     response_count = response;  /* count byte written before parsing */
     cnt = *request++;
+    cnt_requested = cnt;
     *response++ = (uint8_t)cnt;
     num = (2U << 16) | 2U;
     processed = 0U;
@@ -2135,6 +2191,7 @@ static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *respons
        * single-packet response. Stop before writing anything for the command
        * that would exceed DAP_PACKET_SIZE and report the processed count. */
       if ((max_size > DAP_PACKET_SIZE) || ((used + max_size) > DAP_PACKET_SIZE)) {
+        hit_cap = 1U;
         break;
       }
 
@@ -2149,6 +2206,7 @@ static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *respons
     }
 
     *response_count = (uint8_t)processed;
+    DAP_STATS_BATCH(cnt_requested, processed, hit_cap);
     return (num);
   }
 
@@ -2157,7 +2215,12 @@ static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *respons
 
 // Execute DAP command (public transport entry)
 uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response) {
-  return DAP_ExecuteCommandDepth(request, response, 0U);
+  uint32_t ret;
+
+  DAP_STATS_TOP_BEGIN();
+  ret = DAP_ExecuteCommandDepth(request, response, 0U);
+  DAP_STATS_TOP_END(request[0]);
+  return ret;
 }
 
 

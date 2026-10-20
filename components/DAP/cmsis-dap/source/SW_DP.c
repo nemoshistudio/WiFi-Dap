@@ -43,6 +43,7 @@
  *
  */
 
+#include "cmsis-dap/include/dap_stats.h"
 #include <stdio.h>
 
 #include "DAP_config.h"
@@ -510,6 +511,8 @@ static uint8_t IRAM_ATTR SWD_Transfer_GPIO (uint32_t request, uint32_t *data, ui
 //   data:    DATA[31:0]
 //   return:  ACK[2:0]
 uint8_t  SWD_Transfer(uint32_t request, uint32_t *data) {
+  DAP_STATS_SWD_XFER();
+
   switch (SWD_TransferSpeed) {
     case kTransfer_SPI:
       return SWD_Transfer_SPI(request, data);
