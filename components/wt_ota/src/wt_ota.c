@@ -562,6 +562,7 @@ esp_err_t wt_ota_upload_finish(const char *expected_sha256_hex)
 
 	if (expected && !sha256_hex_equal(expected, s_ota.sha_hex)) {
 		/* Written slot is left as-is; boot slot is NOT switched (contract §6.3). */
+		ESP_LOGE(TAG, "sha256 mismatch: expected=%s computed=%s", expected, s_ota.sha_hex);
 		set_error_locked(ESP_ERR_INVALID_CRC, "sha256 mismatch");
 		ota_unlock();
 		return ESP_ERR_INVALID_CRC;

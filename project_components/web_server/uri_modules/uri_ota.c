@@ -484,6 +484,7 @@ static void ota_upload_task(void *arg)
 			(void) wt_ota_upload_fail("internal error");
 		}
 		s_upload_active = false;
+		vTaskDelete(NULL);
 		return;
 	}
 
@@ -503,6 +504,7 @@ static void ota_upload_task(void *arg)
 		                  wt_ota_err_to_json_code(err), wt_ota_err_to_str(err));
 		ota_complete_request(async_req, true);
 		s_upload_active = false;
+		vTaskDelete(NULL);
 		return;
 	}
 
@@ -515,6 +517,9 @@ static void ota_upload_task(void *arg)
 	if (apply_err != ESP_OK) {
 		ESP_LOGE(TAG, "ota apply failed: %s", esp_err_to_name(apply_err));
 	}
+
+	/* Worker task must not return (FreeRTOS abort); success reboots via timer. */
+	vTaskDelete(NULL);
 }
 
 /* ------------------------------------------------------------------------- */
