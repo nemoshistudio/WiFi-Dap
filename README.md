@@ -34,7 +34,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 
 - **What it is**: an ESP32-S3 (8 MB flash) turned into a wireless CMSIS-DAP probe plus a self-hosted Web dashboard.
 - **Debug transports**: USBIP/WinUSB (CMSIS-DAP v2), elaphureLink (driver-free Keil), and WebSocket-DAP (browser tools) — all on **TCP 3240**.
-- **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**, covering Wi-Fi setup, UART terminal, widget dashboard, OTA upload, version info and feedback.
+- **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**, covering Wi-Fi setup, UART terminal, widget dashboard, OTA upload, **Web-side STM32 target flashing**, version info and credits.
 - **Release target**: **ESP32-S3 8 MB** (default board `BOARD_ZXR_DAP_S3`, dual OTA slots). ESP32-C3 / ESP32 (4 MB) are **compile-only**: no OTA, not hardware-validated.
 - **Removed**: ESP8266 support, experimental KCP transport, corsacOTA (port 3241).
 
@@ -46,7 +46,9 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 |---|---|---|---|
 | SoC | ESP32-S3 | ✅ hardware target | 8 MB flash, default board `BOARD_ZXR_DAP_S3`, dual OTA slots |
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA, not hardware-validated |
-| Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md) |
+| Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
+| Target flash | Web direct flashing (STM32F4/F4/H7) | ✅ F4 verified / 🧪 H7 static | Browser uploads `.bin`; ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); no PC/OpenOCD needed; see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
+| Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
 | USB transport | USBIP / WinUSB | ✅ | CMSIS-DAP v2 on TCP **3240**; Windows: usbip-win 0.3.0 `attach_ude` |
 | Toolchains | OpenOCD / pyOCD / Keil | ✅ | Via CMSIS-DAP v2 (upstream capability; DAP protocol core unchanged) |
 | Driver-free | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil plugin or OpenOCD, TCP **3240**, no USBIP driver required |
