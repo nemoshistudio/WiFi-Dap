@@ -1,1 +1,8 @@
-web_version: 3cbe765
+web_version=1.0.0
+protocol_version=1
+git_tag=v1.0.0-unknown
+git_commit=920b61d
+build_time=2026-10-20T08:20:48Z
+index_gz_sha256=492a5884d8d9e63c949a7c6c2771f23497e768605a73cdd1dc98f6b4e7c42938
+worker_gz_sha256=76dbaad9dee45f3faa01f2575ae157a6dc17e2ae2520d2cfb27ee4001877e964
+build_info_json_gz_sha256=5cdc98970f84ca79163bc82cf12bf5d23915c07e94eda8ecbafce47d5c3164ee
