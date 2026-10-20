@@ -110,6 +110,28 @@ static cJSON *ota_json_abort_echo(void)
 	return root;
 }
 
+/*
+ * docs/protocol.md §1.1 failure body, identical over HTTP and WS:
+ *   {"module":5,"cmd":4,"err":"<msg>","code":<int>}
+ *
+ * Returning the body through req->out + API_JSON_OK bypasses the legacy
+ * router error template ({"error":...}) so the frontend can always parse
+ * `err` (Lead contract-strictness requirement). ABORT with no RECEIVING
+ * session maps to code 5 = Property error (docs/ota-local-upload.md §4.3).
+ */
+static cJSON *ota_json_error(uint16_t cmd, const char *err_msg, int code)
+{
+	cJSON *root = cJSON_CreateObject();
+	if (!root) {
+		return NULL;
+	}
+	cJSON_AddNumberToObject(root, "module", WT_OTA_MODULE_ID);
+	cJSON_AddNumberToObject(root, "cmd", cmd);
+	cJSON_AddStringToObject(root, "err", err_msg);
+	cJSON_AddNumberToObject(root, "code", code);
+	return root;
+}
+
 static int ota_api_json_abort(api_json_req_t *req)
 {
 	esp_err_t err = wt_ota_upload_abort();
@@ -117,13 +139,21 @@ static int ota_api_json_abort(api_json_req_t *req)
 		req->out = ota_json_abort_echo();
 		return req->out ? API_JSON_OK : API_JSON_INTERNAL_ERR;
 	}
+
+	const char *err_msg;
+	int code;
 	if (err == ESP_ERR_INVALID_STATE) {
-		/* Contract §4.3: ABORT outside RECEIVING -> code 5 (invalid state). */
 		ESP_LOGW(TAG, "ABORT ignored: no RECEIVING session");
-		return API_JSON_PROPERTY_ERR;
+		err_msg = "invalid state";
+		code = API_JSON_PROPERTY_ERR; /* 5 */
+	} else {
+		ESP_LOGE(TAG, "ABORT failed: %s", wt_ota_err_to_str(err));
+		err_msg = wt_ota_err_to_str(err);
+		code = wt_ota_err_to_json_code(err);
 	}
-	ESP_LOGE(TAG, "ABORT failed: %s", wt_ota_err_to_str(err));
-	return API_JSON_INTERNAL_ERR;
+
+	req->out = ota_json_error(WT_OTA_CMD_ABORT, err_msg, code);
+	return req->out ? API_JSON_OK : API_JSON_INTERNAL_ERR;
 }
 
 static int on_json_req(uint16_t cmd, api_json_req_t *req, api_json_module_async_t *async)
