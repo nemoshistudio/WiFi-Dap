@@ -47,7 +47,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | SoC | ESP32-S3 | ✅ hardware target | 8 MB flash, default board `BOARD_ZXR_DAP_S3`, dual OTA slots |
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA, not hardware-validated |
 | Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
-| Target flash | Web direct flashing / STM32 identify | ✅ F4 flash verified / 🧪 H7 flash pending | Browser uploads `.bin`; ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID), only F4/H7 flashable; see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
+| Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`; ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); F4 and H7 flash are real-hardware verified; see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
 | USB transport | USBIP / WinUSB | ✅ | CMSIS-DAP v2 on TCP **3240**; Windows: usbip-win 0.3.0 `attach_ude` |
 | Toolchains | OpenOCD / pyOCD / Keil | ✅ | Via CMSIS-DAP v2; **use OpenOCD master for 2.4× faster reads** (see [docs/openocd-master.md](docs/openocd-master.md)) |
