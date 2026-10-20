@@ -29,6 +29,7 @@ set(srcs
     "src/tf_swd.c"
     "src/tf_stm32f4.c"
     "src/tf_stm32h7.c"
+    "src/tf_stm32_id.c"
 )
 
 

@@ -351,7 +351,7 @@ esp_err_t tf_swd_read_pc(uint32_t *pc)
     return ESP_ERR_TIMEOUT;
 }
 
-esp_err_t tf_swd_link_init(uint32_t *dpidr)
+esp_err_t tf_swd_link_init(uint32_t clock_hz, uint32_t *dpidr)
 {
     static const uint8_t line_reset[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     static const uint8_t jtag_to_swd[2] = {0x9E, 0xE7}; /* 0xE79E, LSB first */
@@ -382,7 +382,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     }
     TF_STAGE(3U);
     tf_delay_ms(2U);
-    if (tf_dap_swj_clock(TF_SWD_CLOCK_HZ) != ESP_OK) {
+    if (tf_dap_swj_clock(clock_hz) != ESP_OK) {
         return ESP_FAIL;
     }
     TF_STAGE(4U);
@@ -481,8 +481,19 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         *dpidr = idcode;
     }
     TF_STAGE(13U);
-    ESP_LOGI(TF_TAG, "SWD link up: DPIDR=0x%08X CTRL/STAT=0x%08X CSW=0x%08X",
-             (unsigned)idcode, (unsigned)dp_ctrl, (unsigned)csw);
+    ESP_LOGI(TF_TAG, "SWD link up @%u Hz: DPIDR=0x%08X CTRL/STAT=0x%08X CSW=0x%08X",
+             (unsigned)clock_hz, (unsigned)idcode, (unsigned)dp_ctrl, (unsigned)csw);
+    return ESP_OK;
+}
+
+esp_err_t tf_swd_recover_bus(void)
+{
+    /* AP FAULT/sticky error: clear DP errors, re-select AP bank 0 and re-arm
+     * the AHB-AP CSW so a failed probe candidate does not poison the next
+     * DBGMCU base attempt.  All steps are best effort. */
+    (void)tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR);
+    (void)tf_swd_write_dp(TF_DP_SELECT, 0U);
+    (void)tf_swd_write_ap(TF_AP_CSW, TF_AP_CSW_32BIT_INC);
     return ESP_OK;
 }
 
