@@ -19,13 +19,35 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+/*
+ * WiFi Dap merge notes (WP-113)
+ * ------------------------------
+ *  - File merged from the A 2025 tree (main/websocket_server.c).  Only the
+ *    DAP-over-WebSocket transport is kept: the OTA control block and the
+ *    corsacOTA header dependency were dropped (OTA is handled by the HTTP
+ *    upload path, docs/ota-local-upload.md), and the IDF 5.2 mbedTLS 2.x API
+ *    (mbedtls_sha1) is used instead of the A tree's mbedtls_sha1_ret.
+ *  - The whole file is compiled only when CONFIG_BIRDIEBOT_DAP_WS_ENABLE=y
+ *    (default y, analysis/INTEGRATION-PLAN.md P7.1).  tcp_server.c gates the
+ *    dispatch accordingly.
+ *  - The DAP ring buffers are owned by the DAP task (see DAP_handle.h): this
+ *    file posts dap_handle_request_reset(DELETE_HANDLE) and waits for the
+ *    buffers to be released before it runs DAP commands inline.
+ */
 #include <stdint.h>
 #include <string.h>
 #include <sys/param.h>
 
-// share header file
-// WiFi Dap W0: corsacOTA.h (stub of the removed OTA server) is not part of the tree
-// anymore; only these declarations are still used by the legacy WS-DAP server below.
+#include "sdkconfig.h"
+
+#if CONFIG_BIRDIEBOT_DAP_WS_ENABLE
+
+#include "DAP_handle.h"
+#include "main/dap_configuration.h"
+
+/* co_err_t / CO_* come from the corsacOTA header in the original sources.  The
+ * OTA server is not part of this project, so only the type and the return codes
+ * still used by the DAP-over-WS path are defined locally. */
 typedef signed int co_err_t;
 #define CO_OK                       0
 #define CO_FAIL                     -1
@@ -51,9 +73,7 @@ typedef signed int co_err_t;
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
 
-#include "sdkconfig.h"
-
-static const char *CO_TAG = "corsacOTA";
+static const char *CO_TAG = "ws_dap";
 
 #define CONFIG_CO_SOCKET_BUFFER_SIZE  1500
 #define CONFIG_CO_WS_TEXT_BUFFER_SIZE 100
@@ -71,7 +91,6 @@ static const char *CO_TAG = "corsacOTA";
 #warning corsacOTA test mode is in use
 #endif
 
-extern void free_dap_ringbuf();
 extern uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response);
 
 static void co_websocket_process_dap(uint8_t *data, size_t len);
@@ -125,29 +144,7 @@ typedef struct co_socket_cb {
 } co_socket_cb_t;
 
 /**
- * @brief corsacOTA OTA control block
- *
- */
-typedef struct co_ota_cb {
-    enum co_ota_status {
-        CO_OTA_INIT = 0,
-        CO_OTA_LOAD,
-        CO_OTA_DONE,
-        CO_OTA_STOP,
-        CO_OTA_ERROR,
-        CO_OTA_FATAL_ERROR,
-    } status;
-    int32_t error_code; //// TODO: ?
-
-    int32_t total_size;        // Total firmware size
-    int32_t offset;            // Current processed size
-    int32_t chunk_size;        // The response will be made every time the chunk size is reached
-    int32_t last_index_offset; // The offset recorded in the last response
-
-} co_ota_cb_t;
-
-/**
- * @brief corsacOTA http control block
+ * @brief WS-DAP control block
  *
  */
 typedef struct co_cb {
@@ -166,8 +163,6 @@ typedef struct co_cb {
     int accept_num; // current number of established connections
 
     int closing_num; // current number of closing socket
-
-    co_ota_cb_t ota; // ota control block
 
 } co_cb_t;
 
@@ -417,16 +412,26 @@ static void co_websocket_process_text(uint8_t *data, size_t len) {
 }
 
 // send pong response
-// TODO: too long ping frame
 static void co_websocket_process_ping(co_cb_t *cb, co_socket_cb_t *scb) {
-    int len;
+    uint8_t header[2];
+    uint8_t *payload = (uint8_t *)scb->buf + scb->read_len;
+    size_t len = scb->wcb.payload_len;
 
-    // control frame max payload length: 125 -> 0 byte extended length
-    len = 2 + scb->wcb.payload_len + (scb->wcb.MASK ? 4 : 0);
+    // Control frame max payload length is 125 -> 0-byte extended length.
+    // The payload has already been unmasked by co_websocket_process_payload();
+    // only the 2-byte frame header is generated here so that the 4-byte mask
+    // key of the request is not echoed back inside the PONG (REPORT P3 #12).
+    if (len > 125) {
+        len = 125;
+    }
 
-    scb->buf[0] = WS_FIN | WS_OPCODE_PONG;
+    header[0] = WS_FIN | WS_OPCODE_PONG;
+    header[1] = (uint8_t)len;
 
-    send(scb->fd, scb->buf, len, 0);
+    send(scb->fd, header, sizeof(header), 0);
+    if (len > 0) {
+        send(scb->fd, payload, len, 0);
+    }
 }
 
 // close handshake
@@ -545,8 +550,9 @@ static co_err_t co_websocket_process_payload(co_cb_t *cb, co_socket_cb_t *scb) {
     // May be possible to read the complete frame and maybe a new frame rate afterwards
     len = min(scb->remaining_len - scb->read_len, scb->wcb.payload_len);
 
-    // For ping frames, we will directly change their opcode and send.
-    if (scb->wcb.MASK == 1 && scb->wcb.OPCODE != WS_OPCODE_PING) {
+    // Unmask every masked frame, including PING: the PONG must carry the
+    // unmasked payload without the 4-byte mask key (REPORT P3 #12).
+    if (scb->wcb.MASK == 1) {
         mask = scb->wcb.mask.val;
         co_websocket_fast_mask(data, mask, len);
 
@@ -797,7 +803,7 @@ static esp_err_t co_websocket_handshake_send_key(int fd, const char *client_key)
 
     snprintf(res_header, sizeof(res_header),
              "HTTP/1.1 101 Switching Protocols\r\n"
-             "Server: corsacOTA server\r\n"
+             "Server: WiFi Dap WS-DAP server\r\n"
              "Upgrade: websocket\r\n"
              "Connection: Upgrade\r\n"
              "Sec-WebSocket-Accept: %s\r\n"
@@ -883,12 +889,28 @@ static esp_err_t co_websocket_handshake_process(co_cb_t *cb, co_socket_cb_t *scb
     return ESP_OK;
 }
 
-static void websocket_buffer_malloc() {
+/* The WebSocket-DAP response is built in ws_process_buffer: the payload is
+ * written behind a fixed maximum WebSocket header prefix and the header is
+ * filled in front of it.  1200 - 4 = 1196 bytes must hold the largest DAP
+ * response we ever transmit (normal DAP packets are DAP_PACKET_SIZE = 512). */
+#define WS_DAP_BUFFER_SIZE 1200
+#define WS_DAP_MAX_HEADER  4
+_Static_assert(WS_DAP_BUFFER_SIZE - WS_DAP_MAX_HEADER >= DAP_PACKET_SIZE,
+               "WS-DAP response buffer must hold a full DAP packet");
+
+static void websocket_buffer_malloc(void) {
     if (ws_process_buffer != NULL)
         return;
 
-    free_dap_ringbuf();
-    ws_process_buffer = malloc(1200);
+    /* Ring buffer lifecycle is owned by the DAP task (DAP_handle.h): ask it to
+     * release the USBIP ring buffers and wait until they are gone before this
+     * TCP task starts executing DAP commands inline. */
+    dap_handle_request_reset(DELETE_HANDLE);
+    if (dap_handle_wait_reset(1000) != 0) {
+        ESP_LOGW(CO_TAG, "DAP ring buffers still busy, continuing WS-DAP session");
+    }
+
+    ws_process_buffer = malloc(WS_DAP_BUFFER_SIZE);
 }
 
 static void websocket_buffer_free() {
@@ -903,6 +925,12 @@ static void co_websocket_process_dap(uint8_t *data, size_t len) {
     int max_offset, res, offset;
 
     max_offset = co_websocket_get_res_payload_offset(1500);
+    /*
+     * max_offset == 4 for any response >= 126 bytes (2-byte payload length +
+     * 2-byte extended length): a full DAP_PACKET_SIZE response fits behind it
+     * (see the WS_DAP_BUFFER_SIZE static assertion above).  The DAP command
+     * layer is responsible for refusing over-long counts (REPORT P0 #2).
+     */
     buf = ws_process_buffer + max_offset;
 
     res = DAP_ExecuteCommand(data, buf);
@@ -953,3 +981,5 @@ out:
     websocket_buffer_free();
     return 0;
 }
+
+#endif /* CONFIG_BIRDIEBOT_DAP_WS_ENABLE */
