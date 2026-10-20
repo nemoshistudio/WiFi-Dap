@@ -892,3 +892,32 @@ esp_err_t tf_debug_read_pc(uint32_t *pc, bool *halted, bool *lockup)
     tf_api_exit();
     return err;
 }
+
+
+esp_err_t tf_debug_link_diag(char *out, size_t out_len)
+{
+    esp_err_t err;
+
+    if (out == NULL || out_len == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    err = tf_ensure_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_api_enter();
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (s_session_active) {
+        tf_api_exit();
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = tf_dap_acquire();
+    if (err == ESP_OK) {
+        err = tf_swd_link_diag(out, out_len);
+        tf_dap_release();
+    }
+    tf_api_exit();
+    return err;
+}

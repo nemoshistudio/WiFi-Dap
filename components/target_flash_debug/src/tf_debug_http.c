@@ -15,6 +15,10 @@
  *   POST /tf/abort  -> abort a running flash session
  *   POST /tf/pc     -> halt, read target PC, resume (reset/release check)
  */
+#include "sdkconfig.h"
+
+#if CONFIG_BIRDIEBOT_TARGET_FLASH_DEBUG_HTTP
+
 #include <stdio.h>
 #include <string.h>
 
@@ -148,6 +152,18 @@ static esp_err_t tf_http_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (strncmp(cmd, "diag", 4) == 0) {
+        static char diag[2048];
+        err = tf_debug_link_diag(diag, sizeof(diag));
+        if (err != ESP_OK) {
+            tf_http_send_error(req, err, "diag");
+            return ESP_OK;
+        }
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, diag);
+        return ESP_OK;
+    }
+
     if (strncmp(cmd, "status", 6) == 0) {
         char body[TF_HTTP_JSON_MAX];
         tf_http_status_json(body, sizeof(body));
@@ -259,3 +275,5 @@ static int URI_TF_EXIT(const httpd_uri_t **uri_conf)
 }
 
 WEB_URI_MODULE_REGISTER(0x70, URI_TF_INIT, URI_TF_EXIT)
+
+#endif /* CONFIG_BIRDIEBOT_TARGET_FLASH_DEBUG_HTTP */

@@ -28,6 +28,9 @@ static uint8_t s_resp[TF_DAP_PACKET_SIZE];
 
 static uint32_t s_resp_len;
 
+uint8_t tf_dap_last_status;
+uint8_t tf_dap_last_count;
+
 /** Run the staged request through DAP_ExecuteCommand and validate the echo. */
 static esp_err_t tf_dap_exec(uint32_t req_len)
 {
@@ -233,6 +236,8 @@ esp_err_t tf_dap_transfer(const tf_dap_item_t *items, size_t item_count,
     }
     resp_count = s_resp[1];
     status = s_resp[2];
+    tf_dap_last_status = status;
+    tf_dap_last_count = resp_count;
 
     if (status != DAP_TRANSFER_STATUS_OK) {
         ESP_LOGW(TF_TAG, "DAP_Transfer status=0x%02X (count=%u/%u)",
@@ -315,6 +320,8 @@ esp_err_t tf_dap_transfer_block(uint8_t request, uint32_t word_count,
     }
     status = s_resp[3];
     count = (uint32_t)s_resp[1] | ((uint32_t)s_resp[2] << 8);
+    tf_dap_last_status = status;
+    tf_dap_last_count = (uint8_t)count;
     if (status != DAP_TRANSFER_STATUS_OK) {
         ESP_LOGW(TF_TAG, "DAP_TransferBlock status=0x%02X (count=%u/%u)",
                  status, (unsigned)count, (unsigned)word_count);

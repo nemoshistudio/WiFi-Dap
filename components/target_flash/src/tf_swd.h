@@ -48,6 +48,13 @@ esp_err_t tf_swd_sysreset(bool run);
 /** Read the halted core's PC through DCRSR/DCRDR. */
 esp_err_t tf_swd_read_pc(uint32_t *pc);
 
+/**
+ * @brief Bring-up diagnostic: run the link sequence step by step and append a
+ *        human-readable report to `out` (used by the Kconfig-gated /tf?cmd=diag
+ *        endpoint; not used in the production flash path).
+ */
+esp_err_t tf_swd_link_diag(char *out, size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

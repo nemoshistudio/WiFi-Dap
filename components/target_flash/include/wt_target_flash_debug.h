@@ -35,6 +35,9 @@ void tf_debug_get_result(tf_debug_result_t *out);
 /** Halt (if needed), read the target PC, resume when it was running before. */
 esp_err_t tf_debug_read_pc(uint32_t *pc, bool *halted, bool *lockup);
 
+/** SWD link bring-up diagnostic report (text, for /tf?cmd=diag). */
+esp_err_t tf_debug_link_diag(char *out, size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

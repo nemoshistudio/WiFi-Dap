@@ -29,6 +29,11 @@ typedef struct {
     uint32_t data;
 } tf_dap_item_t;
 
+/** Last DAP_Transfer/TransferBlock status byte and processed item count
+ *  (diagnostics only; valid after a failed call). */
+extern uint8_t tf_dap_last_status;
+extern uint8_t tf_dap_last_count;
+
 /** DAP_Connect(SWD) - returns the connected port byte. */
 esp_err_t tf_dap_connect_swd(uint8_t *port_out);
 

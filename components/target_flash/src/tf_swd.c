@@ -9,6 +9,7 @@
  * writes are not used for flash programming (per-program-unit BSY polling is
  * required), only single-word register writes.
  */
+#include <stdarg.h>
 #include <string.h>
 
 #include <freertos/FreeRTOS.h>
@@ -52,6 +53,19 @@ static esp_err_t tf_swd_write_dp(uint32_t reg, uint32_t value)
 {
     tf_dap_item_t item = {.request = TF_REQ_DP_WRITE(reg), .data = value};
     return tf_dap_transfer(&item, 1U, NULL, NULL);
+}
+
+static esp_err_t tf_swd_read_ap(uint32_t reg, uint32_t *value)
+{
+    tf_dap_item_t item = {.request = TF_REQ_AP_READ(reg), .data = 0U};
+    uint32_t data[1];
+    size_t count = 1U;
+
+    if (tf_dap_transfer(&item, 1U, data, &count) != ESP_OK || count != 1U) {
+        return ESP_FAIL;
+    }
+    *value = data[0];
+    return ESP_OK;
 }
 
 static esp_err_t tf_swd_write_ap(uint32_t reg, uint32_t value)
@@ -311,7 +325,9 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     static const uint8_t line_reset[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     static const uint8_t jtag_to_swd[2] = {0x9E, 0xE7}; /* 0xE79E, LSB first */
     static const uint8_t idle[1] = {0x00};
+    uint32_t dp_ctrl = 0U;
     uint32_t idcode = 0U;
+    uint32_t csw = 0U;
 
     if (tf_dap_connect_swd(NULL) != ESP_OK) {
         return ESP_FAIL;
@@ -335,49 +351,187 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     /* Release nRESET before touching the target. */
     (void)tf_dap_swj_pins(0x80U, 0x80U, 0U);
 
-    /* Clear sticky DP errors, then request debug+system power-up. */
-    if (tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR) != ESP_OK) {
+    /* The SW-DP must answer DPIDR before any write is attempted. */
+    if (tf_swd_read_dp(0x00U, &idcode) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "SWD: no DPIDR response (target absent / SWD disabled)");
         return ESP_FAIL;
     }
+    if (idcode == 0U || idcode == 0xFFFFFFFFU) {
+        ESP_LOGE(TF_TAG, "SWD: invalid DPIDR 0x%08X", (unsigned)idcode);
+        return ESP_FAIL;
+    }
+
+    /* Power up the debug/system domains first: on SW-DP the very first write a
+     * probe normally issues is DP CTRL/STAT (with the sticky-error clear bits
+     * set), not DP ABORT (OpenOCD dap_dp_init does the same).  The ABORT clear
+     * is only a best-effort follow-up: some SW-DP implementations reject it
+     * before power-up and it is not required for SWD operation. */
+    if (tf_swd_write_dp(TF_DP_CTRL_STAT,
+                        TF_CTRL_STAT_PWR_REQ | 0x00000020U /* SSTICKYERR */ |
+                        0x00000002U /* SSTICKYORUN */) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "SWD: DP CTRL/STAT power-up request failed");
+        return ESP_FAIL;
+    }
+    (void)tf_swd_read_dp(TF_DP_CTRL_STAT, &dp_ctrl); /* drain reader pipeline */
     if (tf_swd_write_dp(TF_DP_CTRL_STAT, TF_CTRL_STAT_PWR_REQ) != ESP_OK) {
         return ESP_FAIL;
     }
-    /* Wait for the DP power-up ACKs (DP CTRL/STAT is a DP register, not
-     * memory-mapped, so read it directly over the DP, not through the AP). */
+
     {
-        uint32_t dp_ctrl = 0U;
-        uint64_t deadline = tf_now_ms() + 500U;
-        do {
-            /* DP CTRL/STAT is not memory-mapped: read through the DP. */
-            tf_dap_item_t item = {.request = TF_REQ_DP_READ(TF_DP_CTRL_STAT), .data = 0U};
-            uint32_t data[1];
-            size_t count = 1U;
-            if (tf_dap_transfer(&item, 1U, data, &count) != ESP_OK || count != 1U) {
+        uint64_t deadline = tf_now_ms() + 1000U;
+        for (;;) {
+            if (tf_swd_read_dp(TF_DP_CTRL_STAT, &dp_ctrl) != ESP_OK) {
                 return ESP_FAIL;
             }
-            dp_ctrl = data[0];
             if ((dp_ctrl & TF_CTRL_STAT_PWR_MASK) == TF_CTRL_STAT_PWR_MASK) {
                 break;
             }
-        } while (tf_now_ms() < deadline);
-        if ((dp_ctrl & TF_CTRL_STAT_PWR_MASK) != TF_CTRL_STAT_PWR_MASK) {
-            ESP_LOGE(TF_TAG, "DP power-up failed (CTRL/STAT=0x%08X)", (unsigned)dp_ctrl);
-            return ESP_ERR_TIMEOUT;
+            if (tf_now_ms() >= deadline) {
+                ESP_LOGE(TF_TAG, "DP power-up failed (CTRL/STAT=0x%08X)",
+                         (unsigned)dp_ctrl);
+                return ESP_ERR_TIMEOUT;
+            }
         }
     }
+
+    /* Clear any stale sticky errors (best effort; harmless if unsupported). */
+    if (tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR) != ESP_OK) {
+        ESP_LOGW(TF_TAG, "SWD: DP ABORT clear ignored (power-up done)");
+    }
+
     /* SELECT = AP0/bank0, then configure the AHB-AP for 32-bit incrementing. */
     if (tf_swd_write_dp(TF_DP_SELECT, 0U) != ESP_OK) {
         return ESP_FAIL;
     }
     if (tf_swd_write_ap(TF_AP_CSW, TF_AP_CSW_32BIT_INC) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "SWD: AHB-AP CSW write failed");
         return ESP_FAIL;
     }
-    /* DPIDR (IDCODE) */
-    if (tf_swd_read_dp(0x00U, &idcode) != ESP_OK) {
-        return ESP_FAIL;
+    if (tf_swd_read_ap(TF_AP_CSW, &csw) == ESP_OK && csw != TF_AP_CSW_32BIT_INC) {
+        ESP_LOGW(TF_TAG, "SWD: AP CSW read-back 0x%08X (wanted 0x%08X)",
+                 (unsigned)csw, (unsigned)TF_AP_CSW_32BIT_INC);
     }
+
     if (dpidr != NULL) {
         *dpidr = idcode;
     }
+    ESP_LOGI(TF_TAG, "SWD link up: DPIDR=0x%08X CTRL/STAT=0x%08X CSW=0x%08X",
+             (unsigned)idcode, (unsigned)dp_ctrl, (unsigned)csw);
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------------- */
+/* bring-up diagnostics (/tf?cmd=diag, debug builds only)                    */
+/* ------------------------------------------------------------------------- */
+
+static size_t tf_diag_add(char *out, size_t out_len, size_t pos, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (pos >= out_len) {
+        return pos;
+    }
+    va_start(ap, fmt);
+    n = vsnprintf(out + pos, out_len - pos, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return pos;
+    }
+    return pos + (size_t)n;
+}
+
+esp_err_t tf_swd_link_diag(char *out, size_t out_len)
+{
+    static const uint8_t line_reset[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    static const uint8_t jtag_to_swd[2] = {0x9E, 0xE7};
+    static const uint8_t idle[1] = {0x00};
+    size_t pos = 0U;
+    uint8_t port = 0U;
+    esp_err_t err = ESP_OK;
+    uint32_t v = 0U;
+
+    if (out == NULL || out_len == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+
+    err = tf_dap_connect_swd(&port);
+    pos = tf_diag_add(out, out_len, pos, "dap_connect=%s port=0x%02X\n",
+                      esp_err_to_name(err), port);
+
+    err = tf_dap_swj_sequence(51U, line_reset);
+    pos = tf_diag_add(out, out_len, pos, "swj_line_reset=%s\n", esp_err_to_name(err));
+    err = tf_dap_swj_sequence(16U, jtag_to_swd);
+    pos = tf_diag_add(out, out_len, pos, "swj_jtag2swd=%s\n", esp_err_to_name(err));
+    err = tf_dap_swj_sequence(51U, line_reset);
+    pos = tf_diag_add(out, out_len, pos, "swj_line_reset2=%s\n", esp_err_to_name(err));
+    err = tf_dap_swj_sequence(8U, idle);
+    pos = tf_diag_add(out, out_len, pos, "swj_idle=%s\n", esp_err_to_name(err));
+
+    err = tf_dap_swj_clock(TF_SWD_CLOCK_HZ);
+    pos = tf_diag_add(out, out_len, pos, "swj_clock=%s\n", esp_err_to_name(err));
+    err = tf_dap_swd_configure(1U, false);
+    pos = tf_diag_add(out, out_len, pos, "swd_configure=%s\n", esp_err_to_name(err));
+    err = tf_dap_transfer_configure(0U, 1000U, 100U);
+    pos = tf_diag_add(out, out_len, pos, "transfer_configure=%s\n", esp_err_to_name(err));
+
+    err = tf_dap_swj_pins(0x80U, 0x80U, 0U);
+    pos = tf_diag_add(out, out_len, pos, "swj_pins_reset_release=%s\n", esp_err_to_name(err));
+
+    err = tf_swd_read_dp(0x00U, &v);
+    pos = tf_diag_add(out, out_len, pos, "dp_read_dpidr=%s val=0x%08X\n",
+                      esp_err_to_name(err), (unsigned)v);
+
+    err = tf_swd_write_dp(TF_DP_CTRL_STAT,
+                          TF_CTRL_STAT_PWR_REQ | 0x20U | 0x02U);
+    pos = tf_diag_add(out, out_len, pos,
+                      "dp_write_ctrl_stat_pwrup=%s (dap_status=0x%02X count=%u)\n",
+                      esp_err_to_name(err), tf_dap_last_status, tf_dap_last_count);
+    err = tf_swd_read_dp(TF_DP_CTRL_STAT, &v);
+    pos = tf_diag_add(out, out_len, pos, "dp_read_ctrl_stat_after=%s val=0x%08X\n",
+                      esp_err_to_name(err), (unsigned)v);
+    err = tf_swd_write_dp(TF_DP_CTRL_STAT, TF_CTRL_STAT_PWR_REQ);
+    pos = tf_diag_add(out, out_len, pos, "dp_write_ctrl_stat_ack_req=%s\n",
+                      esp_err_to_name(err));
+    for (int i = 0; i < 5; i++) {
+        err = tf_swd_read_dp(TF_DP_CTRL_STAT, &v);
+        pos = tf_diag_add(out, out_len, pos, "dp_poll_ctrl_stat[%d]=%s val=0x%08X\n",
+                          i, esp_err_to_name(err), (unsigned)v);
+        if (err == ESP_OK && (v & TF_CTRL_STAT_PWR_MASK) == TF_CTRL_STAT_PWR_MASK) {
+            break;
+        }
+        tf_delay_ms(5U);
+    }
+
+    err = tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR);
+    pos = tf_diag_add(out, out_len, pos,
+                      "dp_write_abort=%s (dap_status=0x%02X count=%u)\n",
+                      esp_err_to_name(err), tf_dap_last_status, tf_dap_last_count);
+
+    err = tf_swd_write_dp(TF_DP_SELECT, 0U);
+    pos = tf_diag_add(out, out_len, pos, "dp_write_select=%s\n", esp_err_to_name(err));
+
+    err = tf_swd_write_ap(TF_AP_CSW, TF_AP_CSW_32BIT_INC);
+    pos = tf_diag_add(out, out_len, pos,
+                      "ap_write_csw=%s (dap_status=0x%02X count=%u)\n",
+                      esp_err_to_name(err), tf_dap_last_status, tf_dap_last_count);
+    err = tf_swd_read_ap(TF_AP_CSW, &v);
+    pos = tf_diag_add(out, out_len, pos, "ap_read_csw=%s val=0x%08X\n",
+                      esp_err_to_name(err), (unsigned)v);
+
+    err = tf_swd_read_ap(0xFCU /* AP IDR */, &v);
+    pos = tf_diag_add(out, out_len, pos, "ap_read_idr=%s val=0x%08X\n",
+                      esp_err_to_name(err), (unsigned)v);
+
+    err = tf_swd_read_u32(TF_REG_CPUID, &v);
+    pos = tf_diag_add(out, out_len, pos, "mem_read_cpuid=%s val=0x%08X\n",
+                      esp_err_to_name(err), (unsigned)v);
+
+    err = tf_swd_read_u32(TF_F4_DBGMCU_IDCODE, &v);
+    pos = tf_diag_add(out, out_len, pos, "mem_read_f4_dbgmcu=%s val=0x%08X\n",
+                      esp_err_to_name(err), (unsigned)v);
+
+    (void)pos;
     return ESP_OK;
 }
