@@ -240,9 +240,16 @@ export default {
             invalidPassword: "Wi-Fi 密码至少 8 位",
             maxReached: "已达到保存上限（{max}）",
             connectFailed: "连接失败：{err}",
+            listFull: "已保存网络已达上限（{max} 个）",
+            evictedHint: "旧网络已被自动淘汰：{ssid}",
             apDefault: "默认名称",
             apCustom: "自定义名称",
             apDefaultHint: "默认 AP 名称格式：WiFi-Dap-XXXX（XXXX 为设备 MAC 末 2 字节十六进制，大写）",
+        },
+
+        ap: {
+            resetDefault: "恢复默认 SSID",
+            resetConfirm: "确认恢复默认 AP SSID？",
         },
     },
 

@@ -82,17 +82,22 @@
                 @change="onAutoSaveChange"
             />
           </el-tooltip>
-          <span v-if="savedMaxReached" class="text-xs text-orange-500">
-            {{ translate('wifi.saved.maxReached', {max: SAVED_WIFI_MAX}) }}
-          </span>
         </div>
         <div class="flex gap-2">
           <el-button :disabled="!isConnected || savedLoading" @click="refreshSavedList">
             {{ translate('common.refresh') }}
           </el-button>
-          <el-button type="primary" :disabled="!isConnected || savedMaxReached" @click="openAddSavedDialog">
-            {{ translate('wifi.saved.add') }}
-          </el-button>
+          <el-tooltip
+              :content="listFullTooltip"
+              :disabled="!savedMaxReached"
+              :show-after="300"
+          >
+            <span class="inline-flex">
+              <el-button type="primary" :disabled="!isConnected || savedMaxReached" @click="openAddSavedDialog">
+                {{ translate('wifi.saved.add') }}
+              </el-button>
+            </span>
+          </el-tooltip>
         </div>
       </div>
       <p class="text-sm text-gray-600 mt-1">{{ translate('wifi.saved.description') }}</p>
@@ -395,7 +400,8 @@
         {{ wifiApInfo.netmask }}
       </el-descriptions-item>
     </el-descriptions>
-    <div class="flex justify-center mt-4">
+    <div class="flex justify-center gap-2 mt-4">
+      <el-button :loading="wifiMode_loading" @click="onResetApDefault">{{ translate('wifi.ap.resetDefault') }}</el-button>
       <el-button type="primary" :loading="wifiMode_loading" @click="wifiApChangeCredential">{{ translate('wifi.save') }}</el-button>
     </div>
     <el-divider></el-divider>
@@ -567,8 +573,12 @@ let wifiStaticInfo = reactive<IWifiStaStaticInfo>({
 });
 
 /* ---- 多 WiFi 凭据记忆（docs/wifi-credential-memory.md §7） ---- */
-/** 契约默认上限 BIRDIEBOT_WIFI_CRED_MAX = 8（设备实际值由固件决定） */
-const SAVED_WIFI_MAX = 8;
+/** 旧固件 GET_SAVED_LIST 缺少 max 字段时的契约默认值 8（前端不得硬编码为主逻辑） */
+const SAVED_WIFI_DEFAULT_MAX = 8;
+/** 设备侧保存上限：优先取 GET_SAVED_LIST.max（F4）；旧固件回退 8 */
+let savedMax = ref(SAVED_WIFI_DEFAULT_MAX);
+/** 添加网络请求前的列表快照，用于把 evicted_idx 映射回被淘汰的 SSID（F2） */
+let pendingAddSnapshot: IWifiSavedItem[] = [];
 let savedSupported = ref(true);
 let savedList = ref<IWifiSavedItem[]>([]);
 let savedAutoSave = ref(true);
@@ -587,7 +597,9 @@ let savedConnectForm = reactive({
   ssid: "",
   password: "",
 });
-const savedMaxReached = computed(() => savedList.value.length >= SAVED_WIFI_MAX);
+const savedMaxReached = computed(() => savedList.value.length >= savedMax.value);
+/** 列表满时“添加网络”按钮的 tooltip（F2，占位 {max}） */
+const listFullTooltip = computed(() => translate('wifi.saved.listFull', {max: savedMax.value}));
 /** AP SSID 是否仍为默认 WiFi-Dap-XXXX（用户自定义优先，空串=恢复默认） */
 const isDefaultApSsid = computed(() => {
   const ssid = wifiApInfo.ssid;
@@ -701,9 +713,14 @@ const onClientMsg = (msg: ApiJsonMsg) => {
     case WifiCmd.WIFI_API_JSON_AP_SET_CRED: {
       const wifiCred = msg as WiFiCredential;
       if (wifiCred.err !== undefined) {
-        globalNotifyRightSide(wifiCred.err, "error");
+        if (msg.code !== 7) {
+          globalNotifyRightSide(savedErrorText(msg), "error");
+        }
       } else {
         globalNotifyRightSide(translate('wifi.setSuccess'), "success");
+        // SET_AP_CRED 成功后刷新生效 AP 信息与已保存列表（含“恢复默认 SSID”场景，F3）
+        wifi_ap_get_info();
+        refreshSavedList();
       }
       wifiMode_loading.value = false;
 
@@ -733,11 +750,16 @@ const onClientMsg = (msg: ApiJsonMsg) => {
       savedSupported.value = true;
       savedAutoSave.value = saved.auto_save !== false;
       savedList.value = Array.isArray(saved.list) ? saved.list : [];
+      // F4：设备上限优先，不得硬编码 8；旧固件缺 max 时回退契约默认值
+      savedMax.value = typeof saved.max === "number" && saved.max > 0
+          ? saved.max
+          : SAVED_WIFI_DEFAULT_MAX;
       break;
     }
     case WifiCmd.WIFI_API_JSON_ADD_SAVED: {
       savedAddSaving.value = false;
       if (msg.err !== undefined) {
+        pendingAddSnapshot = [];
         if (msg.code !== 7) {
           globalNotifyRightSide(savedErrorText(msg), "error");
         }
@@ -745,6 +767,14 @@ const onClientMsg = (msg: ApiJsonMsg) => {
       }
       const addResult = msg as IWifiSavedAddResult;
       savedAddVisible.value = false;
+      // F2：表满淘汰时用请求前快照把 evicted_idx 映射回被淘汰的 SSID，明确提示
+      if (typeof addResult.evicted_idx === "number") {
+        const evicted = pendingAddSnapshot.find((item) => item.idx === addResult.evicted_idx);
+        if (evicted) {
+          globalNotifyRightSide(translate('wifi.saved.evictedHint', {ssid: evicted.ssid}), "warning");
+        }
+      }
+      pendingAddSnapshot = [];
       if (addResult.updated) {
         globalNotifyRightSide(translate('wifi.saved.updated'), "success");
       } else {
@@ -864,6 +894,30 @@ function wifiApChangeCredential() {
   wifi_ap_set_credential(wifiApInfo.ssid, wifiApInfo.password);
 }
 
+/** F3：恢复默认 AP SSID（SET_AP_CRED cmd8，ssid="" → 设备按 MAC 重新计算 WiFi-Dap-XXXX） */
+async function onResetApDefault() {
+  try {
+    await ElMessageBox.confirm(
+        translate('wifi.ap.resetConfirm'),
+        translate('wifi.ap.resetDefault'),
+        {
+          confirmButtonText: translate('common.confirm'),
+          cancelButtonText: translate('common.cancel'),
+          type: 'warning',
+        },
+    );
+  } catch {
+    return;
+  }
+  if (!isConnected.value) {
+    globalNotify(translate('wifi.debuggerNotConnected'), "error");
+    return;
+  }
+  wifiMode_loading.value = true;
+  // 空 ssid = 恢复默认动态 SSID；口令沿用设备当前生效值，避免误改
+  wifi_ap_set_credential("", wifiApInfo.password);
+}
+
 function wifiStaSetStaticInfo() {
   wifiMode_loading.value = true;
   wifi_sta_set_static_conf(wifiStaticInfo);
@@ -934,6 +988,13 @@ function submitAddSaved() {
     globalNotify(translate('wifi.debuggerNotConnected'), "error");
     return;
   }
+  // F2：表满时仅允许更新已存在的 SSID；新增会被设备淘汰旧记录，需先提示上限
+  const isExisting = savedList.value.some((item) => item.ssid === ssid);
+  if (!isExisting && savedMaxReached.value) {
+    globalNotifyRightSide(translate('wifi.saved.listFull', {max: savedMax.value}), "warning");
+    return;
+  }
+  pendingAddSnapshot = [...savedList.value];
   savedAddSaving.value = true;
   wifi_add_saved(ssid, savedAddForm.password, savedAddForm.priority);
 }
