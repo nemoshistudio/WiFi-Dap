@@ -16,8 +16,14 @@ static uint8_t module_count = 0;
 
 int global_module_reg(const global_module_t *g_mod)
 {
-	if (g_mod->module_id > GLOBAL_MODULE_MAX) {
-		ESP_LOGE(TAG, "g_id > max");
+	if (g_mod == NULL || g_mod->init == NULL) {
+		ESP_LOGE(TAG, "invalid module registration");
+		return 1;
+	}
+
+	/* module_id is used as an array index: reject >= MAX (not only > MAX). */
+	if (g_mod->module_id >= GLOBAL_MODULE_MAX) {
+		ESP_LOGE(TAG, "g_id %u >= max %d", g_mod->module_id, GLOBAL_MODULE_MAX);
 		return 1;
 	}
 
