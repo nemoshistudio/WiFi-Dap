@@ -389,7 +389,9 @@ static int ws_on_close(httpd_req_t *req, httpd_ws_frame_t *ws_pkt, void *msg)
 	ws_pkt->type = HTTPD_WS_TYPE_CLOSE;
 	ESP_LOGI(TAG, "ws %d closed", httpd_req_to_sockfd(req));
 	ws_rm_fd(httpd_req_to_sockfd(req));
-	int err = httpd_ws_send_frame_async(req, httpd_req_to_sockfd(req), ws_pkt);
+	/* Use the per-fd send lock: broadcast (heartbeat / ws_router tx task) may
+	 * be sending on the same socket from another task right now. */
+	int err = ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), ws_pkt);
 	if (err) {
 		ESP_LOGE(TAG, "on close %s", esp_err_to_name(err));
 	}
