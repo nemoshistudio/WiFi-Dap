@@ -28,6 +28,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -48,7 +49,6 @@ extern esp_err_t wt_uart_bridge_resume(void) __attribute__((weak));
 #define TF_PROG_BUF_SIZE     1024U
 #define TF_READBACK_CHUNK    480U
 
-static SemaphoreHandle_t s_api_lock;
 static SemaphoreHandle_t s_status_lock;
 static bool s_inited;
 
@@ -78,18 +78,76 @@ static tf_debug_result_t s_debug_result;
 /* init / locks                                                              */
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- */
+/* engine worker task                                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * All CMSIS-DAP/SWD work runs in a dedicated worker task pinned to core 0
+ * (the DAP task's core) with an 8 KiB stack.  Callers (httpd, request_runner)
+ * only receive/queue data and block on a semaphore, so their 4 KiB stacks are
+ * never used for the deep DAP command path (hardware bring-up found that
+ * running it in the httpd task overflowed the stack).
+ *
+ * The job mutex is the "one operation at a time" gate: a concurrent API call
+ * fails with ESP_ERR_INVALID_STATE instead of blocking.
+ */
+typedef struct {
+    esp_err_t (*fn)(void *arg);
+    void *arg;
+    esp_err_t result;
+} tf_job_t;
+
+static SemaphoreHandle_t s_job_mutex;
+static SemaphoreHandle_t s_job_done;
+static TaskHandle_t s_worker;
+static tf_job_t s_job;
+
+static void tf_worker_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (s_job.fn != NULL) {
+            s_job.result = s_job.fn(s_job.arg);
+        }
+        xSemaphoreGive(s_job_done);
+    }
+}
+
+static esp_err_t tf_worker_start(void)
+{
+    BaseType_t created;
+
+    s_job_mutex = xSemaphoreCreateMutex();
+    s_job_done = xSemaphoreCreateBinary();
+    if (s_job_mutex == NULL || s_job_done == NULL) {
+        return ESP_FAIL;
+    }
+    created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", 8192, NULL,
+                                      6 /* above httpd (5), below tcp_server/DAP */,
+                                      &s_worker, 0 /* DAP core */);
+    if (created != pdPASS) {
+        s_worker = NULL;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 esp_err_t wt_tf_init(void)
 {
     if (s_inited) {
         return ESP_OK;
     }
-    s_api_lock = xSemaphoreCreateMutex();
     s_status_lock = xSemaphoreCreateMutex();
-    if (s_api_lock == NULL || s_status_lock == NULL) {
+    if (s_status_lock == NULL) {
+        return ESP_FAIL;
+    }
+    if (tf_worker_start() != ESP_OK) {
         return ESP_FAIL;
     }
     s_inited = true;
-    ESP_LOGI(TF_TAG, "target flash engine initialized");
+    ESP_LOGI(TF_TAG, "target flash engine initialized (worker task, core 0, 8 KiB)");
     return ESP_OK;
 }
 
@@ -98,24 +156,30 @@ static esp_err_t tf_ensure_init(void)
     return s_inited ? ESP_OK : wt_tf_init();
 }
 
-/** Take the API mutex without blocking (concurrent call -> INVALID_STATE). */
-static esp_err_t tf_api_enter(void)
+/** Serialize one engine operation and run it on the worker task. */
+static esp_err_t tf_submit(esp_err_t (*fn)(void *arg), void *arg)
 {
-    if (!s_inited) {
-        esp_err_t err = wt_tf_init();
-        if (err != ESP_OK) {
-            return err;
-        }
-    }
-    if (xSemaphoreTake(s_api_lock, 0) != pdTRUE) {
+    esp_err_t err;
+
+    if (s_worker == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    return ESP_OK;
-}
-
-static void tf_api_exit(void)
-{
-    xSemaphoreGive(s_api_lock);
+    if (xSemaphoreTake(s_job_mutex, 0) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_job.fn = fn;
+    s_job.arg = arg;
+    s_job.result = ESP_FAIL;
+    xTaskNotifyGive(s_worker);
+    if (xSemaphoreTake(s_job_done, portMAX_DELAY) != pdTRUE) {
+        xSemaphoreGive(s_job_mutex);
+        return ESP_FAIL;
+    }
+    err = s_job.result;
+    s_job.fn = NULL;
+    s_job.arg = NULL;
+    xSemaphoreGive(s_job_mutex);
+    return err;
 }
 
 static void tf_status_lock(void)
@@ -396,29 +460,43 @@ static esp_err_t tf_flush_full_buffer(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* public API                                                                */
+/* worker jobs (all of these run on the tf_worker task, never on the caller) */
 /* ------------------------------------------------------------------------- */
 
-esp_err_t wt_tf_probe(wt_tf_info_t *info)
+typedef struct {
+    wt_tf_info_t *info;
+} tf_job_probe_arg_t;
+
+typedef struct {
+    uint32_t image_size;
+} tf_job_begin_arg_t;
+
+typedef struct {
+    const void *data;
+    size_t len;
+} tf_job_feed_arg_t;
+
+typedef struct {
+    bool run;
+} tf_job_reset_arg_t;
+
+typedef struct {
+    char *out;
+    size_t out_len;
+} tf_job_diag_arg_t;
+
+typedef struct {
+    uint32_t *pc;
+    bool *halted;
+    bool *lockup;
+} tf_job_pc_arg_t;
+
+static esp_err_t tf_job_probe(void *arg)
 {
+    tf_job_probe_arg_t *a = (tf_job_probe_arg_t *)arg;
     esp_err_t err;
-    esp_err_t ret;
 
-    ret = tf_ensure_init();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    if (info != NULL) {
-        memset(info, 0, sizeof(*info));
-        snprintf(info->family, sizeof(info->family), "unknown");
-    }
-
-    ret = tf_api_enter();
-    if (ret != ESP_OK) {
-        return ret;
-    }
     if (s_session_active) {
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
     tf_set_state(WT_TF_IDLE);
@@ -428,8 +506,8 @@ esp_err_t wt_tf_probe(wt_tf_info_t *info)
         tf_dap_release();
     }
     if (err == ESP_OK) {
-        if (info != NULL) {
-            *info = s_info;
+        if (a->info != NULL) {
+            *a->info = s_info;
         }
         tf_set_message("probe ok: %s", s_info.family);
         s_debug_result.info = s_info;
@@ -437,38 +515,26 @@ esp_err_t wt_tf_probe(wt_tf_info_t *info)
         snprintf(s_info.family, sizeof(s_info.family), "unknown");
         tf_set_message("probe failed: %s", esp_err_to_name(err));
     }
-    tf_api_exit();
     return err;
 }
 
-esp_err_t wt_tf_flash_begin(uint32_t image_size)
+static esp_err_t tf_job_flash_begin(void *arg)
 {
+    tf_job_begin_arg_t *a = (tf_job_begin_arg_t *)arg;
     esp_err_t err;
 
-    if (image_size == 0U) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    err = tf_ensure_init();
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = tf_api_enter();
-    if (err != ESP_OK) {
-        return err;
-    }
     if (s_session_active) {
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
 
     tf_status_lock();
     memset(&s_status, 0, sizeof(s_status));
     s_status.state = WT_TF_ERASING;
-    s_status.total = image_size;
+    s_status.total = a->image_size;
     snprintf(s_status.message, sizeof(s_status.message), "erasing");
     tf_status_unlock();
     s_abort_requested = false;
-    s_image_size = image_size;
+    s_image_size = a->image_size;
     s_received = 0U;
     s_programmed = 0U;
     s_buf_len = 0U;
@@ -476,30 +542,26 @@ esp_err_t wt_tf_flash_begin(uint32_t image_size)
     s_session_active = true;
     s_op_start_ms = tf_now_ms();
 
-    ESP_LOGI(TF_TAG, "flash begin: image %u bytes", (unsigned)image_size);
+    ESP_LOGI(TF_TAG, "flash begin: image %u bytes", (unsigned)a->image_size);
 
     err = tf_dap_acquire();
     if (err != ESP_OK) {
         s_session_active = false;
         tf_set_error(err, "DAP hand-off failed");
-        tf_api_exit();
         return err;
     }
     err = tf_probe_link();
     if (err != ESP_OK) {
         tf_session_fail(err, "target probe failed");
-        tf_api_exit();
         return err;
     }
-    if (image_size > s_target.max_image_size) {
+    if (a->image_size > s_target.max_image_size) {
         tf_session_fail(ESP_ERR_INVALID_SIZE, "image larger than target flash");
-        tf_api_exit();
         return ESP_ERR_INVALID_SIZE;
     }
     err = tf_swd_halt();
     if (err != ESP_OK) {
         tf_session_fail(err, "target halt failed");
-        tf_api_exit();
         return err;
     }
     s_core_halted = true;
@@ -507,18 +569,15 @@ esp_err_t wt_tf_flash_begin(uint32_t image_size)
     err = s_target.ops->program_begin(&s_target);
     if (err != ESP_OK) {
         tf_session_fail(err, "flash unlock failed");
-        tf_api_exit();
         return err;
     }
-    err = s_target.ops->erase(&s_target, s_target.flash_base, image_size);
+    err = s_target.ops->erase(&s_target, s_target.flash_base, a->image_size);
     if (err != ESP_OK) {
         tf_session_fail(err, "flash erase failed");
-        tf_api_exit();
         return err;
     }
     if (tf_abort_check()) {
         tf_session_fail(ESP_ERR_INVALID_STATE, "aborted");
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -533,36 +592,28 @@ esp_err_t wt_tf_flash_begin(uint32_t image_size)
     s_status.err = 0;
     tf_status_unlock();
 
-    tf_api_exit();
     ESP_LOGI(TF_TAG, "flash begin done: %s, %u KiB erased coverage, DAP held",
-             s_target.family_str, (unsigned)((image_size + 1023U) / 1024U));
+             s_target.family_str, (unsigned)((a->image_size + 1023U) / 1024U));
     return ESP_OK;
 }
 
-esp_err_t wt_tf_flash_feed(const void *data, size_t len)
+static esp_err_t tf_job_flash_feed(void *arg)
 {
-    const uint8_t *src = (const uint8_t *)data;
+    tf_job_feed_arg_t *a = (tf_job_feed_arg_t *)arg;
+    const uint8_t *src = (const uint8_t *)a->data;
+    size_t len = a->len;
 
-    if (data == NULL || len == 0U) {
+    if (a->data == NULL || a->len == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_inited) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (tf_api_enter() != ESP_OK) {
-        return ESP_ERR_INVALID_STATE;
-    }
     if (!s_session_active || s_status.state != WT_TF_PROGRAMMING) {
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
     if ((uint64_t)s_received + len > (uint64_t)s_image_size) {
-        tf_api_exit();
         return ESP_ERR_INVALID_SIZE;
     }
     if (tf_abort_check()) {
         tf_session_fail(ESP_ERR_INVALID_STATE, "aborted");
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -582,17 +633,16 @@ esp_err_t wt_tf_flash_feed(const void *data, size_t len)
             esp_err_t err = tf_flush_full_buffer();
             if (err != ESP_OK) {
                 tf_session_fail(err, "programming failed");
-                tf_api_exit();
                 return err;
             }
         }
     }
-    tf_api_exit();
     return ESP_OK;
 }
 
-esp_err_t wt_tf_flash_end(void)
+static esp_err_t tf_job_flash_end(void *arg)
 {
+    (void)arg;
     esp_err_t err = ESP_OK;
     size_t unit;
     uint32_t offset;
@@ -601,19 +651,11 @@ esp_err_t wt_tf_flash_end(void)
     uint32_t verified = 0U;
     bool sha_match;
 
-    if (!s_inited) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (tf_api_enter() != ESP_OK) {
-        return ESP_ERR_INVALID_STATE;
-    }
     if (!s_session_active || s_status.state != WT_TF_PROGRAMMING) {
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
     if (s_received != s_image_size) {
         tf_session_fail(ESP_ERR_INVALID_SIZE, "image size mismatch (feed incomplete)");
-        tf_api_exit();
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -628,7 +670,6 @@ esp_err_t wt_tf_flash_end(void)
         err = tf_program_block(s_buf, padded);
         if (err != ESP_OK) {
             tf_session_fail(err, "tail programming failed");
-            tf_api_exit();
             return err;
         }
         s_buf_len = 0U;
@@ -637,14 +678,12 @@ esp_err_t wt_tf_flash_end(void)
 
     if (tf_abort_check()) {
         tf_session_fail(ESP_ERR_INVALID_STATE, "aborted");
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
 
     /* Finalize the source digest. */
     if (mbedtls_sha256_finish(&s_sha, s_sha_expected) != 0) {
         tf_session_fail(ESP_FAIL, "sha256 finalize failed");
-        tf_api_exit();
         return ESP_FAIL;
     }
     s_sha_active = false;
@@ -653,7 +692,6 @@ esp_err_t wt_tf_flash_end(void)
     err = s_target.ops->program_end(&s_target);
     if (err != ESP_OK) {
         tf_session_fail(err, "flash lock failed");
-        tf_api_exit();
         return err;
     }
 
@@ -673,14 +711,12 @@ esp_err_t wt_tf_flash_end(void)
         if (tf_abort_check()) {
             mbedtls_sha256_free(&readback);
             tf_session_fail(ESP_ERR_INVALID_STATE, "aborted");
-            tf_api_exit();
             return ESP_ERR_INVALID_STATE;
         }
         err = tf_swd_read_mem(s_target.flash_base + offset, chunk, chunk_len);
         if (err != ESP_OK) {
             mbedtls_sha256_free(&readback);
             tf_session_fail(err, "flash read-back failed");
-            tf_api_exit();
             return err;
         }
         mbedtls_sha256_update(&readback, chunk, chunk_len);
@@ -691,7 +727,6 @@ esp_err_t wt_tf_flash_end(void)
     if (mbedtls_sha256_finish(&readback, s_sha_actual) != 0) {
         mbedtls_sha256_free(&readback);
         tf_session_fail(ESP_FAIL, "sha256 read-back finalize failed");
-        tf_api_exit();
         return ESP_FAIL;
     }
     mbedtls_sha256_free(&readback);
@@ -699,7 +734,6 @@ esp_err_t wt_tf_flash_end(void)
     sha_match = (memcmp(s_sha_expected, s_sha_actual, sizeof(s_sha_expected)) == 0);
     if (!sha_match) {
         tf_session_fail(ESP_ERR_INVALID_CRC, "verify sha256 mismatch");
-        tf_api_exit();
         return ESP_ERR_INVALID_CRC;
     }
 
@@ -711,7 +745,6 @@ esp_err_t wt_tf_flash_end(void)
     err = tf_swd_sysreset(true);
     if (err != ESP_OK) {
         tf_session_fail(err, "target reset failed");
-        tf_api_exit();
         return err;
     }
     s_core_halted = false;
@@ -749,9 +782,90 @@ esp_err_t wt_tf_flash_end(void)
         ESP_LOGI(TF_TAG, "flash done: %u bytes, sha256=%s, %u ms", (unsigned)s_image_size,
                  exp_hex, (unsigned)elapsed);
     }
-
-    tf_api_exit();
     return ESP_OK;
+}
+
+static esp_err_t tf_job_reset_target(void *arg)
+{
+    tf_job_reset_arg_t *a = (tf_job_reset_arg_t *)arg;
+    esp_err_t err;
+
+    if (s_session_active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    tf_set_state(WT_TF_RESETTING);
+    err = tf_dap_acquire();
+    if (err == ESP_OK) {
+        err = tf_probe_link();
+        if (err == ESP_OK) {
+            err = tf_swd_sysreset(a->run);
+        }
+        tf_dap_release();
+    }
+    if (err == ESP_OK) {
+        tf_set_state(WT_TF_IDLE);
+        tf_set_message("target reset (%s)", a->run ? "run" : "halt");
+    } else {
+        tf_set_error(err, "target reset failed");
+    }
+    return err;
+}
+
+/* ------------------------------------------------------------------------- */
+/* public API                                                                */
+/* ------------------------------------------------------------------------- */
+
+esp_err_t wt_tf_probe(wt_tf_info_t *info)
+{
+    esp_err_t err = tf_ensure_init();
+    tf_job_probe_arg_t a = {.info = info};
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (info != NULL) {
+        memset(info, 0, sizeof(*info));
+        snprintf(info->family, sizeof(info->family), "unknown");
+    }
+    return tf_submit(tf_job_probe, &a);
+}
+
+esp_err_t wt_tf_flash_begin(uint32_t image_size)
+{
+    esp_err_t err = tf_ensure_init();
+    tf_job_begin_arg_t a = {.image_size = image_size};
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (image_size == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return tf_submit(tf_job_flash_begin, &a);
+}
+
+esp_err_t wt_tf_flash_feed(const void *data, size_t len)
+{
+    esp_err_t err = tf_ensure_init();
+    tf_job_feed_arg_t a = {.data = data, .len = len};
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (data == NULL || len == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return tf_submit(tf_job_flash_feed, &a);
+}
+
+esp_err_t wt_tf_flash_end(void)
+{
+    esp_err_t err = tf_ensure_init();
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    return tf_submit(tf_job_flash_end, NULL);
 }
 
 esp_err_t wt_tf_abort(void)
@@ -776,37 +890,13 @@ esp_err_t wt_tf_abort(void)
 
 esp_err_t wt_tf_reset_target(bool run)
 {
-    esp_err_t err;
+    esp_err_t err = tf_ensure_init();
+    tf_job_reset_arg_t a = {.run = run};
 
-    err = tf_ensure_init();
     if (err != ESP_OK) {
         return err;
     }
-    err = tf_api_enter();
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (s_session_active) {
-        tf_api_exit();
-        return ESP_ERR_INVALID_STATE;
-    }
-    tf_set_state(WT_TF_RESETTING);
-    err = tf_dap_acquire();
-    if (err == ESP_OK) {
-        err = tf_probe_link();
-        if (err == ESP_OK) {
-            err = tf_swd_sysreset(run);
-        }
-        tf_dap_release();
-    }
-    if (err == ESP_OK) {
-        tf_set_state(WT_TF_IDLE);
-        tf_set_message("target reset (%s)", run ? "run" : "halt");
-    } else {
-        tf_set_error(err, "target reset failed");
-    }
-    tf_api_exit();
-    return err;
+    return tf_submit(tf_job_reset_target, &a);
 }
 
 void wt_tf_get_status(wt_tf_status_t *out)
@@ -843,87 +933,84 @@ void tf_debug_get_result(tf_debug_result_t *out)
     tf_status_unlock();
 }
 
-esp_err_t tf_debug_read_pc(uint32_t *pc, bool *halted, bool *lockup)
+static esp_err_t tf_job_read_pc(void *arg)
 {
+    tf_job_pc_arg_t *a = (tf_job_pc_arg_t *)arg;
     esp_err_t err;
     uint32_t dhcsr = 0U;
     bool was_halted = false;
 
+    if (s_session_active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = tf_dap_acquire();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_probe_link();
+    if (err == ESP_OK) {
+        err = tf_swd_read_u32(TF_REG_DHCSR, &dhcsr);
+        if (err == ESP_OK) {
+            was_halted = (dhcsr & TF_DHCSR_S_HALT) != 0U;
+            if (a->halted != NULL) {
+                *a->halted = was_halted;
+            }
+            if (a->lockup != NULL) {
+                *a->lockup = (dhcsr & TF_DHCSR_S_LOCKUP) != 0U;
+            }
+            err = tf_swd_read_pc(a->pc);
+        }
+        if (!was_halted) {
+            (void)tf_swd_resume();
+        }
+    }
+    tf_dap_release();
+    return err;
+}
+
+esp_err_t tf_debug_read_pc(uint32_t *pc, bool *halted, bool *lockup)
+{
+    esp_err_t err = tf_ensure_init();
+    tf_job_pc_arg_t a = {.pc = pc, .halted = halted, .lockup = lockup};
+
+    if (err != ESP_OK) {
+        return err;
+    }
     if (pc == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (halted != NULL) {
-        *halted = false;
-    }
-    if (lockup != NULL) {
-        *lockup = false;
-    }
-    err = tf_ensure_init();
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = tf_api_enter();
-    if (err != ESP_OK) {
-        return err;
-    }
+    return tf_submit(tf_job_read_pc, &a);
+}
+
+static esp_err_t tf_job_link_diag(void *arg)
+{
+    tf_job_diag_arg_t *a = (tf_job_diag_arg_t *)arg;
+    esp_err_t err;
+
     if (s_session_active) {
-        tf_api_exit();
         return ESP_ERR_INVALID_STATE;
     }
     err = tf_dap_acquire();
     if (err == ESP_OK) {
-        err = tf_probe_link();
-        if (err == ESP_OK) {
-            err = tf_swd_read_u32(TF_REG_DHCSR, &dhcsr);
-            if (err == ESP_OK) {
-                was_halted = (dhcsr & TF_DHCSR_S_HALT) != 0U;
-                if (halted != NULL) {
-                    *halted = was_halted;
-                }
-                if (lockup != NULL) {
-                    *lockup = (dhcsr & TF_DHCSR_S_LOCKUP) != 0U;
-                }
-                err = tf_swd_read_pc(pc);
-            }
-            if (!was_halted) {
-                (void)tf_swd_resume();
-            }
-        }
+        err = tf_swd_link_diag(a->out, a->out_len);
         tf_dap_release();
     }
-    tf_api_exit();
     return err;
 }
-
 
 esp_err_t tf_debug_link_diag(char *out, size_t out_len)
 {
-    esp_err_t err;
+    esp_err_t err = tf_ensure_init();
+    tf_job_diag_arg_t a = {.out = out, .out_len = out_len};
 
+    if (err != ESP_OK) {
+        return err;
+    }
     if (out == NULL || out_len == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
-    err = tf_ensure_init();
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = tf_api_enter();
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (s_session_active) {
-        tf_api_exit();
-        return ESP_ERR_INVALID_STATE;
-    }
-    err = tf_dap_acquire();
-    if (err == ESP_OK) {
-        err = tf_swd_link_diag(out, out_len);
-        tf_dap_release();
-    }
-    tf_api_exit();
-    return err;
+    return tf_submit(tf_job_link_diag, &a);
 }
-
 
 uint32_t tf_debug_last_stage(void)
 {
@@ -932,5 +1019,5 @@ uint32_t tf_debug_last_stage(void)
 
 void tf_debug_stage_reset(void)
 {
-    TF_STAGE(0U);
+    tf_stage_mark(0U);
 }
