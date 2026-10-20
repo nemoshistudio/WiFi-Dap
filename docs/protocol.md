@@ -64,7 +64,7 @@
 | 8 | SET_AP_CRED | `ssid,password` | 回显 | 空 ssid 表示恢复默认 `WiFi-Dap-XXXX` |
 | 9 | GET_STATIC_IP | – | `{"enable":bool,"ip":"","gateway":"","netmask":"","dns_main":"","dns_backup":""}` | – |
 | 10 | SET_STATIC_IP | `enable` + 上述字段 | 回显 | 默认 enable=false（DHCP） |
-| **11** | **GET_SAVED_LIST** | – | `{"auto_save":bool,"list":[{"idx":0,"ssid":"...","last_success":<unix>,"priority":0}]}` | 多 WiFi 记忆 |
+| **11** | **GET_SAVED_LIST** | – | `{"auto_save":bool,"count":<int>,"max":<int>,"list":[{"idx":0,"ssid":"...","last_success":<unix>,"priority":0}]}`（count/max 为增量可选） | 多 WiFi 记忆 |
 | **12** | **ADD_SAVED** | `ssid,password[,priority]` | `{"idx":<int>}`（**不回显 password**，安全例外） | 已存在则更新口令/时间；前端据此只更新列表不展示口令 |
 | **13** | **DEL_SAVED** | `idx` | 回显 | – |
 | **14** | **SET_AUTO_SAVE** | `enable` | 回显 | 默认 true |
