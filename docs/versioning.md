@@ -530,7 +530,7 @@ ws.onmessage = (e) => {
 
 1. **`docs/protocol.md` 字段为准**：本文 §5.2/§6.1 的字段名与 `protocol.md:46,109,110` 完全一致；若两者冲突，以 `protocol.md` 为准并回头修本文（Lead 裁决）。
 2. **OTA 上传细节**不在本文：分片大小、HTTP 端点、校验/回执、鉴权头以 `docs/ota-local-upload.md` 为准；本文固定"版本/分区信息"与"更新成功判定"。
-3. **`protocol.md:17` 鉴权首帧**写作 `{"module":0,"cmd":0,"token":"..."}`，但 SYSTEM 命令表未定义 `cmd 0`。建议 Lead 二选一：(a) `protocol.md` 增加 SYSTEM `cmd 0 = AUTH`（返回 `protocol_version`），(b) 只保留 query `?token=` / HTTP `Authorization` 方式。本文的握手时序对两种方式都兼容（握手在连接建立后由 WS 消息完成）。
+3. ~~鉴权首帧~~：登录/鉴权已按需求移除（无 token/AUTH 首帧/`Authorization`），此不一致项关闭；握手在连接建立后由普通 WS 业务消息完成。
 4. **INTEGRATION-PLAN 冲突**：`§0.2/§4` 旧文写"本期不做 OTA"，`§8.1` 改为"OTA 固件侧实现"；本文按 **§8.1** 与 `protocol.md §2.5` 执行。`§5.3` 旧文写"保留 zh/en/fr、trial"与 `§8.3`"仅中英双语"冲突；i18n 契约按 **§8.3**，trial 功能删除（`VITE_TRIAL_*` 与中文默认文案一并移除）。
 5. **`upd_date` 格式**：统一 `YYYY-MM-DD`（`FW_UPD_DATE` 当前输出即此格式，`protocol.md:46` 同）；若未来改为完整 ISO8601，需协议升版。
 6. **`esp_app_desc` 解析偏移**（§6.4）基于 ESP-IDF 5.2 `esp_app_format.h` 布局；若 IDF 升级改变布局，仅影响前端"上传前展示"的可选增强，不涉及协议。
