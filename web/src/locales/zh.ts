@@ -234,6 +234,9 @@ export default {
             invalidPassword: "Wi-Fi 密码至少 8 位",
             maxReached: "已达到保存上限（{max}）",
             connectFailed: "连接失败：{err}",
+            apDefault: "默认名称",
+            apCustom: "自定义名称",
+            apDefaultHint: "默认 AP 名称格式：WiFi-Dap-XXXX（XXXX 为设备 MAC 末 2 字节十六进制，大写）",
         },
     },
 
@@ -286,6 +289,7 @@ export default {
         unsupported: '当前固件不支持此功能',
         details: '详情',
         required: '必填',
+        actions: '操作',
     },
 
     navbar: {
@@ -340,6 +344,9 @@ export default {
             downgradeWarn: '所选固件版本低于当前版本，确认降级？',
             authRequired: '固件已开启鉴权，请先登录',
             current: '当前运行',
+            labWarning: '默认未启用鉴权：本页仅可在可信局域网使用，任何能访问设备的人都可上传固件。',
+            slotSize: 'OTA 槽容量',
+            slotFree: 'OTA 槽可用',
         },
         status: {
             idle: '空闲',

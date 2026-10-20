@@ -55,6 +55,71 @@
     </el-form>
 
     <el-divider></el-divider>
+
+    <div v-if="savedSupported" class="mb-4">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <h2 class="text-xl font-bold tracking-tight md:text-2xl">
+            {{ translate('wifi.saved.title') }}
+          </h2>
+          <el-tooltip effect="light" :content="translate('wifi.saved.autoSaveHint')" :show-after="500">
+            <el-switch
+                v-model="savedAutoSave"
+                :active-text="translate('wifi.saved.autoSave')"
+                :disabled="!isConnected"
+                @change="onAutoSaveChange"
+            />
+          </el-tooltip>
+          <span v-if="savedMaxReached" class="text-xs text-orange-500">
+            {{ translate('wifi.saved.maxReached', {max: SAVED_WIFI_MAX}) }}
+          </span>
+        </div>
+        <div class="flex gap-2">
+          <el-button :disabled="!isConnected || savedLoading" @click="refreshSavedList">
+            {{ translate('common.refresh') }}
+          </el-button>
+          <el-button type="primary" :disabled="!isConnected || savedMaxReached" @click="openAddSavedDialog">
+            {{ translate('wifi.saved.add') }}
+          </el-button>
+        </div>
+      </div>
+      <p class="text-sm text-gray-600 mt-1">{{ translate('wifi.saved.description') }}</p>
+
+      <el-empty v-if="!savedList.length" :description="translate('wifi.saved.empty')" :image-size="80"/>
+      <el-table v-else :data="savedList" size="small" class="mt-2" border>
+        <el-table-column label="SSID" min-width="150">
+          <template #default="{ row }">
+            <span>{{ row.ssid }}</span>
+            <el-tag v-if="isCurrentSavedSsid(row.ssid)" size="small" type="success" class="ml-2">
+              {{ translate('wifi.saved.current') }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column :label="translate('wifi.saved.lastSuccess')" min-width="150">
+          <template #default="{ row }">{{ formatLastSuccess(row.last_success) }}</template>
+        </el-table-column>
+        <el-table-column :label="translate('wifi.saved.priority')" width="90" prop="priority"/>
+        <el-table-column :label="translate('common.actions')" width="210">
+          <template #default="{ row }">
+            <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="savedConnectingIdx === row.idx"
+                :disabled="!isConnected"
+                @click="openConnectSavedDialog(row)"
+            >
+              {{ translate('wifi.saved.connect') }}
+            </el-button>
+            <el-button size="small" type="danger" plain :disabled="!isConnected" @click="onForgetSaved(row)">
+              {{ translate('wifi.saved.forget') }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <el-divider></el-divider>
     <div class="flex items-center">
       <h5 class="text-md font-bold text-gray-800 w-32">Wi-Fi {{ translate('wifi.mode') }}</h5>
       <div class="flex shrink-0">
@@ -264,8 +329,14 @@
             Wi-Fi(SSID)
           </div>
         </template>
-        <div class="flex">
-          <el-input v-model="wifiApInfo.ssid"></el-input>
+        <div class="w-full">
+          <div class="flex items-center">
+            <el-input v-model="wifiApInfo.ssid"></el-input>
+            <el-tag class="ml-2 shrink-0" size="small" :type="isDefaultApSsid ? 'info' : 'warning'">
+              {{ isDefaultApSsid ? translate('wifi.saved.apDefault') : translate('wifi.saved.apCustom') }}
+            </el-tag>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">{{ translate('wifi.saved.apDefaultHint') }}</p>
         </div>
       </el-descriptions-item>
       <el-descriptions-item span="6">
@@ -316,6 +387,49 @@
       <el-button type="primary" :loading="wifiMode_loading" @click="wifiApChangeCredential">{{ translate('wifi.save') }}</el-button>
     </div>
     <el-divider></el-divider>
+
+    <el-dialog v-model="savedAddVisible" :title="translate('wifi.saved.addTitle')" width="420px">
+      <el-form label-width="auto">
+        <el-form-item label="Wi-Fi">
+          <el-input v-model="savedAddForm.ssid" :maxlength="32" clearable/>
+        </el-form-item>
+        <el-form-item :label="translate('wifi.password')">
+          <el-input v-model="savedAddForm.password" type="password" show-password clearable/>
+        </el-form-item>
+        <el-form-item :label="translate('wifi.saved.priority')">
+          <el-input-number v-model="savedAddForm.priority" :min="0" :max="255"/>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="savedAddVisible = false">{{ translate('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="savedAddSaving" @click="submitAddSaved">
+          {{ translate('wifi.saved.add') }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="savedConnectVisible" :title="translate('wifi.saved.connect')" width="420px">
+      <el-form label-width="auto">
+        <el-form-item label="Wi-Fi">
+          <el-input v-model="savedConnectForm.ssid" disabled/>
+        </el-form-item>
+        <el-form-item :label="translate('wifi.password')">
+          <el-input
+              v-model="savedConnectForm.password"
+              type="password"
+              show-password
+              clearable
+              @keydown.enter="submitConnectSaved"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="savedConnectVisible = false">{{ translate('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="savedConnectingIdx >= 0" @click="submitConnectSaved">
+          {{ translate('wifi.saved.connect') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 
 </template>
@@ -339,8 +453,16 @@ import {
   type WiFiCredential,
   WifiStatus, wifi_sta_get_static_info,
   type IWifiStaStaticInfo, wifi_sta_set_static_conf,
+  type IWifiSavedItem,
+  type IWifiSavedAddResult,
+  type IWifiAutoSaveResult,
+  type IWifiSavedList,
+  wifi_get_saved_list,
+  wifi_add_saved,
+  wifi_del_saved,
+  wifi_set_auto_save,
 } from "@/api/apiWifi";
-import type {FormInstance} from "element-plus";
+import {ElMessageBox, type FormInstance} from "element-plus";
 
 import InlineSvg from "@/components/InlineSvg.vue";
 import type {ApiJsonMsg, ControlMsg} from "@/api";
@@ -431,6 +553,34 @@ let wifiStaticInfo = reactive<IWifiStaStaticInfo>({
   static_ip_en: 0,
 });
 
+/* ---- 多 WiFi 凭据记忆（docs/wifi-credential-memory.md §7） ---- */
+/** 契约默认上限 BIRDIEBOT_WIFI_CRED_MAX = 8（设备实际值由固件决定） */
+const SAVED_WIFI_MAX = 8;
+let savedSupported = ref(true);
+let savedList = ref<IWifiSavedItem[]>([]);
+let savedAutoSave = ref(true);
+let savedLoading = ref(false);
+let savedAddVisible = ref(false);
+let savedAddSaving = ref(false);
+let savedAddForm = reactive({
+  ssid: "",
+  password: "",
+  priority: 100,
+});
+let savedConnectVisible = ref(false);
+let savedConnectingIdx = ref(-1);
+let savedConnectForm = reactive({
+  idx: -1,
+  ssid: "",
+  password: "",
+});
+const savedMaxReached = computed(() => savedList.value.length >= SAVED_WIFI_MAX);
+/** AP SSID 是否仍为默认 WiFi-Dap-XXXX（用户自定义优先，空串=恢复默认） */
+const isDefaultApSsid = computed(() => {
+  const ssid = wifiApInfo.ssid;
+  return ssid === "" || /^WiFi-Dap-[0-9A-Fa-f]{4}$/.test(ssid);
+});
+
 let scanning = ref(false);
 let scan_cb: any;
 let connectBtnClicked = 0;
@@ -460,13 +610,24 @@ const onClientMsg = (msg: ApiJsonMsg) => {
       }
       if (connectBtnClicked) {
         connectBtnClicked = 0;
+        savedConnectingIdx.value = -1;
+        savedConnectVisible.value = false;
         globalNotifyRightSide(wifiStaApInfo.ssid + " " + translate('wifi.connectionSuccess'), "success");
         wifi_sta_get_static_info();
       }
       break;
     }
-    case WifiCmd.WIFI_API_JSON_CONNECT:
+    case WifiCmd.WIFI_API_JSON_CONNECT: {
+      if (msg.err !== undefined) {
+        connectBtnClicked = 0;
+        savedConnectingIdx.value = -1;
+        globalNotifyRightSide(translate('wifi.saved.connectFailed', {err: msg.err}), "error");
+        break;
+      }
+      // 成功响应复用 GET_STA_INFO 字段；主动拉一次以统一走 cmd1 的成功提示/刷新逻辑
+      wifi_sta_get_ap_info();
       break;
+    }
     case WifiCmd.WIFI_API_JSON_GET_SCAN: {
       const list = msg as WifiList;
       scanning.value = false;
@@ -543,6 +704,61 @@ const onClientMsg = (msg: ApiJsonMsg) => {
     case WifiCmd.WIFI_API_JSON_STA_SET_STATIC_CONF:
       wifiMode_loading.value = false;
       break;
+    case WifiCmd.WIFI_API_JSON_GET_SAVED_LIST: {
+      savedLoading.value = false;
+      if (msg.err !== undefined) {
+        // 旧固件不支持 cmd 11–14：优雅降级，整块隐藏（契约 §9.1-2）
+        if (msg.code === 4) {
+          savedSupported.value = false;
+        } else {
+          globalNotifyRightSide(savedErrorText(msg), "error");
+        }
+        break;
+      }
+      const saved = msg as IWifiSavedList;
+      savedSupported.value = true;
+      savedAutoSave.value = saved.auto_save !== false;
+      savedList.value = Array.isArray(saved.list) ? saved.list : [];
+      break;
+    }
+    case WifiCmd.WIFI_API_JSON_ADD_SAVED: {
+      savedAddSaving.value = false;
+      if (msg.err !== undefined) {
+        globalNotifyRightSide(savedErrorText(msg), "error");
+        break;
+      }
+      const addResult = msg as IWifiSavedAddResult;
+      savedAddVisible.value = false;
+      if (addResult.updated) {
+        globalNotifyRightSide(translate('wifi.saved.updated'), "success");
+      } else {
+        globalNotifyRightSide(translate('wifi.saved.added'), "success");
+      }
+      refreshSavedList();
+      break;
+    }
+    case WifiCmd.WIFI_API_JSON_DEL_SAVED: {
+      if (msg.err !== undefined) {
+        globalNotifyRightSide(savedErrorText(msg), "error");
+        break;
+      }
+      globalNotifyRightSide(translate('wifi.saved.deleted'), "success");
+      refreshSavedList();
+      break;
+    }
+    case WifiCmd.WIFI_API_JSON_SET_AUTO_SAVE: {
+      if (msg.err !== undefined) {
+        globalNotifyRightSide(savedErrorText(msg), "error");
+        // 失败时回读设备状态，避免开关与设备不一致
+        refreshSavedList();
+        break;
+      }
+      const autoSaveResult = msg as IWifiAutoSaveResult;
+      if (typeof autoSaveResult.auto_save === "boolean") {
+        savedAutoSave.value = autoSaveResult.auto_save;
+      }
+      break;
+    }
     default:
       if (isDevMode()) {
         console.log(msg);
@@ -559,6 +775,7 @@ const onClientCtrl = (msg: ControlMsg) => {
   if (msg.data === ControlEvent.DISCONNECTED) {
     Object.assign(wifiStaApInfo, defWifiInfo);
     Object.assign(wifiApInfo, defWifiInfo);
+    savedConnectingIdx.value = -1;
   }
 
   if (msg.data === ControlEvent.CONNECTED) {
@@ -566,6 +783,7 @@ const onClientCtrl = (msg: ControlMsg) => {
     wifi_ap_get_info();
     wifi_get_mode();
     wifi_sta_get_static_info();
+    refreshSavedList();
   }
 };
 
@@ -632,6 +850,116 @@ function wifiStaSetStaticInfo() {
   wifi_sta_get_ap_info();
 }
 
+/* ---- 多 WiFi 凭据记忆 UI（WP-208） ---- */
+
+/**
+ * 已保存网络命令的错误提示映射（docs/wifi-credential-memory.md §7.6/§9.2）。
+ * 设备 err 为英文原始信息，不参与 i18n；dev 模式下打印便于排查。
+ */
+function savedErrorText(msg: ApiJsonMsg): string {
+  if (msg.code === 4) {
+    return translate('common.unsupported');
+  }
+  if (isDevMode() && msg.err) {
+    console.warn('[wifi] saved-network error:', msg.err);
+  }
+  return translate('common.failed');
+}
+
+function refreshSavedList() {
+  if (!savedSupported.value) {
+    return;
+  }
+  savedLoading.value = true;
+  wifi_get_saved_list();
+}
+
+function formatLastSuccess(timestamp: number): string {
+  if (!timestamp || timestamp <= 0) {
+    // 设备未对时或从未成功（契约 §7.1）
+    return translate('common.unknown');
+  }
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function isCurrentSavedSsid(ssid: string): boolean {
+  return wifiStaApInfo.rssi !== 0 && wifiStaApInfo.ssid === ssid;
+}
+
+function onAutoSaveChange(value: string | number | boolean) {
+  wifi_set_auto_save(Boolean(value));
+}
+
+function openAddSavedDialog() {
+  savedAddForm.ssid = "";
+  savedAddForm.password = "";
+  savedAddForm.priority = 100;
+  savedAddVisible.value = true;
+}
+
+function submitAddSaved() {
+  const ssid = savedAddForm.ssid.trim();
+  const ssidBytes = new TextEncoder().encode(ssid).length;
+  if (ssidBytes === 0 || ssidBytes > 32) {
+    globalNotifyRightSide(translate('wifi.warnWifiName'), "error");
+    return;
+  }
+  const passwordBytes = new TextEncoder().encode(savedAddForm.password).length;
+  // 开放网络（0 字节）或 WPA 口令 8–64 字节（契约 §7.2）
+  if (passwordBytes !== 0 && (passwordBytes < 8 || passwordBytes > 64)) {
+    globalNotifyRightSide(translate('wifi.saved.invalidPassword'), "warning");
+    return;
+  }
+  if (!isConnected.value) {
+    globalNotify(translate('wifi.debuggerNotConnected'), "error");
+    return;
+  }
+  savedAddSaving.value = true;
+  wifi_add_saved(ssid, savedAddForm.password, savedAddForm.priority);
+}
+
+async function onForgetSaved(item: IWifiSavedItem) {
+  try {
+    await ElMessageBox.confirm(
+        translate('wifi.saved.forgetConfirm'),
+        translate('wifi.saved.forgetConfirmTitle'),
+        {
+          confirmButtonText: translate('common.confirm'),
+          cancelButtonText: translate('common.cancel'),
+          type: 'warning',
+        },
+    );
+  } catch {
+    return;
+  }
+  wifi_del_saved(item.idx);
+}
+
+function openConnectSavedDialog(item: IWifiSavedItem) {
+  savedConnectForm.idx = item.idx;
+  savedConnectForm.ssid = item.ssid;
+  savedConnectForm.password = "";
+  savedConnectVisible.value = true;
+}
+
+function submitConnectSaved() {
+  if (savedConnectingIdx.value >= 0) {
+    return;
+  }
+  if (!isConnected.value) {
+    globalNotify(translate('wifi.debuggerNotConnected'), "error");
+    return;
+  }
+  if (!savedConnectForm.ssid) {
+    return;
+  }
+  savedConnectingIdx.value = savedConnectForm.idx;
+  savedConnectVisible.value = false;
+  connectBtnClicked = 1;
+  // GET_SAVED_LIST 不回传口令（安全例外），重连已保存网络时由用户重新输入
+  wifi_connect_to(savedConnectForm.ssid, savedConnectForm.password);
+}
+
 onMounted(() => {
   registerModule(WtModuleID.WIFI, {
     ctrlCallback: onClientCtrl,
@@ -642,6 +970,7 @@ onMounted(() => {
   wifi_ap_get_info();
   wifi_get_mode();
   wifi_sta_get_static_info();
+  wifi_get_saved_list();
 });
 
 onUnmounted(() => {

@@ -65,3 +65,18 @@ export function buildWebSocketUrl(host: string, token: string): string {
 export function buildAuthRequest(token: string): string {
     return JSON.stringify({module: 0, cmd: 0, token});
 }
+
+/**
+ * HTTP 鉴权头（docs/protocol.md §1 / docs/ota-local-upload.md §8）。
+ * 无 token（默认实验室模式）时不附加任何头，请求与未开鉴权固件兼容；
+ * 开鉴权后 OTA 上传等 /api 请求必须带 `Authorization: Bearer <pair_code>`。
+ */
+export function buildAuthHeaders(): Record<string, string> {
+    const token = resolveAuthToken();
+    return token ? {Authorization: `Bearer ${token}`} : {};
+}
+
+/** 当前页面是否已有配对码（用于 UI 提示“实验室模式/已登录”）。 */
+export function hasAuthToken(): boolean {
+    return resolveAuthToken().length > 0;
+}

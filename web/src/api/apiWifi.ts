@@ -12,6 +12,11 @@ export enum WifiCmd {
     WIFI_API_JSON_AP_SET_CRED     = 8,
     WIFI_API_JSON_STA_GET_STATIC_INFO =  9,
     WIFI_API_JSON_STA_SET_STATIC_CONF = 10,
+    /* 多 WiFi 凭据记忆（docs/wifi-credential-memory.md §7） */
+    WIFI_API_JSON_GET_SAVED_LIST = 11,
+    WIFI_API_JSON_ADD_SAVED = 12,
+    WIFI_API_JSON_DEL_SAVED = 13,
+    WIFI_API_JSON_SET_AUTO_SAVE = 14,
 }
 
 export enum WifiMode {
@@ -67,12 +72,16 @@ export function wifi_ap_get_info() {
     sendJsonMsg(msg);
 }
 
-export function wifi_connect_to(ssid: string, password: string) {
-    const msg: WiFiCredential = {
+export function wifi_connect_to(ssid: string, password: string, save?: 0 | 1) {
+    const msg: WiFiCredential & {save?: 0 | 1} = {
         module: WtModuleID.WIFI,
         cmd: WifiCmd.WIFI_API_JSON_CONNECT,
         ssid: ssid,
         password: password,
+    }
+    // 可选 save：0=不写表，1=强制写表；缺省跟随设备 auto_save（契约 §7.5）
+    if (save !== undefined) {
+        msg.save = save;
     }
     sendJsonMsg(msg);
 }
@@ -184,3 +193,77 @@ export function wifi_sta_set_static_conf(static_info: IWifiStaStaticInfo) {
 }
 
 
+
+/* -------------------------------------------------------------------------
+ * 多 WiFi 凭据记忆（docs/wifi-credential-memory.md §7 / docs/protocol.md §2.2）
+ * 旧固件对 cmd 11–14 返回 code=4 Unsupported cmd，前端据此隐藏该区块。
+ * ---------------------------------------------------------------------- */
+
+/** GET_SAVED_LIST(cmd 11) 的单条记录；password 不回传（安全例外）。 */
+export interface IWifiSavedItem {
+    idx: number;
+    ssid: string;
+    /** Unix 秒；0 = 设备未对时或从未成功 */
+    last_success: number;
+    /** 0 = 最高优先，100 = 默认 */
+    priority: number;
+}
+
+export interface IWifiSavedList extends ApiJsonMsg {
+    auto_save: boolean;
+    count?: number;
+    list: IWifiSavedItem[];
+    /** 可选增量：当前 STA 已连接条目下标 */
+    connected_idx?: number;
+}
+
+/** ADD_SAVED(cmd 12) 响应：不回显 password（契约 §7.2 安全例外）。 */
+export interface IWifiSavedAddResult extends ApiJsonMsg {
+    idx: number;
+    ssid?: string;
+    priority?: number;
+    updated?: boolean;
+}
+
+/** DEL_SAVED(cmd 13) 响应为回显；SET_AUTO_SAVE(cmd 14) 响应如下。 */
+export interface IWifiAutoSaveResult extends ApiJsonMsg {
+    enable?: boolean;
+    auto_save?: boolean;
+}
+
+export function wifi_get_saved_list() {
+    const msg: ApiJsonMsg = {
+        module: WtModuleID.WIFI,
+        cmd: WifiCmd.WIFI_API_JSON_GET_SAVED_LIST,
+    };
+    sendJsonMsg(msg);
+}
+
+export function wifi_add_saved(ssid: string, password: string, priority = 100) {
+    const msg: ApiJsonMsg & {ssid: string; password: string; priority: number} = {
+        module: WtModuleID.WIFI,
+        cmd: WifiCmd.WIFI_API_JSON_ADD_SAVED,
+        ssid: ssid,
+        password: password,
+        priority: priority,
+    };
+    sendJsonMsg(msg);
+}
+
+export function wifi_del_saved(idx: number) {
+    const msg: ApiJsonMsg & {idx: number} = {
+        module: WtModuleID.WIFI,
+        cmd: WifiCmd.WIFI_API_JSON_DEL_SAVED,
+        idx: idx,
+    };
+    sendJsonMsg(msg);
+}
+
+export function wifi_set_auto_save(enable: boolean) {
+    const msg: ApiJsonMsg & {enable: boolean} = {
+        module: WtModuleID.WIFI,
+        cmd: WifiCmd.WIFI_API_JSON_SET_AUTO_SAVE,
+        enable: enable,
+    };
+    sendJsonMsg(msg);
+}

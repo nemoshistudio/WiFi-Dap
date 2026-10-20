@@ -7,16 +7,34 @@ import {
     OtaStatus,
     wt_ota_get_info,
     wt_ota_get_progress,
-    wt_ota_abort,
 } from "@/api/apiOTA";
 import {isDevMode} from "@/composables/buildMode";
+import {globalNotify} from "@/composables/notification";
+import {translate} from "@/locales";
 
 /**
- * OTA(5) 模块：只读状态与进度轮询（Wave 1 预置）。
- * Wave 2 的 WP-207 打开 VITE_ENABLE_OTA 后在 App.vue 注册并接上传流程。
+ * OTA(5) WS 模块：GET_INFO / GET_PROGRESS 路由 + 设备进度轮询。
+ *
+ * 上传本体走 HTTP（`POST /api/ota/upload`，见 api/apiOTA.ts），本模块只负责
+ * WS 通道的状态同步与 ABORT 回执（docs/ota-local-upload.md §4）。
  */
 export function useUpdateModule() {
     const updateStore = useUpdateStore()
+
+    function refreshDeviceState() {
+        wt_ota_get_info();
+        wt_ota_get_progress();
+    }
+
+    function syncPolling() {
+        // 只有设备仍在处理上传时才需要 400ms 轮询；写入浏览器进度阶段也保持轮询，
+        // 便于浏览器上传 % 与设备 offset/total 对比（契约 §7.2-3）。
+        if (updateStore.isBusy || updateStore.progress.status === OtaStatus.RECEIVING) {
+            updateStore.setProgressInterval();
+        } else {
+            updateStore.clearProgressInterval();
+        }
+    }
 
     function onClientCtrl(msg: ControlMsg) {
         if (msg.type !== ControlMsgType.WS_EVENT) {
@@ -24,43 +42,35 @@ export function useUpdateModule() {
         }
 
         if (msg.data === ControlEvent.CONNECTED) {
-            wt_ota_get_info();
-            wt_ota_get_progress();
+            // 每次（重）连接都刷新 GET_INFO：设备重启后据此判定 running_ver 是否变化
+            refreshDeviceState();
+            syncPolling();
+        } else if (msg.data === ControlEvent.DISCONNECTED) {
+            updateStore.clearProgressInterval();
         }
     }
 
     function onClientMsg(msg: ApiJsonMsg) {
         switch (msg.cmd as WtOtaCmd) {
             case WtOtaCmd.GET_INFO: {
-                Object.assign(updateStore.info, msg as IOtaInfo);
+                updateStore.applyInfo(msg as IOtaInfo);
+                syncPolling();
                 break;
             }
             case WtOtaCmd.GET_PROGRESS: {
-                const progress = msg as IOtaProgress;
-                Object.assign(updateStore.progress, progress);
-                switch (progress.status) {
-                    case OtaStatus.READY:
-                    case OtaStatus.APPLYING:
-                        updateStore.progressBarStatus = 'success';
-                        updateStore.clearProgressInterval();
-                        break;
-                    case OtaStatus.ERROR:
-                        updateStore.progressBarStatus = 'exception';
-                        updateStore.clearProgressInterval();
-                        break;
-                    case OtaStatus.RECEIVING:
-                        updateStore.progressBarStatus = '';
-                        updateStore.setProgressInterval();
-                        break;
-                    default:
-                        updateStore.progressBarStatus = '';
-                        updateStore.clearProgressInterval();
-                        break;
+                updateStore.applyProgress(msg as IOtaProgress);
+                syncPolling();
+                break;
+            }
+            case WtOtaCmd.ABORT: {
+                if (msg.err) {
+                    // 仅在 RECEIVING 状态允许 ABORT，其它状态返回 code=5 invalid state
+                    globalNotify(translate('ota.upload.failed', {err: msg.err}), 'error');
+                } else {
+                    updateStore.markAborted();
                 }
                 break;
             }
-            case WtOtaCmd.ABORT:
-                break;
             default:
                 break;
         }
@@ -75,6 +85,4 @@ export function useUpdateModule() {
         serverJsonMsgCallback: onClientMsg,
         serverBinMsgCallback: () => {},
     });
-
-    return { wt_ota_abort };
 }
