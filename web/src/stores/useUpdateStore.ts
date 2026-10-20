@@ -1,26 +1,39 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import {wt_ota_get_progress} from "@/api/apiOTA";
+import {type IOtaInfo, type IOtaProgress, OtaStatus, wt_ota_get_progress} from "@/api/apiOTA";
 
+/**
+ * OTA 只读状态（Wave 1 预置；WP-207 在此基础上接上传流程）。
+ * 字段语义见 docs/versioning.md §6。
+ */
 export const useUpdateStore = defineStore('update', () => {
-    const canUpdate = ref(false);
-    const updateProgress = ref(0);
-    const updateStatus = ref('');
+    const info = ref<IOtaInfo>({
+        module: 5,
+        cmd: 1,
+        running: "-",
+        running_ver: "-",
+        free: 0,
+        slot_size: 0,
+        status: OtaStatus.IDLE,
+    });
+
+    const progress = ref<IOtaProgress>({
+        module: 5,
+        cmd: 3,
+        offset: 0,
+        total: 0,
+        status: OtaStatus.IDLE,
+    });
 
     const progressBarStatus = ref('');
+    /** 是否有可用更新：Wave 1 恒 false；WP-207 接入 OTA manifest 后实现。 */
+    const canUpdate = ref(false);
 
     let progressIntervalID = -1;
 
-    const newFmInfo = ref({
-        fm_size: 0,
-        fm_ver: "-",
-        upd_date: "-",
-        upd_note: "-",
-    })
-
     function setProgressInterval() {
         if (progressIntervalID < 0) {
-            progressIntervalID = setInterval(() => {
+            progressIntervalID = window.setInterval(() => {
                 wt_ota_get_progress();
             }, 1000);
         }
@@ -28,17 +41,16 @@ export const useUpdateStore = defineStore('update', () => {
 
     function clearProgressInterval() {
         if (progressIntervalID >= 0) {
-            clearInterval(progressIntervalID);
+            window.clearInterval(progressIntervalID);
             progressIntervalID = -1;
         }
     }
 
     return {
+        info,
+        progress,
         canUpdate,
-        updateProgress,
-        updateStatus,
         progressBarStatus,
-        newFmInfo,
         setProgressInterval,
         clearProgressInterval,
     }

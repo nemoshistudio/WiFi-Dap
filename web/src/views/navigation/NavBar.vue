@@ -33,9 +33,12 @@
       <div id="page-spec-slot" class="content-center h-full flex flex-row"></div>
       <div class="mr-2">
           <el-select v-model="language" class="min-w-20 h-full" @change="handleLanguageChange">
-            <el-option value="en">🇺🇸 English</el-option>
-            <el-option value="zh">🇨🇳 简体中文</el-option>
-            <el-option value="fr">🇫🇷 Français</el-option>
+            <el-option
+                v-for="item in LANGUAGES"
+                :key="item.code"
+                :value="item.code"
+                :label="item.flag + ' ' + item.label"
+            ></el-option>
             <template #label>
               <div class="flex">
                 <InlineSvg name="translate" class="w-4 mr-1"></InlineSvg>
@@ -126,7 +129,8 @@ import {useRoute} from "vue-router";
 import { useFullscreen } from '@vueuse/core'
 import {useUpdateStore} from "@/stores/useUpdateStore";
 import {isOTAEnabled} from "@/composables/buildMode";
-import {getFlagFromLang, locale, setLang} from "@/i18n"
+import {locale, setLang} from "@/i18n"
+import {LANGUAGES, getLanguageOption} from "@/constants/languages"
 
 const wsStore = useWsStore();
 const updateStore = useUpdateStore();
@@ -135,7 +139,7 @@ const route = useRoute();
 const language = ref(locale);
 
 const languageFlag = computed(() => {
-  return getFlagFromLang(language.value);
+  return getLanguageOption(language.value)?.flag ?? '🏳️';
 });
 
 function handleLanguageChange(lang: string) {
@@ -162,8 +166,25 @@ const wsColor = computed(() => {
   return ret;
 });
 
+/**
+ * 连接状态 -> i18n key 的显式映射（i18n 契约 §2.3）。
+ * 禁止用 translate(wsStore.state.toLocaleLowerCase()) 这类动态 key。
+ */
+function wsStateText(state: ControlEvent): string {
+  switch (state) {
+    case ControlEvent.CONNECTED:
+      return translate('ws.connected');
+    case ControlEvent.CONNECTING:
+    case ControlEvent.LOADED:
+      return translate('ws.connecting');
+    default:
+      // DISCONNECTED / BROKEN
+      return translate('ws.disconnected');
+  }
+}
+
 const wsState = computed(() => {
-  return translate(wsStore.state.toLocaleLowerCase());
+  return wsStateText(wsStore.state);
 });
 
 type Item = {

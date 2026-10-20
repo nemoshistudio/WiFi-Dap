@@ -1,10 +1,66 @@
 <script setup lang="ts">
+import {computed} from "vue";
 import {useSystemStore} from "@/stores/useSystemStore";
 import {translate} from "@/locales";
+import {globalNotify} from "@/composables/notification";
+import {AUTHOR_NAME, PROJECT_HOMEPAGE} from "@/constants/brand";
+import {PROTOCOL_VERSION} from "@/api";
 
-const version = import.meta.env.VITE_APP_GIT_TAG || "v0.0.0";
-const compileTime = import.meta.env.VITE_APP_LAST_COMMIT || "1970-00-00";
 const sysStore = useSystemStore();
+const webInfo = window.__BIRDIEBOT_WEB__;
+
+const protocolStateText = computed(() => {
+    switch (sysStore.protocolState) {
+        case 'ok':
+            return translate('protocol.match');
+        case 'mismatch':
+            return translate('protocol.mismatchTitle');
+        case 'legacy':
+            return translate('protocol.mismatchLegacy');
+        default:
+            return translate('protocol.unknownVersion');
+    }
+});
+
+const protocolTagType = computed(() => {
+    switch (sysStore.protocolState) {
+        case 'ok':
+            return 'success';
+        case 'mismatch':
+            return 'danger';
+        default:
+            return 'warning';
+    }
+});
+
+const protocolVersionText = computed(() => {
+    const fw = sysStore.fwProtocolVersion === null ? '?' : `v${sysStore.fwProtocolVersion}`;
+    return `${fw} / v${PROTOCOL_VERSION}`;
+});
+
+function copyVersionInfo() {
+    const text = [
+        `web_version=${webInfo.webVersion}`,
+        `protocol_version=${PROTOCOL_VERSION}`,
+        `git_tag=${webInfo.gitTag}`,
+        `build_time=${webInfo.buildTime}`,
+        `firmware_version=${sysStore.curFmInfo.ver}`,
+        `firmware_date=${sysStore.curFmInfo.date}`,
+        `serial_number=${sysStore.sysInfo.sn}`,
+        `hw_version=${sysStore.hwInfo.ver}`,
+        `mf_date=${sysStore.hwInfo.date}`,
+    ].join('\n');
+    // 设备以 HTTP 明文提供页面（非 secure context），navigator.clipboard 可能不存在；
+    // 此时只提示失败，不抛异常。
+    const clipboard = navigator.clipboard;
+    if (!clipboard) {
+        globalNotify(translate('common.failed'), 'error');
+        return;
+    }
+    clipboard.writeText(text)
+        .then(() => globalNotify(translate('common.copied'), 'success'))
+        .catch(() => globalNotify(translate('common.failed'), 'error'));
+}
 </script>
 
 <template>
@@ -12,11 +68,45 @@ const sysStore = useSystemStore();
     <el-divider></el-divider>
     <el-divider>{{ translate('page.about') }}</el-divider>
     <el-divider></el-divider>
-    <el-collapse>
+
+    <el-descriptions :title="translate('protocol.title')" border :column="1"
+                     class="mt-5 description-style">
+      <template #extra>
+        <el-button size="small" @click="copyVersionInfo">{{ translate('about.copyInfo') }}</el-button>
+      </template>
+      <el-descriptions-item :label="translate('protocol.version')">
+        <el-tag :type="protocolTagType" size="small">{{ protocolStateText }}</el-tag>
+        <span class="ml-2">{{ protocolVersionText }}</span>
+      </el-descriptions-item>
+      <el-descriptions-item :label="translate('protocol.webVersion')">{{ webInfo.webVersion }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('protocol.buildTag')">{{ webInfo.gitTag }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('protocol.buildTime')">{{ webInfo.buildTime }}</el-descriptions-item>
+    </el-descriptions>
+
+    <el-collapse class="mt-5">
+      <el-collapse-item :title="translate('aboutDebugger')">
+        <el-descriptions border :column="1" class="mt-5 description-style">
+          <el-descriptions-item :label="translate('protocol.firmwareVersion')">{{ sysStore.curFmInfo.ver }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('releaseTime')">{{ sysStore.curFmInfo.date }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('about.hardwareVersion')">{{ sysStore.hwInfo.ver }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('about.manufactureDate')">{{ sysStore.hwInfo.date }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('serialNumber')">{{ sysStore.sysInfo.sn }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('officialWebsite')">
+            <a target="_blank" :href="PROJECT_HOMEPAGE">{{ PROJECT_HOMEPAGE }}</a>
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
+          <el-descriptions-item label="windowsair">
+            <a target="_blank" href="https://github.com/windowsair/wireless-esp8266-dap">wireless-esp8266-dap</a>
+          </el-descriptions-item>
+        </el-descriptions>
+      </el-collapse-item>
+
       <el-collapse-item :title="translate('aboutWebHost')">
         <el-descriptions border :column="1" class="mt-5 description-style">
-          <el-descriptions-item :label="translate('version')">{{ version }}</el-descriptions-item>
-          <el-descriptions-item :label="translate('releaseTime')">{{ compileTime }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('version')">{{ webInfo.webVersion }}</el-descriptions-item>
+          <el-descriptions-item :label="translate('releaseTime')">{{ webInfo.buildTime }}</el-descriptions-item>
         </el-descriptions>
 
         <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
@@ -43,40 +133,29 @@ const sysStore = useSystemStore();
           </el-descriptions-item>
         </el-descriptions>
       </el-collapse-item>
-      <el-collapse-item :title="translate('aboutDebugger')">
-        <el-descriptions border :column="1" class="mt-5 description-style">
-          <el-descriptions-item :label="translate('officialWebsite')"><a target="_blank" href="https://yunsi.studio/wireless-debugger">https://yunsi.studio/wireless-debugger</a></el-descriptions-item>
-          <el-descriptions-item :label="translate('version')">{{ sysStore.curFmInfo.ver }}</el-descriptions-item>
-          <el-descriptions-item :label="translate('releaseTime')">{{ sysStore.curFmInfo.date }}</el-descriptions-item>
-          <el-descriptions-item :label="translate('serialNumber')">{{ sysStore.sysInfo.sn }}</el-descriptions-item>
-        </el-descriptions>
-
-        <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
-          <el-descriptions-item label="windowsair"><a target="_blank" href="https://github.com/windowsair/wireless-esp8266-dap">wireless-esp8266-dap</a>
-          </el-descriptions-item>
-        </el-descriptions>
-      </el-collapse-item>
     </el-collapse>
 
-
-    <el-descriptions :title="translate('author') + ' :空空(kerms)'" border :column="1" class="mt-5 description-style">
-      <el-descriptions-item :label="translate('officialWebsite')"><a target="_blank" href="https://yunsi.studio/">https://yunsi.studio/</a></el-descriptions-item>
-      <el-descriptions-item label="github"><a target="_blank" href="https://github.com/kerms">https://github.com/kerms</a>
+    <el-descriptions :title="translate('author') + ' :' + AUTHOR_NAME" border :column="1"
+                     class="mt-5 description-style">
+      <el-descriptions-item :label="translate('officialWebsite')">
+        <a target="_blank" href="https://yunsi.studio/">https://yunsi.studio/</a>
+      </el-descriptions-item>
+      <el-descriptions-item label="github">
+        <a target="_blank" href="https://github.com/kerms">https://github.com/kerms</a>
       </el-descriptions-item>
       <el-descriptions-item :label="translate('email')">kerms@niazo.org</el-descriptions-item>
-      <el-descriptions-item label="BiliBili"><a target="_blank" href="https://space.bilibili.com/3461571571353885">3461571571353885</a>
+      <el-descriptions-item label="BiliBili">
+        <a target="_blank" href="https://space.bilibili.com/3461571571353885">3461571571353885</a>
       </el-descriptions-item>
       <el-descriptions-item :label="translate('TencentQQGroup')">642246000</el-descriptions-item>
       <el-descriptions-item :label="translate('note')">{{ translate('welcomeMessage') }}</el-descriptions-item>
     </el-descriptions>
   </div>
   <el-divider></el-divider>
-
 </template>
 
 <style scoped lang="postcss">
 .description-style :deep(.el-descriptions__label) {
   @apply w-32
 }
-
 </style>

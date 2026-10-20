@@ -68,8 +68,9 @@
 import {VueDraggable} from "vue-draggable-plus";
 import {onMounted, ref} from "vue";
 import {globalNotify, globalNotifyRightSide} from "@/composables/notification";
-import {useDataViewerStore} from "@/stores/dataViewerStore";
+import {UART_SETTINGS_STORAGE_KEY, useDataViewerStore} from "@/stores/dataViewerStore";
 import {translate} from "@/locales";
+import {isDevMode} from "@/composables/buildMode";
 
 const editMode = ref(false);
 const draggableEnabled = ref(true);
@@ -78,7 +79,7 @@ const emit = defineEmits(['winSizeRefresh'])
 
 function onSendClick(val: string) {
   if (!val && !store.hasAddedText) {
-    globalNotify("无帧头帧尾、发送框无数据发送")
+    // 发送框为空：不发送也不弹错误（无对应 i18n key，避免硬编码文案）
     return;
   }
 
@@ -108,7 +109,7 @@ function importSettings() {
         store.loadSettings(text);
         emit('winSizeRefresh', '');
       } catch (error) {
-        globalNotifyRightSide('导入失败', "error");
+        globalNotifyRightSide(translate('common.failed'), "error");
         console.log("error", error);
       }
     };
@@ -139,8 +140,19 @@ function exportSettings() {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * 恢复默认：只重置 UART 面板自身的持久化数据。
+ * D 的实现用 localStorage.clear()，会误删 Widget 布局（at-command-layout）等
+ * 其他模块数据——这是真实的数据丢失缺陷（analysis/06 §6.2），此处改为定向删除。
+ */
 function resetSettings() {
-  localStorage.clear();
+  try {
+    localStorage.removeItem(UART_SETTINGS_STORAGE_KEY);
+  } catch (error) {
+    if (isDevMode()) {
+      console.error('Failed to reset UART settings:', error);
+    }
+  }
 }
 
 onMounted(() => {

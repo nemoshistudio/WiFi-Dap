@@ -34,3 +34,6 @@ auto-imports.d.ts
 # Personal
 **/_priv_*
 Makefile
+# web/build.sh gzip output
+web/dist-gz
+dist-gz

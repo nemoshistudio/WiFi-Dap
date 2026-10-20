@@ -1,4 +1,13 @@
+import {isDevMode} from '@/composables/buildMode'
+
+/**
+ * 启动时的控制台彩蛋（仅 dev 模式输出；契约要求 console.* 日志必须英文并受
+ * isDevMode() 保护，见 docs/i18n-keys.md §6.1）。
+ */
 export function logHelloMessage() {
+    if (!isDevMode()) {
+        return
+    }
     console.log(
         "            ███████\n" +
         "          █▒       ██\n" +
@@ -17,6 +26,5 @@ export function logHelloMessage() {
         "        ████▒█▓▓▓▓▓█████\n" +
         "           ██████████\n" +
         "\n" +
-        "Logo是什么意义？答：意义就是...没有意义。\n" +
-        "大概是一起去整点赛博薯条吧。");
+        "WiFi Dap Web UI - have fun debugging!\n");
 }

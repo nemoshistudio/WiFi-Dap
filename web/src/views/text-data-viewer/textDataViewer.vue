@@ -204,7 +204,7 @@
     <el-tooltip content="Ctrl+Enter" placement="top" :auto-close="500">
       <el-button type="primary"
                  @click="onSendClick">
-        {{ (store.isSendTextFormat || store.isHexStringValid) ? translate("uart.send") : translate("格式化") }}
+        {{ (store.isSendTextFormat || store.isHexStringValid) ? translate("uart.send") : translate("uart.format") }}
       </el-button>
     </el-tooltip>
   </div>
@@ -431,7 +431,7 @@ function handleTextboxKeydown(ev: KeyboardEvent) {
 
 function onSendClick() {
   if (!store.uartInputTextBox && !store.hasAddedText) {
-    globalNotify("无帧头帧尾、发送框无数据发送")
+    // 发送框为空：不发送也不弹错误（无对应 i18n key，避免硬编码文案）
     return;
   }
 

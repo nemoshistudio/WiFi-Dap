@@ -11,6 +11,7 @@ import {AnsiUp} from 'ansi_up'
 import {debouncedWatch} from "@vueuse/core";
 import {type IUartConfig, uart_send_msg} from "@/api/apiUart";
 import {isDevMode} from "@/composables/buildMode";
+import {translate} from "@/locales";
 import {useUartStore} from "@/stores/useUartStore";
 
 interface IDataArchive {
@@ -271,6 +272,9 @@ export interface ISettings {
     macroButtons: macroItem[];
     ipChangeAlert: boolean;
 }
+
+/** UART 面板设置的 localStorage key（写/读/重置共用，避免误删其他模块数据）。 */
+export const UART_SETTINGS_STORAGE_KEY = "uart-settings";
 
 interface macroItem {
     value: string;
@@ -822,7 +826,7 @@ export const useDataViewerStore = defineStore('text-viewer', () => {
             addString(sendBox.value, false, true);
         } else {
             if (!isHexStringValid.value) {
-                addString("HEX格式错误", false, false, 1);
+                addString(translate("uart.invalidHex"), false, false, 1);
                 addHexString(sendBox.value, false, false, 1);
             } else {
                 addHexString(sendBox.value, false, true);
@@ -897,42 +901,47 @@ export const useDataViewerStore = defineStore('text-viewer', () => {
 
     /* macro buttons */
 
+    /*
+     * AT 演示宏：数据显示用默认值（用户可编辑/导出）。契约 v1 的 295 个 key 未覆盖这些
+     * 演示数据 label，改用中性英文默认值，并在 web/scripts/i18n-report.md 登记为
+     * 后续契约变更项（WP-208/Wave 2 再补 key）。
+     */
     const macroData: Ref<macroItem[]> = ref([
         {
             value: 'AT',
-            label: '测试AT',
+            label: 'Test AT',
             id: 1,
         },{
             value: 'AT+CSQ',
-            label: '询信号强度',
+            label: 'Signal quality',
             id: 2,
         },{
             value: 'AT+CGSN',
-            label: '询序列号',
+            label: 'Serial number',
             id: 3,
         }, {
             value: 'AT+CGMR',
-            label: '询固件版本',
+            label: 'Firmware version',
             id: 4,
         }, {
             value: 'AT+CMEE',
-            label: '询终端报错',
+            label: 'Terminal errors',
             id: 5,
         }, {
             value: 'AT+NRB',
-            label: '重启',
+            label: 'Reboot',
             id: 6,
         }, {
             value: 'AT+CGATT',
-            label: '询网络激活状态',
+            label: 'Network attach',
             id: 7,
         }, {
             value: 'AT+CEREG',
-            label: '询网络注册状态',
+            label: 'Network registration',
             id: 8,
         }, {
             value: 'AT+CSCON',
-            label: '询网络连接状态',
+            label: 'Network connection',
             id: 9,
         }
     ]);
@@ -983,7 +992,8 @@ export const useDataViewerStore = defineStore('text-viewer', () => {
         ipChangeAlert,
     });
 
-    const settingsName = "uart-settings";
+    /* UART 面板持久化 key：resetSettings 只允许删除这一项（禁止 localStorage.clear()） */
+    const settingsName = UART_SETTINGS_STORAGE_KEY;
 
     watch(() => settings, () => {
         if (autoSaveSettings.value) {

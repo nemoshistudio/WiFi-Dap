@@ -151,7 +151,7 @@
                     <th>{{ $t('uart.priority') }}</th>
                     <th>
                       <div class="flex justify-center">
-                        {{ translate('uart.rule' as TranslationKeys) }}
+                        {{ translate('uart.rule') }}
                         <el-tooltip placement="top" effect="light">
                           <template #content>
                             <div v-html="translate('uart.ruleTips')"></div>
@@ -160,7 +160,7 @@
                         </el-tooltip>
                       </div>
                     </th>
-                    <th>{{ translate('uart.value' as TranslationKeys) }}</th>
+                    <th>{{ translate('uart.value') }}</th>
                   </tr>
                   </thead>
                   <tbody class="text-xs text-center">
@@ -169,7 +169,7 @@
                       {{ item.draggable ? index : 'NaN' }}
                     </td>
                     <td :class="item.draggable ? 'sort-target' : ''">
-                      {{ translate("uart." + item.name) }}
+                      {{ frameBreakNameText(item.name) }}
                     </td>
                     <td>
                       <div v-if="item.type === 'number'">
@@ -336,7 +336,7 @@ import {useDataFlowStore} from "@/stores/useDataFlowStore";
 import {wt_data_flow_get_instance_list, type ISocketInfo} from "@/api/apiDataFlow";
 import {uart_set_baud, uart_set_config} from "@/api/apiUart";
 import {useUartStore} from "@/stores/useUartStore";
-import {translate, type TranslationKeys} from "@/locales";
+import {translate} from "@/locales";
 
 const store = useDataViewerStore()
 const uartStore = useUartStore()
@@ -395,7 +395,7 @@ const onUseCustomUartBaud = () => {
     store.uartBaud = uartCustomBaud.value;
     onUartBaudChange();
   } else {
-    globalNotify("波特率格式错误", "warning")
+    globalNotify(translate("common.failed"), "warning")
   }
 }
 
@@ -405,6 +405,23 @@ function onUartBaudChange() {
 
 function onUartConfigChange() {
   uart_set_config(store.uartConfig, uartStore.uartNum);
+}
+
+/**
+ * 帧断帧规则名为数据字段（timeout/match/byte），用显式 switch 映射到 i18n 字面量 key，
+ * 避免 translate("uart." + name) 这种动态拼接 key（i18n 契约 §2.2）。
+ */
+function frameBreakNameText(name: string): string {
+  switch (name) {
+    case 'timeout':
+      return translate('uart.timeout');
+    case 'match':
+      return translate('uart.match');
+    case 'byte':
+      return translate('uart.byte');
+    default:
+      return translate('uart.rule');
+  }
 }
 
 function checkMove(event: MoveEvent) {

@@ -2,7 +2,7 @@
  * @file Composable for managing a task scheduler that executes callbacks at specified intervals.
  * This scheduler avoids time drift and handles race conditions from stale timers.
  */
-import { ref, onUnmounted } from 'vue'
+import { ref } from 'vue'
 import { isDevMode } from './buildMode'
 
 interface ScheduledTask {
@@ -163,14 +163,23 @@ export function useCommandLoopManager() {
     registerLoop(id, -1, () => {})
   }
 
-  // --- Lifecycle Hook ---
-
-  onUnmounted(() => {
-    if (currentTimerId !== null) window.clearTimeout(currentTimerId)
+  /**
+   * 显式清空调度器（由页面级所有者调用）。
+   *
+   * 注意：不要在本 composable 内注册 onUnmounted 清理全局队列——调度器是模块级单例，
+   * 任何一个使用它的组件卸载（例如单个 Widget 循环组件）都会静默取消其他 Widget 的
+   * 循环任务（analysis/06 §6.2 的真实缺陷）。组件只需注销自己的 task id
+   * （widgetLoop.vue 卸载时已调用 unregisterLoop(widgetId)）。
+   */
+  const clearAllSchedules = () => {
+    if (currentTimerId !== null) {
+      window.clearTimeout(currentTimerId)
+      currentTimerId = null
+    }
     scheduledTasks.value = []
     taskVersions.clear()
     isSchedulerRunning.value = false
-  })
+  }
 
-  return { registerLoop, unregisterLoop, isRunning: isSchedulerRunning }
+  return { registerLoop, unregisterLoop, clearAllSchedules, isRunning: isSchedulerRunning }
 } 
