@@ -1,0 +1,58 @@
+menu "WiFi Dap OTA module (module 5, WP-205)"
+
+    config BIRDIEBOT_OTA_ENABLE
+        bool "Enable the OTA JSON module 5 (GET_INFO / GET_PROGRESS / ABORT)"
+        default y
+        help
+            Registers the OTA module (id 5) on the existing WS/API JSON routers
+            through API_JSON_MODULE_REGISTER. Disable only for size-constrained
+            builds: the C upload API and rollback helpers then remain available
+            to uri_ota.c/main, but the module 5 queries are not dispatched.
+
+    config BIRDIEBOT_OTA_BUF_SIZE
+        int "HTTP upload receive chunk size (bytes)"
+        default 4096
+        range 512 16384
+        help
+            Static receive buffer size used by uri_ota.c (WP-206) for
+            httpd_req_recv(). docs/ota-local-upload.md §3.2 requires a static
+            buffer (~4096 B), never a 3 MB heap allocation.
+
+    config BIRDIEBOT_OTA_IDLE_TIMEOUT_MS
+        int "Upload idle timeout (ms)"
+        default 10000
+        range 1000 600000
+        help
+            docs/ota-local-upload.md §3.3: no body bytes for this long ->
+            esp_ota_abort() + state ERROR("upload timeout") + HTTP 408.
+
+    config BIRDIEBOT_OTA_MAX_DURATION_MS
+        int "Maximum upload session duration (ms)"
+        default 300000
+        range 10000 3600000
+        help
+            docs/ota-local-upload.md §3.3: total session cap from
+            esp_ota_begin(); exceeding it aborts the session the same way.
+
+    config BIRDIEBOT_OTA_AUTO_MARK_VALID
+        bool "Automatically confirm a pending-verify OTA image after boot"
+        default n
+        help
+            When CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, an OTA-updated image
+            boots in ESP_OTA_IMG_PENDING_VERIFY and must be confirmed by the
+            application. The preferred integration is for main/app_main to call
+            wt_ota_mark_app_valid() from a single 10 s timer after WiFi, the
+            webserver and the DAP/UART tasks are up (docs/ota-local-upload.md
+            §2.3). Enabling this option lets the component schedule that
+            confirmation itself (useful until the main/ hook lands).
+
+    config BIRDIEBOT_OTA_AUTO_MARK_VALID_DELAY_MS
+        int "Auto-confirm delay after boot (ms)"
+        depends on BIRDIEBOT_OTA_AUTO_MARK_VALID
+        default 10000
+        range 1000 60000
+        help
+            Delay before the component calls wt_ota_mark_app_valid() when
+            BIRDIEBOT_OTA_AUTO_MARK_VALID is enabled.
+
+endmenu
