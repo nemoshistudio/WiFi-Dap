@@ -287,9 +287,10 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 	char transfer_encoding[32];
 	wt_ota_info_t info;
 
-	/* docs/ota-local-upload.md §8: with auth enabled the upload endpoint must
-	 * be authorized before any flash erase is triggered. */
-#if BIRDIEBOT_AUTH_ENABLED
+	/* docs/ota-local-upload.md §8 + security review P1-2: Host/Origin is
+	 * always checked and, with auth enabled, the token too - BEFORE any flash
+	 * erase is triggered (also with auth=n a bad Origin cannot start an upload;
+	 * the request itself is only rejected, no flash touch). */
 	int auth_status = birdiebot_auth_http_check(req);
 	if (auth_status != BIRDIEBOT_AUTH_HTTP_OK) {
 		ota_respond_error(req, auth_status, OTA_JSON_CODE_AUTH,
@@ -297,7 +298,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 		                      ? OTA_ERR_FORBIDDEN : OTA_ERR_UNAUTHORIZED);
 		return ESP_OK;
 	}
-#endif
 
 	/* Content-Type: application/octet-stream (strict prefix, §3.1). */
 	if (!ota_read_header(req, "Content-Type", content_type, sizeof(content_type)) ||

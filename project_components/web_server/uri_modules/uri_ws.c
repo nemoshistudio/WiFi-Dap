@@ -261,7 +261,14 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 				ESP_LOGI(TAG, "ws fd %d authorized by SYSTEM/0/AUTH", fd);
 				ws_send_text_literal(req, MSG_AUTH_OK);
 			} else {
-				ESP_LOGW(TAG, "ws fd %d AUTH failed (missing/invalid token)", fd);
+				/* P1-4: rate limit token guessing (5 failures/minute/fd);
+				 * a rate-limited attempt is answered after a short delay. */
+				bool limited = birdiebot_auth_ws_note_auth_failure(fd);
+				ESP_LOGW(TAG, "ws fd %d AUTH failed (missing/invalid token)%s",
+				         fd, limited ? " - rate limited" : "");
+				if (limited) {
+					vTaskDelay(pdMS_TO_TICKS(250));
+				}
 				ws_send_unauthorized(req, WS_SYSTEM_MODULE_ID, WS_SYS_CMD_AUTH);
 			}
 			cJSON_Delete(ws_msg->json.in);
@@ -531,17 +538,18 @@ int ws_on_socket_open(httpd_req_t *req)
 	int sock_fd = httpd_req_to_sockfd(req);
 	ESP_LOGI(TAG, "ws open: %d", sock_fd);
 
-#if BIRDIEBOT_AUTH_ENABLED
 	birdiebot_auth_ws_open(sock_fd);
 
+	/* Security review P1-2: Host/Origin is checked even with auth disabled
+	 * (CSWSH / DNS rebinding). The HTTP 101 handshake was already sent by the
+	 * httpd, so close the session instead of serving. */
 	if (!birdiebot_auth_ws_origin_ok(req)) {
-		/* Host/Origin rejected (DNS-rebinding guard). The HTTP 101 handshake was
-		 * already sent by the httpd, so close the session instead of serving. */
 		ESP_LOGW(TAG, "ws handshake rejected (Host/Origin), fd %d", sock_fd);
 		httpd_sess_trigger_close(req->handle, sock_fd);
 		return 1;
 	}
 
+#if BIRDIEBOT_AUTH_ENABLED
 	switch (birdiebot_auth_ws_query_ok(req, sock_fd)) {
 	case 0:
 		ESP_LOGI(TAG, "ws fd %d authorized by ?token=", sock_fd);
@@ -550,6 +558,7 @@ int ws_on_socket_open(httpd_req_t *req)
 		/* Keep the connection open: the client may still authenticate with the
 		 * first-frame SYSTEM/0/AUTH and business requests get code=7 until then. */
 		ESP_LOGW(TAG, "ws fd %d presented an invalid ?token=, awaiting AUTH frame", sock_fd);
+		(void)birdiebot_auth_ws_note_auth_failure(sock_fd);
 		break;
 	default:
 		break; /* no token: pending first-frame AUTH */
@@ -656,6 +665,12 @@ void json_to_text(ws_msg_t *ws_msg, int module, int cmd)
 static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 {
 	int8_t ret = 0;
+	int idx = GET_FD_IDX(fd);
+
+	/* Bound-check the fd -> clients[] index (security review P3). */
+	if (idx < 0 || idx >= CONFIG_LWIP_MAX_SOCKETS || ws_ctx.list_lock.mutex == NULL) {
+		return 1;
+	}
 
 	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
 	if (ws_ctx.client_count >= CONFIG_LWIP_MAX_SOCKETS) {
@@ -663,7 +678,6 @@ static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 		goto out;
 	}
 
-	uint8_t idx = GET_FD_IDX(fd);
 	ws_ctx.clients[idx].fd = fd;
 	ws_ctx.clients[idx].hd = hd;
 	ws_ctx.valid_fd[ws_ctx.client_count] = fd;
@@ -679,6 +693,9 @@ out:
  */
 static inline void ws_rm_fd(int fd)
 {
+	if (ws_ctx.list_lock.mutex == NULL) {
+		return;
+	}
 	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
 	for (int i = 0; i < ws_ctx.client_count; ++i) {
 		if (ws_ctx.valid_fd[i] != fd) {
@@ -694,9 +711,14 @@ static inline void ws_rm_fd(int fd)
 static inline int ws_send_frame_safe(httpd_handle_t hd, int fd, httpd_ws_frame_t *frame)
 {
 	int err;
-	xSemaphoreTake(ws_ctx.lock[GET_FD_IDX(fd)].mutex, portMAX_DELAY);
+	int idx = GET_FD_IDX(fd);
+
+	if (idx < 0 || idx >= CONFIG_LWIP_MAX_SOCKETS || ws_ctx.lock[idx].mutex == NULL) {
+		return ESP_FAIL;
+	}
+	xSemaphoreTake(ws_ctx.lock[idx].mutex, portMAX_DELAY);
 	err = httpd_ws_send_frame_async(hd, fd, frame);
-	xSemaphoreGive(ws_ctx.lock[GET_FD_IDX(fd)].mutex);
+	xSemaphoreGive(ws_ctx.lock[idx].mutex);
 	return err;
 }
 
@@ -750,6 +772,19 @@ static inline void ws_broadcast_heartbeat()
 	};
 
 	ws_broadcast_frame(&ws_pkt, false);
+}
+
+/**
+ * @brief Clean up per-socket WS/auth state after an abnormal disconnect (P2).
+ *
+ * Called from web_server.c close_fn (TCP RST/timeout path, where no WS CLOSE
+ * frame is received) so stale client entries cannot leak into broadcasts or be
+ * reused by a later connection.
+ */
+void web_ws_socket_closed(int fd)
+{
+	ws_rm_fd(fd);
+	birdiebot_auth_ws_close(fd);
 }
 
 _Noreturn

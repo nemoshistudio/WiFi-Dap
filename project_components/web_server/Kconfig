@@ -13,8 +13,16 @@ menu "WiFi Dap web server (HTTP / WebSocket)"
               - HTTP: Authorization: Bearer <token> (or ?token=);
               - Host/Origin headers are validated to block DNS-rebinding.
 
-            When disabled (default) behaviour is unchanged: laboratory mode,
-            log in only from a trusted LAN.
+            This option only protects the web management surface (HTTP port 80:
+            /ws, /api, /api/ota/upload).  It does NOT protect TCP 3240
+            (USBIP/WS-DAP/elaphureLink) nor TCP 1346 (UART TCP bridge): those
+            stay unauthenticated and must be disabled (their own Kconfig) or
+            kept on a trusted LAN (docs/security-review-web.md P1-1/P1-3).
+
+            When disabled (default) the token check is compiled out and the
+            device runs in laboratory mode: log in only from a trusted LAN.
+            Host/Origin validation is ALWAYS active (independent of this
+            option, see BIRDIEBOT_WEB_ALLOWED_ORIGIN).
 
     config BIRDIEBOT_WEB_TOKEN
         string "Fixed pairing token (empty = generate a random one at boot)"
@@ -24,20 +32,23 @@ menu "WiFi Dap web server (HTTP / WebSocket)"
             Fixed pairing token (the "pair code" shown to the user).  It must
             be URL-safe: no spaces, '&', '%', '?', '#' or '/'.  Max 256 chars.
 
-            When empty, a random 8-hex-digit token is generated on the first
-            boot and persisted in the wt_nvs partition (namespace "web_auth",
-            key "token"), so it stays stable across reboots.  The token is
-            printed on the serial console at start-up:
-                W (xxx) web_auth: Web auth ENABLED; pairing token: 3f9c1a7e (...)
+            When empty, a random 128-bit token (32 hex chars) is generated on
+            the first boot and persisted in the wt_nvs partition (namespace
+            "web_auth", key "token"), so it stays stable across reboots
+            (security review P1-4; a legacy 8-hex token is rotated once).  The
+            token is printed on the serial console at start-up:
+                W (xxx) web_auth: Web auth ENABLED; pairing token: <32 hex> (...)
             Erase the wt_nvs partition (or the "web_auth" namespace) to rotate
             the generated token.
 
     config BIRDIEBOT_WEB_ALLOWED_ORIGIN
         string "Extra allowed Origin/Host entries (comma separated)"
-        depends on BIRDIEBOT_WEB_AUTH
         default ""
         help
-            Comma-separated allow-list used when BIRDIEBOT_WEB_AUTH=y, e.g.
+            Comma-separated allow-list for the ALWAYS-ON Host/Origin check
+            (security review P1-2: this check is independent from the token
+            auth because browsers can open cross-origin WebSockets without a
+            CORS preflight, and DNS rebinding works without any token), e.g.
                 "http://192.168.1.1:8080,https://dap.local"
             Each entry is either a full origin (scheme://host[:port]) or a
             bare hostname.
@@ -54,5 +65,8 @@ menu "WiFi Dap web server (HTTP / WebSocket)"
             hostname (e.g. the mDNS name "dap.local", or a reverse-proxy
             name) requires adding that name here, e.g.
                 CONFIG_BIRDIEBOT_WEB_ALLOWED_ORIGIN="http://dap.local"
+            Requests with a non-IP, non-allow-listed Host or with a
+            cross-origin Origin are rejected (HTTP 403; WS handshake closed)
+            even in laboratory mode.
 
 endmenu

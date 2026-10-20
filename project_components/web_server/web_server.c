@@ -81,6 +81,10 @@ static void web_server_on_close(httpd_handle_t hd, int sockfd)
 {
 	opened_socket--;
 	ESP_LOGI(TAG, "%d closed, now: %d", sockfd, opened_socket);
+	/* Abnormal disconnect (TCP RST/timeout): no WS CLOSE frame was processed,
+	 * so drop the client from the WS broadcast list and the auth state table
+	 * (security review P2: stale fd cleanup). */
+	web_ws_socket_closed(sockfd);
 	close(sockfd);
 }
 
