@@ -1,8 +1,8 @@
 {
   "web_version": "1.0.0",
   "protocol_version": 1,
-  "git_tag": "99bf995",
-  "git_commit": "99bf995",
-  "last_commit": "Tue Oct 20 15:22:14 2026 +0800",
-  "built_at": "2026-10-20T07:22:42.878Z"
+  "git_tag": "c5e2355-dirty",
+  "git_commit": "c5e2355",
+  "last_commit": "Tue Oct 20 16:08:40 2026 +0800",
+  "built_at": "2026-10-20T08:09:29.870Z"
 }

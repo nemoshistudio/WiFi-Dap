@@ -49,7 +49,7 @@
 |---|---|---|---|
 | [hardware-test-ota.md](hardware-test-ota.md) | 硬件验收清单 | 8 MB S3 真机 OTA：首次烧录/otadata、Web UI 与 HTTP 直传、错误注入矩阵、回滚验证、通过标准与记录模板 | ✅ 已入库（Wave 3） |
 | [hardware-test-uart-dataflow.md](hardware-test-uart-dataflow.md) | 硬件验收清单 | UART/DataFlow/WS 二进制 E2E：T1 连通/版本、T2 UART 配置、T3 浏览器终端、T4 二进制回环、T5 TCP 桥、T6 attach、T7 双客户端广播、T8 OTA 信息 | ✅ 已入库（Wave 2/3） |
-| `hardware-test-dap.md` | 硬件验收清单 | DAP/USBIP/elaphureLink/WS-DAP 真机验证（Keil/OpenOCD/pyOCD） | ⏳ **待产出**：由 dap-dev 编写，入库后在此补链接（当前不写入死链） |
+| [hardware-test-dap.md](hardware-test-dap.md) | 硬件验收清单 | DAP/USBIP/elaphureLink/WS-DAP 真机验证（Keil/OpenOCD/pyOCD）、R2/R9 P0 项、逻辑分析仪判据 | ✅ 已入库（dap-dev） |
 | [scripts/e2e_ws_client.py](../scripts/e2e_ws_client.py) | 自动化脚本 | 纯标准库 WS 客户端：`ping` / `wifi-scan` / `uart-echo` / `dataflow-list` / `ota-info` / `json`，供上面的清单直接引用 | ✅ 已入库 |
 | [scripts/ota_upload.py](../scripts/ota_upload.py) | 自动化脚本 | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 模块 5 `GET_INFO` 轮询，支持 `--token`/错误注入 | ✅ 已入库 |
 
@@ -59,7 +59,7 @@
 
 ## 4. 安全审查
 
-- **安全审查报告**：由 Wave 3 产出，**待交付**。文件名/路径以 Lead 最终确认为准，本索引暂不写入死链。
+- **安全审查报告**：[security-review-web.md](security-review-web.md)（Web/OTA/WiFi 面，Wave3）；`security-review-dap.md`（DAP 面，待交付）。
 - 已入库文档中的安全相关内容可直接引用：
   - [protocol.md §5](protocol.md)（默认无鉴权、鉴权开启后的 token/Origin 要求、3240/1346 开关提示）；
   - [ota-local-upload.md §8](ota-local-upload.md)（OTA 上传端点鉴权要求）；
@@ -113,8 +113,9 @@ W0–W3 的设计与决策材料放在工作区的 `analysis/` 目录，**不进
 | 8 份冻结契约（[§2](#2-冻结契约lead-维护)） | Lead | ✅ 冻结 v1（2026-10-20） |
 | [hardware-test-ota.md](hardware-test-ota.md) | OTA/硬件验证（Wave 3） | ✅ 已入库 |
 | [hardware-test-uart-dataflow.md](hardware-test-uart-dataflow.md) | UART/DataFlow（Wave 2/3） | ✅ 已入库 |
-| `hardware-test-dap.md` | dap-dev | ⏳ 待产出 |
-| 安全审查报告 | Wave 3 | ⏳ 待产出 |
+| `hardware-test-dap.md` | dap-dev | ✅ 已入库 |
+| [security-review-web.md](security-review-web.md) | webhost-analyst | ✅ 已入库 |
+| security-review-dap.md | dap-core-analyst | ⏳ 待产出 |
 | [scripts/README.md](../scripts/README.md) | 构建/发布 | ✅ 已入库 |
 | [web/README.md](../web/README.md) / [web/README.cn.md](../web/README.cn.md) | Web UI | ✅ 已入库（上游来源说明） |
 | [components/wt_ota/README.md](../components/wt_ota/README.md) | OTA 固件 | ✅ 已入库 |

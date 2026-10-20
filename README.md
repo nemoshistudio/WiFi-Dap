@@ -188,7 +188,7 @@ cd .. && scripts/gen_web_assets.sh --install   # explicitly updates project_comp
    - Default password: `12345678` (**change it in the Wi-Fi page on first use**, see [§9](#9-security-defaults--hardening))
 3. Open **<http://192.168.1.1/>** in a browser (default AP gateway/device address).
    - If the device has been joined to your LAN via the Wi-Fi page, use the IP assigned by your router instead;
-   - mDNS: the device registers an `_http._tcp` service under hostname `dap` by default (`project_components/wt_mdns/`; the board contract target is `wifi-dap`), so `http://dap.local/` may work depending on your resolver — otherwise use the IP.
+   - mDNS: the device registers an `_http._tcp` service under hostname `wifi-dap` (`project_components/wt_mdns/`), so `http://dap.local/` may work depending on your resolver — otherwise use the IP.
 4. In the **Wi-Fi** page, join your LAN (multiple networks are remembered and rotated automatically). Afterwards the Web UI, debugger ports and UART bridge are reachable from that LAN.
 5. Open the **UART** page (115200-8N1 by default) to watch the target's serial output, or start debugging over USBIP/elaphureLink ([§7](#7-debugger-transports)).
 

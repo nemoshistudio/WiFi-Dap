@@ -1,8 +1,8 @@
 #ifndef WT_MDNS_CONFIG_H_GUARD
 #define WT_MDNS_CONFIG_H_GUARD
 
-#define MDSN_DEFAULT_HOSTNAME "dap" // + serial number (4 char)
-#define MDSN_INSTANCE_DESC "ESP32 无线透传"
+#define MDSN_DEFAULT_HOSTNAME "wifi-dap" // contract: docs/board-pins.md
+#define MDSN_INSTANCE_DESC "WiFi Dap"
 
 void wt_mdns_init();
 
