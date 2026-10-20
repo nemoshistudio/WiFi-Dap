@@ -183,6 +183,7 @@ static int target_err_http(esp_err_t err)
 	case ESP_ERR_INVALID_STATE:return 409;
 	case ESP_ERR_INVALID_SIZE: return 413;
 	case ESP_ERR_INVALID_ARG:  return 400;
+	case ESP_ERR_NOT_SUPPORTED:return 400;
 	case ESP_ERR_NOT_FOUND:    return 422;
 	case ESP_ERR_INVALID_CRC:  return 422;
 	case ESP_ERR_TIMEOUT:      return 503;
@@ -196,6 +197,7 @@ static int target_err_code(esp_err_t err)
 	case ESP_ERR_INVALID_STATE:return TARGET_CODE_BUSY;
 	case ESP_ERR_INVALID_SIZE:
 	case ESP_ERR_INVALID_ARG:
+	case ESP_ERR_NOT_SUPPORTED:
 	case ESP_ERR_NOT_FOUND:
 	case ESP_ERR_INVALID_CRC:  return TARGET_CODE_PROPERTY;
 	case ESP_ERR_TIMEOUT:      return TARGET_CODE_BUSY;
@@ -217,6 +219,7 @@ static esp_err_t target_send_mapped_error(httpd_req_t *req, int cmd, esp_err_t e
 		case ESP_ERR_INVALID_SIZE: text = TARGET_ERR_TOO_LARGE; break;
 		case ESP_ERR_TIMEOUT:      text = "target operation timeout"; break;
 		case ESP_ERR_INVALID_ARG:  text = "invalid argument"; break;
+		case ESP_ERR_NOT_SUPPORTED: text = "target series not supported for flashing"; break;
 		default:
 			snprintf(fallback, sizeof(fallback), "%s", esp_err_to_name(err));
 			text = fallback;
@@ -343,6 +346,10 @@ static esp_err_t target_info_handler(httpd_req_t *req)
 		cJSON_AddBoolToObject(root, "ok", true);
 		cJSON_AddBoolToObject(root, "detected", info.detected);
 		cJSON_AddStringToObject(root, "family", info.family);
+		cJSON_AddStringToObject(root, "series", info.series);
+		cJSON_AddStringToObject(root, "device", info.device);
+		cJSON_AddBoolToObject(root, "supported", info.supported);
+		cJSON_AddNumberToObject(root, "swd_clock_hz", info.swd_clock_hz);
 		cJSON_AddStringToObject(root, "dpidr", dpidr);
 		cJSON_AddStringToObject(root, "cpuid", cpuid);
 		cJSON_AddStringToObject(root, "idcode", idcode);
@@ -492,6 +499,11 @@ static esp_err_t target_flash_handler(httpd_req_t *req)
 	err = wt_tf_probe(&info);
 	if (err != ESP_OK || !info.detected) {
 		return target_send_error(req, 422, TARGET_CMD_FLASH, TARGET_ERR_NO_TARGET,
+		                         TARGET_CODE_PROPERTY);
+	}
+	if (!info.supported) {
+		return target_send_error(req, 400, TARGET_CMD_FLASH,
+		                         "target series not supported for flashing",
 		                         TARGET_CODE_PROPERTY);
 	}
 	if (req->content_len > info.max_image_size) {
