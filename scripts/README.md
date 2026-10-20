@@ -15,6 +15,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `release_local.sh` | 本地发布包（app/bootloader/ptable/合并 bin + gz + SHA256SUMS），**不推送** | WP-143 |
 | `check-version-string.sh` | 版本字符串校验（release 拒绝 `-dirty`/开发后缀） | WP-143 |
 | `check-release-versions.sh` | 固件 tag / Web version / protocol / 镜像内嵌版本交叉校验 | WP-143 |
+| `check-protocol-version.sh` | 协议版本三源一致性门禁：C 头 == `docs/protocol.md` == `web/src/api/index.ts` | WP-143/审计 B6 |
 | `device_smoke.sh` | 设备就绪**只读**冒烟：USBIP/HTTP/WS 握手 + WS ping + OTA GET_INFO，聚合 PASS/FAIL | WP-305 |
 | `ota_upload.py` | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库） | WP-205/305 |
 | `README.md` | 本文档 | — |
@@ -37,7 +38,7 @@ scripts/build_all.sh
 
 # 干净重建 / 只构建 S3 / 指定编译并发
 scripts/build_all.sh --clean
-scripts/build_all.sh -t esp32s3 -j 8
+scripts/build_all.sh -t esp32s3 -j 8   # 编译并行度（容器内 CMAKE_BUILD_PARALLEL_LEVEL）
 
 # 发布级构建（拒绝 -dirty 与回退版本；需要 vX.Y.Z tag）
 scripts/build_all.sh -t esp32s3 --release
@@ -179,7 +180,10 @@ scripts/gen_web_assets.sh --src web/dist-gz --out build/web-assets --install
   `build-info.json.gz`；`--gzip FILE` 可追加其它原始文件；
 - `web_version.txt` 按 `docs/versioning.md` §4.4 写 `web_version / protocol_version /
   git_tag / git_commit / build_time / index_gz_sha256 / worker_gz_sha256 (+ extras)`；
-- `--check` 忽略可变的 `build_time`，其余字段与 gz sha256 必须完全一致；未管理 gz 只告警不删除。
+- `--check` 的**硬性条件**：gz sha256、`web_version`、`protocol_version` 必须一致；
+  `build_time` 与 `git_tag`/`git_commit`（构建溯源，非内容身份）只告警不失败——
+  仅改固件/脚本的后续提交不会让已入库 gz 失效（审计 B2 场景）；Web UI 变更后需
+  `web/build.sh` → `--install` 更新。未管理 gz 只告警不删除。
 
 ## 设备就绪冒烟：device_smoke.sh
 
@@ -262,6 +266,10 @@ python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --sha256 00…00
 
 ## 本地发布包：release_local.sh
 
+前置（审计 F3/R8）：发布机必须**先构建 Web UI**（`(cd web && bash build.sh)` → `web/dist/` + `web/dist-gz/`），
+或显式传 `--web-src/--web-dist`；否则默认流程会给出清晰错误而不会静默打包旧资产
+（`--skip-web` 可强制使用已入库资产，仅限本机调试）。
+
 ```bash
 # 严格（要求干净工作区且 HEAD 正好在 vX.Y.Z tag 上；发布用）
 scripts/release_local.sh
@@ -283,14 +291,17 @@ birdiebot-wifi-dap-<ver>/
 ├── firmware/partition-table.bin
 ├── firmware/birdiebot_wifi_dap_full.bin # merge_bin 首烧全量（不含 otadata，保持 0xFF）
 ├── firmware/flash.sh                    # 首次烧录：bootloader+ptable+ota_0
-├── web/{index.html.gz,ws.sharedworker.js.gz,web_version.txt}
+├── web/{index.html.gz,ws.sharedworker.js.gz,web_version.txt[,version.txt]}
 ├── SHA256SUMS
 └── RELEASE-INFO.txt
 ```
 
-严格模式会依次跑：干净工作区检查 → `vX.Y.Z` exact tag → `build_all.sh --release` →
-`check-release-versions.sh` 等价检查 → `check_partitions.py --require-bin` →
-Web gz hash 与 `web_version.txt` 一致性 → SHA256SUMS 自校验。
+严格模式会依次跑：干净工作区检查 → `vX.Y.Z` exact tag → **协议版本三源门禁**
+（`check-protocol-version.sh`）→ `build_all.sh --release` → `check-release-versions.sh`
+等价检查 → `check_partitions.py --require-bin` → Web gz hash 与 `web_version.txt`
+一致性（严格模式**必须**存在 `project_components/html/web_version.txt`，审计 F4）→
+`RELEASE-INFO.txt`（含 `web_version` / `web_protocol_version` / `web_metadata`）→
+SHA256SUMS 自校验。
 `--allow-dirty` 只放宽 tag/版本相等检查，仍做分区、大小、hash 与镜像内版本检查。
 
 ## 版本校验脚本
@@ -303,8 +314,21 @@ scripts/check-release-versions.sh                            # 严格发布门�
 ```
 
 `check-release-versions.sh` 严格模式要求 `git describe --exact-match` 的 `vX.Y.Z`
-tag、`web/package.json.version == X.Y.Z`、镜像内嵌版本 == tag，并调用
-`check-protocol-version.sh`（WP-131 落地后自动启用）。
+tag、`web/package.json.version == X.Y.Z`、镜像内嵌版本 == tag，并自动调用
+`scripts/check-protocol-version.sh`（本目录已提供；C 头==docs==Web UI，任一缺失/不一致 exit 1）。
+
+## 协议版本门禁：check-protocol-version.sh
+
+```bash
+scripts/check-protocol-version.sh        # 0 三源一致 / 1 不一致或缺失 / 2 用法错误
+```
+
+三源：`project_components/wt_common/wt_protocol_version.h` 的
+`BIRDIEBOT_PROTOCOL_VERSION`、`docs/protocol.md` 的 `protocol_version = N`、
+`web/src/api/index.ts` 的 `export const PROTOCOL_VERSION = N`。
+已作为前置接入 `scripts/build_all.sh`（失败即终止构建）与 `scripts/release_local.sh`
+（release 模式失败退出，`--allow-dirty` 仅告警）。`docs/versioning.md` §8.2 里旧路径
+`web/src/api/protocol.ts` 由文档角色同步为 `index.ts`。
 
 ## 自检 / 验证
 
@@ -314,7 +338,8 @@ docker images espressif/idf
 scripts/idf-docker.sh --version
 scripts/idf-docker.sh -C . --git-probe
 
-# 2) 板级契约与分区表（无需构建）
+# 2) 协议版本三源 + 板级契约 + 分区表（无需构建）
+scripts/check-protocol-version.sh
 python3 scripts/check_board_pins.py
 python3 scripts/check_partitions.py
 python3 scripts/check_partitions.py --skip-layout

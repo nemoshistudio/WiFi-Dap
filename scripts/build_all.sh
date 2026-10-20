@@ -49,7 +49,8 @@ Usage: build_all.sh [options]
 
   -t, --targets "T..."   space/comma separated subset of: esp32s3 esp32c3 esp32
                          (default: all three)
-  -j, --jobs N           parallel compile jobs passed to idf.py build
+  -j, --jobs N           parallel compile jobs (passed to the container as
+                         CMAKE_BUILD_PARALLEL_LEVEL; idf.py has no -j option)
       --clean            remove the per-target build directories first
       --no-lock          do not use scripts/build-lock.sh (not recommended)
       --fw-version V     pass -DBIRDIEBOT_FW_VERSION=V (e.g. v1.0.0)
@@ -139,6 +140,20 @@ done
 [ -x "$SCRIPT_DIR/idf-docker.sh" ] || die "missing executable $SCRIPT_DIR/idf-docker.sh"
 [ -x "$SCRIPT_DIR/build-lock.sh" ] || die "missing executable $SCRIPT_DIR/build-lock.sh"
 [ -f "$ROOT/CMakeLists.txt" ] || die "$ROOT is not an ESP-IDF project root (no CMakeLists.txt)"
+
+# --- protocol version gate (docs/versioning.md §3.1/§8.2) -------------------
+# C header == docs/protocol.md == web/src/api/index.ts; a one-sided bump must
+# fail the build rather than produce a firmware/UI protocol mismatch.
+if [ -x "$SCRIPT_DIR/check-protocol-version.sh" ]; then
+    if ! _proto_out="$("$SCRIPT_DIR/check-protocol-version.sh" 2>&1)"; then
+        printf '%s\n' "$_proto_out" >&2
+        log "ERROR: protocol version gate failed (C header / docs / Web UI)"
+        exit 1
+    fi
+    log "protocol version gate: ok"
+else
+    printf '%s: warning: scripts/check-protocol-version.sh missing; protocol gate skipped\n' "$SCRIPT_NAME" >&2
+fi
 
 defaults_file() {
     printf 'sdkconfig.defaults.%s' "$1"
@@ -232,12 +247,15 @@ for target in "${TARGETS[@]}"; do
     fi
 
     if [ "$rc" -eq 0 ]; then
-        build_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel"
-                   -D "SDKCONFIG=$sdkconfig_rel"
-                   -D "BIRDIEBOT_FW_RELEASE=$([ "$RELEASE" -eq 1 ] && echo ON || echo OFF)")
-        build_cmd+=(build)
+        build_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel")
+        # -j belongs to the idf-docker wrapper (CMAKE_BUILD_PARALLEL_LEVEL), NOT
+        # to idf.py: `idf.py build -j N` fails with "No such option: -j". It must
+        # precede the idf.py -D arguments so the wrapper can consume it.
         [ -n "$JOBS" ] && build_cmd+=(-j "$JOBS")
-        log "idf.py build${JOBS:+ (-j $JOBS)}"
+        build_cmd+=(-D "SDKCONFIG=$sdkconfig_rel"
+                    -D "BIRDIEBOT_FW_RELEASE=$([ "$RELEASE" -eq 1 ] && echo ON || echo OFF)")
+        build_cmd+=(build)
+        log "idf.py build${JOBS:+ (parallel jobs: $JOBS)}"
         if ! run_locked "${build_cmd[@]}" >>"$log_file" 2>&1; then
             rc=1
         fi

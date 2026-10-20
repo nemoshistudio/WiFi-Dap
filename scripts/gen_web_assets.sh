@@ -419,7 +419,8 @@ if [ "$CHECK" -eq 1 ]; then
             fi
         done
         if [ -f "$INSTALL_ABS/web_version.txt" ]; then
-            for key in web_version protocol_version git_tag git_commit index_gz_sha256 worker_gz_sha256; do
+            # Content identity: version/protocol/hashes must match exactly.
+            for key in web_version protocol_version index_gz_sha256 worker_gz_sha256; do
                 want="$(meta_value "$meta" "$key")"
                 got="$(meta_value "$INSTALL_ABS/web_version.txt" "$key")"
                 if [ "$want" != "$got" ]; then
@@ -428,7 +429,17 @@ if [ "$CHECK" -eq 1 ]; then
                     rc=1
                 fi
             done
-            log "check ok: web_version.txt stable metadata matches (build_time ignored)"
+            # git_tag/git_commit are build provenance, not content identity: a
+            # commit that only touches firmware/scripts does not make the
+            # installed gz stale, so a difference is a warning (not a failure).
+            for key in git_tag git_commit; do
+                want="$(meta_value "$meta" "$key")"
+                got="$(meta_value "$INSTALL_ABS/web_version.txt" "$key")"
+                if [ "$want" != "$got" ]; then
+                    warn "provenance differs for $key: installed '$got' vs current build '$want' (content hashes match; rebuild+--install only when the Web UI changes)"
+                fi
+            done
+            log "check ok: web_version.txt content metadata matches (hashes/version/protocol; build_time+provenance ignored)"
         else
             warn "installed project_components/html/web_version.txt is missing (docs/versioning.md §4.4; run --install to create it)"
         fi

@@ -30,10 +30,17 @@
 # This script only builds locally; it never pushes, changes branches or touches
 # the git remotes.
 #
+# Parallel builds: ESP-IDF 5.2.1's idf.py has no -j/--jobs option; the build
+# tool parallelism is controlled by the CMAKE_BUILD_PARALLEL_LEVEL environment
+# variable (honoured by `cmake --build`). This wrapper exposes that as `-j N`
+# so callers never pass an unsupported flag to idf.py.
+#
 # Environment variables:
-#   IDF_DOCKER_IMAGE      container image              (default espressif/idf:v5.2.1)
-#   IDF_CCACHE_DIR        host ccache directory        (default ~/.cache/birdiebot-ccache)
-#   IDF_DOCKER_EXTRA_ARGS extra "docker run" arguments (e.g. "--device=/dev/ttyUSB0")
+#   IDF_DOCKER_IMAGE             container image         (default espressif/idf:v5.2.1)
+#   IDF_CCACHE_DIR               host ccache directory   (default ~/.cache/birdiebot-ccache)
+#   IDF_DOCKER_EXTRA_ARGS        extra "docker run" args (e.g. "--device=/dev/ttyUSB0")
+#   CMAKE_BUILD_PARALLEL_LEVEL   forwarded into the container when set on the host
+#                                (the -j option takes precedence)
 set -euo pipefail
 
 readonly IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
@@ -50,23 +57,31 @@ log() {
 
 usage() {
     cat <<'EOF'
-Usage: idf-docker.sh [-C <project-dir>] [-B <build-dir>] <idf.py args...>
+Usage: idf-docker.sh [-C <project-dir>] [-B <build-dir>] [-j <jobs>] <idf.py args...>
 
   -C <dir>   ESP-IDF project root to mount (default: current directory)
   -B <dir>   build directory; relative to the project root (default: idf.py's own
              default, i.e. "build"). Created if missing and kept inside the project
              mount so artifacts survive the container.
+  -j <jobs>  parallel build jobs inside the container (sets
+             CMAKE_BUILD_PARALLEL_LEVEL; idf.py itself has no -j option)
   --git-probe  print the container's git metadata (describe/commit/date) and exit;
              use this to verify that a linked worktree's gitdir is reachable.
   -h         show this help
 
-Any other argument is forwarded verbatim to idf.py, e.g.:
+Options may be given in any order before the idf.py command. Tokens that are
+not recognized wrapper options are forwarded to idf.py verbatim; -D/--define-
+cache-entry is recognized explicitly so wrapper options (e.g. -j) may follow it.
+  idf-docker.sh --version
+  idf-docker.sh -B build/esp32c3 build
+  idf-docker.sh -B build/esp32c3 -j 8 build
+  idf-docker.sh -B build/x -D SDKCONFIG=build/x/sdkconfig build
   idf-docker.sh --version
   idf-docker.sh -B build/esp32c3 set-target esp32c3
-  idf-docker.sh -B build/esp32c3 build
-  idf-docker.sh -B build/esp32c3 -j 4 build
+  idf-docker.sh -B build/esp32c3 -j 8 build
 
-Environment: IDF_DOCKER_IMAGE, IDF_CCACHE_DIR, IDF_DOCKER_EXTRA_ARGS.
+Environment: IDF_DOCKER_IMAGE, IDF_CCACHE_DIR, IDF_DOCKER_EXTRA_ARGS,
+             CMAKE_BUILD_PARALLEL_LEVEL (forwarded; -j wins).
 EOF
 }
 
@@ -74,6 +89,8 @@ EOF
 PROJECT_DIR=""
 BUILD_DIR=""
 GIT_PROBE=0
+JOBS=""
+EXTRA_IDF_ARGS=()
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -95,6 +112,30 @@ while [ "$#" -gt 0 ]; do
             BUILD_DIR="${1#-B}"
             shift
             ;;
+        -j|--jobs)
+            [ "$#" -ge 2 ] || die "$1 requires a positive integer"
+            JOBS="$2"
+            shift 2
+            ;;
+        --jobs=*)
+            JOBS="${1#*=}"
+            shift
+            ;;
+        -j?*)
+            JOBS="${1#-j}"
+            shift
+            ;;
+        -D|--define-cache-entry)
+            # Recognized so wrapper options may appear after idf.py -D args;
+            # forwarded verbatim to idf.py.
+            [ "$#" -ge 2 ] || die "$1 requires an argument"
+            EXTRA_IDF_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        -D?*)
+            EXTRA_IDF_ARGS+=("$1")
+            shift
+            ;;
         --git-probe)
             GIT_PROBE=1
             shift
@@ -113,6 +154,12 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# Validate the parallel level early: idf.py has no -j, it maps to
+# CMAKE_BUILD_PARALLEL_LEVEL inside the container.
+if [ -n "$JOBS" ] && ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    die "-j/--jobs must be a positive integer (got '$JOBS')"
+fi
 
 if [ "$GIT_PROBE" -eq 0 ]; then
     [ "$#" -gt 0 ] || die "no idf.py arguments given (try '$SCRIPT_NAME --version' or '$SCRIPT_NAME -h')"
@@ -138,6 +185,9 @@ CCACHE_HOST="${IDF_CCACHE_DIR:-$HOST_HOME/.cache/birdiebot-ccache}"
 
 # `-B`: keep the build directory inside the project mount so it persists.
 IDF_ARGS=()
+if [ "${#EXTRA_IDF_ARGS[@]}" -gt 0 ]; then
+    IDF_ARGS+=("${EXTRA_IDF_ARGS[@]}")
+fi
 if [ -n "$BUILD_DIR" ]; then
     case "$BUILD_DIR" in
         /*) BUILD_ABS="$BUILD_DIR" ;;
@@ -245,6 +295,22 @@ DOCKER_ARGS=(
     -w /project
 )
 
+# Parallel build level: -j N (or the host CMAKE_BUILD_PARALLEL_LEVEL) is passed
+# into the container as CMAKE_BUILD_PARALLEL_LEVEL, which `cmake --build` (used by
+# idf.py build) honours. Do not pass -j to idf.py - IDF 5.2.1 does not accept it.
+PARALLEL_LEVEL=""
+if [ -n "$JOBS" ]; then
+    PARALLEL_LEVEL="$JOBS"
+elif [ -n "${CMAKE_BUILD_PARALLEL_LEVEL:-}" ]; then
+    PARALLEL_LEVEL="$CMAKE_BUILD_PARALLEL_LEVEL"
+fi
+if [ -n "$PARALLEL_LEVEL" ]; then
+    if ! [[ "$PARALLEL_LEVEL" =~ ^[1-9][0-9]*$ ]]; then
+        die "invalid parallel build level '$PARALLEL_LEVEL' (positive integer expected)"
+    fi
+    DOCKER_ARGS+=(-e "CMAKE_BUILD_PARALLEL_LEVEL=$PARALLEL_LEVEL")
+fi
+
 # Read-only git metadata mounts for linked worktrees (see the git metadata block
 # above). Mounted at the same absolute path so the worktree `.git` file resolves.
 if [ "${#GIT_MOUNT_ARGS[@]}" -gt 0 ]; then
@@ -264,6 +330,7 @@ log "image=$IMAGE"
 log "project=$PROJECT_ABS (-> /project)"
 [ -n "$BUILD_DIR" ] && log "build=$BUILD_ABS (-> ${IDF_ARGS[1]})"
 log "ccache=$CCACHE_HOST (-> /ccache)"
+[ -n "$PARALLEL_LEVEL" ] && log "parallel build level=$PARALLEL_LEVEL (CMAKE_BUILD_PARALLEL_LEVEL)"
 if [ "${#GIT_MOUNT_NOTES[@]}" -gt 0 ]; then
     log "git metadata (ro): ${GIT_MOUNT_NOTES[*]}"
 fi
