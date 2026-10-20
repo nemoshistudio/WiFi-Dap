@@ -1,8 +1,10 @@
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "usbip_server.h"
 #include "DAP_handle.h"
+#include "main/dap_configuration.h"
 
 #include "components/USBIP/usb_handle.h"
 #include "components/USBIP/usb_descriptor.h"
@@ -18,10 +20,28 @@
 #define unlikely(x)    __builtin_expect(!!(x), 0)
 #endif
 
+/*
+ * tcp_server.c receives every USBIP connection into a 1500-byte buffer
+ * (tcp_rx_buffer).  The 48-byte stage2 header is written at offset 0 and the
+ * payload of a SUBMIT/DIR_OUT URB is received directly behind it, so the
+ * payload must never exceed the remaining space in that buffer.
+ *
+ * P0 (REPORT §8.1): the old code used the network-provided 32-bit data_length
+ * directly as recv() size, i.e. any client could overwrite the TCP task stack.
+ */
+#define USBIP_STAGE2_RX_BUFFER_SIZE 1500U
+#define USBIP_STAGE2_MAX_OUT_DATA \
+    (USBIP_STAGE2_RX_BUFFER_SIZE - (uint32_t)sizeof(usbip_stage2_header))
+
+/* The DAP data path (DAP_handle.c) copies one DAP packet per OUT URB, so the
+ * RX buffer must be able to hold a full DAP_PACKET_SIZE payload. */
+_Static_assert(USBIP_STAGE2_MAX_OUT_DATA >= DAP_PACKET_SIZE,
+               "DAP_PACKET_SIZE must fit into the USBIP stage2 RX buffer");
+
 // attach helper function
 static int read_stage1_command(uint8_t *buffer, uint32_t length);
 static void handle_device_list(uint8_t *buffer, uint32_t length);
-static void handle_device_attach(uint8_t *buffer, uint32_t length);
+static int handle_device_attach(uint8_t *buffer, uint32_t length);
 static void send_stage1_header(uint16_t command, uint32_t status);
 static void send_device_list();
 static void send_device_info();
@@ -54,8 +74,7 @@ static int attach(uint8_t *buffer, uint32_t length)
         break;
 
     case USBIP_STAGE1_CMD_DEVICE_ATTACH: // OP_REQ_IMPORT
-        handle_device_attach(buffer, length);
-        break;
+        return handle_device_attach(buffer, length);
 
     default:
 	    printf("attach Unknown command: %d\r\n", command);
@@ -81,21 +100,31 @@ static void handle_device_list(uint8_t *buffer, uint32_t length)
     send_device_list();
 }
 
-static void handle_device_attach(uint8_t *buffer, uint32_t length)
+static int handle_device_attach(uint8_t *buffer, uint32_t length)
 {
 	printf("Handling dev attach request...\r\n");
 
-    //char bus[USBIP_BUSID_SIZE];
-    if (length < sizeof(USBIP_BUSID_SIZE))
+    /*
+     * OP_REQ_IMPORT is a stage1 header followed by a fixed-size busid
+     * (USBIP_BUSID_SIZE bytes, including the terminating NUL).
+     * The old check compared against sizeof(USBIP_BUSID_SIZE), i.e.
+     * sizeof(int) == 4, so a truncated import packet could still be accepted
+     * (P1, REPORT §8.1).  usbip_worker() always reads 8 + 32 = 40 bytes into
+     * `base`, so this is now a real consistency check of the caller contract.
+     */
+    if (length < sizeof(usbip_stage1_header) + USBIP_BUSID_SIZE)
     {
-	    printf("handle device attach failed!\r\n");
-        return;
+	    printf("handle device attach failed! invalid stage1 import length: %lu\r\n",
+	           (unsigned long)length);
+        return -1;
     }
     //client.readBytes((uint8_t *)bus, USBIP_BUSID_SIZE);
 
     send_stage1_header(USBIP_STAGE1_CMD_DEVICE_ATTACH, 0);
 
     send_device_info();
+
+    return 0;
 }
 
 static void send_stage1_header(uint16_t command, uint32_t status)
@@ -179,9 +208,37 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
     uint8_t *data;
     uint32_t command, dir, ep;
     uint32_t unlink_count = 0;
+    uint32_t data_length;
+    uint32_t payload_capacity;
     bool may_has_data;
     int sz, ret;
     int dap_req_num = 0;
+
+    /*
+     * `length` is the capacity of the TCP receive buffer (1500 bytes in
+     * tcp_server.c).  It has to hold the stage2 header plus at least one DAP
+     * packet because handle_dap_data_request() copies DAP_PACKET_SIZE bytes
+     * behind the header for every OUT URB.
+     */
+    if (unlikely(length < sizeof(usbip_stage2_header) + DAP_PACKET_SIZE)) {
+        printf("usbip: RX buffer too small: %lu (need >= %lu)\r\n",
+               (unsigned long)length,
+               (unsigned long)(sizeof(usbip_stage2_header) + DAP_PACKET_SIZE));
+        return -1;
+    }
+
+    /*
+     * Maximum OUT payload accepted from the network:
+     *   - must fit behind the stage2 header in the caller's RX buffer,
+     *   - must not exceed the hard 1500-byte buffer limit (1500 - 48),
+     *   - and must stay within one DAP packet because the DAP handler consumes
+     *     a fixed-size packet from this buffer.
+     */
+    payload_capacity = length - (uint32_t)sizeof(usbip_stage2_header);
+    if (payload_capacity > USBIP_STAGE2_MAX_OUT_DATA)
+        payload_capacity = USBIP_STAGE2_MAX_OUT_DATA;
+    if (payload_capacity > DAP_PACKET_SIZE)
+        payload_capacity = DAP_PACKET_SIZE;
 
     while (1) {
         // header
@@ -199,7 +256,21 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
         dir = ntohl(header->base.direction);
         ep = ntohl(header->base.ep);
         may_has_data = (command == USBIP_STAGE2_REQ_SUBMIT && dir == USBIP_DIR_OUT);
-        sz = may_has_data ? ntohl(header->u.cmd_submit.data_length) : 0;
+        data_length = 0;
+        if (may_has_data) {
+            data_length = ntohl((uint32_t)header->u.cmd_submit.data_length);
+
+            /* P0: never recv() more than the RX buffer can hold. */
+            if (unlikely(data_length > payload_capacity)) {
+                printf("usbip: rejecting SUBMIT/DIR_OUT data_length=%lu "
+                       "(max=%lu, rx_buffer=%lu)\r\n",
+                       (unsigned long)data_length,
+                       (unsigned long)payload_capacity,
+                       (unsigned long)length);
+                return -1;
+            }
+        }
+        sz = (int)data_length;
 
         while (sz) {
                 ret = recv(kSock, data, sz, 0);
