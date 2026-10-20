@@ -10,7 +10,6 @@ or CI runner as a single file.
 
 Connection
     ws://<host>[:<port>]/ws            (default port 80, path /ws)
-    ws://<host>/ws?token=<pair_code>   (only when Web auth is enabled)
 
 Scenarios (subcommands)
     ping            WS PING/PONG transport check + SYSTEM(0)/GET_FM_INFO(1):
@@ -39,7 +38,6 @@ Examples
     python3 scripts/e2e_ws_client.py --host 192.168.1.50 dataflow-list
     python3 scripts/e2e_ws_client.py --host 192.168.1.50 ota-info
     python3 scripts/e2e_ws_client.py --host 192.168.1.50 json --module 4 --cmd 6 --body '{"sub_mod":0}'
-    python3 scripts/e2e_ws_client.py --host 192.168.1.50 --token 123456 ping
 
 The output is plain text and can be pasted directly into a test record.
 """
@@ -53,7 +51,6 @@ import socket
 import struct
 import sys
 import time
-import urllib.parse
 
 # ---------------------------------------------------------------------------
 # WebSocket protocol constants (RFC 6455)
@@ -165,11 +162,10 @@ def hex_dump(data, limit=64):
 # WebSocket client
 # ---------------------------------------------------------------------------
 class WsClient:
-    def __init__(self, host, port, path, token, timeout, verbose):
+    def __init__(self, host, port, path, timeout, verbose):
         self.host = host
         self.port = port
         self.path = path
-        self.token = token
         self.timeout = timeout
         self.sock = None
         self._rx = b""
@@ -178,8 +174,6 @@ class WsClient:
     # -- connect -----------------------------------------------------------
     def connect(self):
         endpoint = f"{self.host}:{self.port}{self.path}"
-        if self.token:
-            endpoint += "?token=***"
         Log.info(f"connecting ws://{endpoint} (timeout {self.timeout:.1f}s)")
         try:
             self.sock = socket.create_connection((self.host, self.port),
@@ -190,8 +184,6 @@ class WsClient:
         self.sock.settimeout(self.timeout)
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         path = self.path
-        if self.token:
-            path += "?" + urllib.parse.urlencode({"token": self.token})
 
         host_header = self.host
         if ":" in host_header and not host_header.startswith("["):
@@ -452,7 +444,7 @@ def parse_host_arg(host_arg, port_arg, path_arg):
 
 def make_client(args):
     host, port, path = parse_host_arg(args.host, args.port, args.path)
-    return WsClient(host=host, port=port, path=path, token=args.token,
+    return WsClient(host=host, port=port, path=path,
                     timeout=args.timeout, verbose=args.verbose)
 
 
@@ -461,7 +453,7 @@ def print_header(args, scenario, elapsed=None, result=None):
     print("WiFi Dap — WS E2E test")
     print(f"scenario : {scenario}")
     host, port, path = parse_host_arg(args.host, args.port, args.path)
-    print(f"target   : ws://{host}:{port}{path}" + (" (token set)" if args.token else ""))
+    print(f"target   : ws://{host}:{port}{path}")
     print(f"started  : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     if elapsed is not None:
         print(f"elapsed  : {elapsed:.2f} s")
@@ -694,9 +686,6 @@ def add_common_options(parser, suppress_defaults=False):
     parser.add_argument("--path", metavar="PATH",
                         default=argparse.SUPPRESS if suppress_defaults else "/ws",
                         help="WebSocket path (default: /ws)")
-    parser.add_argument("--token", metavar="TOKEN",
-                        default=argparse.SUPPRESS if suppress_defaults else None,
-                        help="optional Web auth pairing code (added as ?token=...)")
     parser.add_argument("--timeout", type=float, metavar="SEC",
                         default=argparse.SUPPRESS if suppress_defaults else 5.0,
                         help="default response timeout in seconds (default: 5)")
@@ -799,7 +788,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     # Subparsers use SUPPRESS defaults so that options given before the
     # subcommand survive; fill the defaults that were never provided.
-    for name, value in (("port", 80), ("path", "/ws"), ("token", None),
+    for name, value in (("port", 80), ("path", "/ws"),
                         ("timeout", 5.0), ("verbose", False), ("host", None)):
         if not hasattr(args, name):
             setattr(args, name, value)

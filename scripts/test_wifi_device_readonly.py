@@ -32,9 +32,7 @@ record; --json prints a machine-readable summary instead.
 
 Usage
     python3 scripts/test_wifi_device_readonly.py --host 192.168.1.1
-    python3 scripts/test_wifi_device_readonly.py --host dap.local --token 123456
     python3 scripts/test_wifi_device_readonly.py --host 192.168.1.1 --json
-    BIRDIEBOT_TOKEN=123456 python3 scripts/test_wifi_device_readonly.py --host dap.local
 
 Exit codes
     0  all checks passed
@@ -90,7 +88,6 @@ ERR_INTERNAL = 3
 ERR_UNSUPPORTED = 4
 ERR_PROPERTY = 5
 ERR_BUSY = 6
-ERR_UNAUTHORIZED = 7
 
 PERMANENT_MODES = {0, 4, 5, 6, 7}  # wifi_apsta_mode_e permanent values
 WIFI_MODES = {0, 1, 2, 3}          # wifi_mode_t: NULL/STA/AP/APSTA
@@ -189,14 +186,8 @@ class WsClient:
         return opcode, payload, fin
 
     # -- handshake ---------------------------------------------------------
-    def connect(self, token: str | None = None) -> None:
+    def connect(self) -> None:
         path = self.path
-        if token:
-            from urllib.parse import quote
-
-            sep = "&" if "?" in path else "?"
-            path = f"{path}{sep}token={quote(token, safe='')}"
-
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         request = (
             f"GET {path} HTTP/1.1\r\n"
@@ -458,11 +449,6 @@ def check_saved_list(ws: WsClient, rep: Reporter) -> dict:
                      "device returned code=4 Unsupported cmd: firmware lacks WP-202 "
                      "(upgrade to a build with cmd 11-14)")
             return response
-        if code == ERR_UNAUTHORIZED:
-            rep.fail("R3 WIFI/GET_SAVED_LIST(11)",
-                     "device returned code=7 Unauthorized: pass --token <pair_code> "
-                     "or set BIRDIEBOT_TOKEN")
-            return response
         rep.fail("R3 WIFI/GET_SAVED_LIST(11)", f"device error: {response}")
         return response
 
@@ -636,16 +622,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         epilog=(
             "examples:\n"
             "  python3 scripts/test_wifi_device_readonly.py --host 192.168.1.1\n"
-            "  python3 scripts/test_wifi_device_readonly.py --host dap.local --token 123456\n"
-            "  BIRDIEBOT_TOKEN=123456 python3 scripts/test_wifi_device_readonly.py --host dap.local\n"
+            "  python3 scripts/test_wifi_device_readonly.py --host dap.local --json\n"
         ),
     )
     parser.add_argument("--host", required=True, help="device IP or hostname")
     parser.add_argument("--port", type=int, default=80, help="HTTP/WS port (default 80)")
     parser.add_argument("--path", default="/ws", help="WebSocket path (default /ws)")
-    parser.add_argument("--token", default=os.environ.get("BIRDIEBOT_TOKEN"),
-                        help="pairing token when BIRDIEBOT_WEB_AUTH=y "
-                             "(default: $BIRDIEBOT_TOKEN)")
     parser.add_argument("--timeout", type=float, default=5.0,
                         help="per-request timeout in seconds (default 5.0)")
     parser.add_argument("--skip-error-probes", action="store_true",
@@ -665,34 +647,8 @@ def main(argv: list[str]) -> int:
              f"(read-only: only GET commands and invalid probes are sent)")
 
     try:
-        ws.connect(args.token)
+        ws.connect()
         rep.ok("R0 WebSocket handshake", f"HTTP 101 @ {args.host}:{args.port}{args.path}")
-        if args.token:
-            # AUTH is accepted both via the ?token= query (already done) and as
-            # a first frame; a wrong token is reported as code 7 (protocol §2.1).
-            ws.send_json({"module": MODULE_SYSTEM, "cmd": 0, "token": args.token})
-            deadline = time.monotonic() + args.timeout
-            auth_code = None
-            auth_ok = False
-            while time.monotonic() < deadline:
-                message = ws.recv_json(deadline - time.monotonic())
-                if message.get("module") == MODULE_SYSTEM and message.get("cmd") == 0:
-                    auth_code = message.get("code")
-                    auth_ok = message.get("ok") is True
-                    break
-                # Auth disabled: SYSTEM cmd 0 is unsupported and may be answered
-                # with a bare {"error":"Unsupported cmd","code":4} frame.
-                if message.get("code") == ERR_UNSUPPORTED and "module" not in message:
-                    auth_code = ERR_UNSUPPORTED
-                    break
-            if auth_code == ERR_UNAUTHORIZED:
-                rep.fail("R0.1 Web auth token", "token rejected (code=7)")
-            elif auth_code == ERR_UNSUPPORTED or auth_ok:
-                rep.ok("R0.1 Web auth token", "token accepted (or auth disabled)")
-            elif auth_code is not None:
-                rep.fail("R0.1 Web auth token", f"unexpected AUTH response code={auth_code}")
-            else:
-                rep.ok("R0.1 Web auth token", "no AUTH response (treated as auth disabled)")
     except WsConnectError as exc:
         rep.info(f"connection failed: {exc}")
         if args.json:

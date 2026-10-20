@@ -5,11 +5,11 @@
 #                   WiFi DAP device (Wave3 hardware bring-up).
 #
 # Runs, in order, the existing read-only device test tools:
-#   1. scripts/dap_smoke.py      --host H --http-port P [--token T]
+#   1. scripts/dap_smoke.py      --host H --http-port P
 #        USBIP(3240) devlist + HTTP GET / + JSON /ws GET_FM_INFO handshake
-#   2. scripts/e2e_ws_client.py  --host H --port P [--token T] ping
+#   2. scripts/e2e_ws_client.py  --host H --port P ping
 #        WebSocket transport ping + SYSTEM/GET_FM_INFO
-#   3. scripts/e2e_ws_client.py  --host H --port P [--token T] ota-info
+#   3. scripts/e2e_ws_client.py  --host H --port P ota-info
 #        OTA(5)/GET_INFO: running slot / version / free / status
 #
 # It never flashes, resets or reboots the device and writes only to a temporary
@@ -19,7 +19,6 @@
 #
 # Usage:
 #   scripts/device_smoke.sh --host 192.168.1.1
-#   scripts/device_smoke.sh --host 192.168.1.1 --token 123456
 #   scripts/device_smoke.sh --host 192.168.1.1 --skip-dap --json
 #   scripts/device_smoke.sh --host wifi-dap.local --port 80
 #
@@ -32,8 +31,7 @@
 #   * device is up (WiFi + webserver started; serial logs show the startup
 #     banner / WT_OTA init) and <host>:<port> is reachable from this machine;
 #   * no active debugger session on the DAP proxy port 3240 (single-connection
-#     and serial; the dap_smoke USBIP probe can disturb an active session);
-#   * --token is required when the firmware was built with BIRDIEBOT_WEB_AUTH=y.
+#     and serial; the dap_smoke USBIP probe can disturb an active session).
 #
 # Environment (test hook, not needed on a real device):
 #   DEVICE_SMOKE_SCRIPTS_DIR  directory containing dap_smoke.py /
@@ -48,7 +46,6 @@ readonly CONNECT_TIMEOUT_S=3
 
 HOST=""
 PORT=80
-TOKEN=""
 SKIP_DAP=0
 SKIP_WS=0
 JSON=0
@@ -62,7 +59,6 @@ Never flashes, resets or reboots.
 
   --host <ip>     device address (required; IP or mDNS hostname, no scheme)
   --port N        HTTP/WebSocket port (default 80; USBIP probe stays on 3240)
-  --token T       pair code for BIRDIEBOT_WEB_AUTH=y builds
   --skip-dap      skip scripts/dap_smoke.py (USBIP/HTTP/WS handshake)
   --skip-ws       skip the two scripts/e2e_ws_client.py steps
   --json          machine-readable JSON summary on stdout (diagnostics on stderr)
@@ -73,7 +69,6 @@ Exit codes: 0 all enabled steps passed; 1 step failed / device unreachable;
 
 Examples:
   scripts/device_smoke.sh --host 192.168.1.1
-  scripts/device_smoke.sh --host 192.168.1.1 --token 123456
   scripts/device_smoke.sh --host 192.168.1.1 --skip-dap --json
 EOF
 }
@@ -90,10 +85,6 @@ log() {
 
 now_ms() {
     date +%s%3N
-}
-
-masked() {
-    printf '***'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -114,15 +105,6 @@ while [ "$#" -gt 0 ]; do
             ;;
         --port=*)
             PORT="${1#*=}"
-            shift
-            ;;
-        --token)
-            [ "$#" -ge 2 ] || die_usage "--token requires a value"
-            TOKEN="$2"
-            shift 2
-            ;;
-        --token=*)
-            TOKEN="${1#*=}"
             shift
             ;;
         --skip-dap)
@@ -272,7 +254,6 @@ else
     log "  - PC/手机已连上设备 AP（默认 WiFi-Dap-XXXX）或与设备在同一局域网"
     log "  - --host/--port 正确（AP 模式默认 IP 192.168.1.1、端口 80）"
     log "  - 本机防火墙/路由允许访问，先试: ping $HOST 与 curl -sS -o /dev/null -w '%{http_code}' http://$HOST:$PORT/"
-    log "  - 开启 BIRDIEBOT_WEB_AUTH 时请提供 --token"
 fi
 
 DAP_HELPER="$HELPER_DIR/dap_smoke.py"
@@ -286,10 +267,8 @@ if [ "$DEVICE_REACHABLE" -eq 0 ]; then
 else
     if [ "$SKIP_DAP" -eq 0 ]; then
         display="python3 scripts/dap_smoke.py --host $HOST --http-port $PORT"
-        [ -n "$TOKEN" ] && display+=" --token $(masked)"
         if [ -f "$DAP_HELPER" ]; then
             dap_cmd=(python3 "$DAP_HELPER" --host "$HOST" --http-port "$PORT")
-            [ -n "$TOKEN" ] && dap_cmd+=(--token "$TOKEN")
             run_step "dap-smoke" "$display" "${dap_cmd[@]}"
         else
             run_missing_helper_step "dap-smoke" "$display" "$DAP_HELPER"
@@ -298,11 +277,9 @@ else
     if [ "$SKIP_WS" -eq 0 ]; then
         for scenario in ping ota-info; do
             display="python3 scripts/e2e_ws_client.py --host $HOST --port $PORT"
-            [ -n "$TOKEN" ] && display+=" --token $(masked)"
             display+=" $scenario"
             if [ -f "$E2E_HELPER" ]; then
                 e2e_cmd=(python3 "$E2E_HELPER" --host "$HOST" --port "$PORT")
-                [ -n "$TOKEN" ] && e2e_cmd+=(--token "$TOKEN")
                 e2e_cmd+=("$scenario")
                 run_step "ws-$scenario" "$display" "${e2e_cmd[@]}"
             else
@@ -325,12 +302,12 @@ fi
 
 # --- summary --------------------------------------------------------------
 if [ "$JSON" -eq 1 ]; then
-    python3 - "$HOST" "$PORT" "$TOKEN" "$DEVICE_REACHABLE" "$UNREACHABLE_REASON" \
+    python3 - "$HOST" "$PORT" "$DEVICE_REACHABLE" "$UNREACHABLE_REASON" \
         "$STARTED_AT" "$TOTAL_MS" "$RESULT" "$TMP_DIR/steps.tsv" "$OUTPUT_TAIL_LINES" <<'PY'
 import json
 import sys
 
-(host, port, token, reachable, unreachable,
+(host, port, reachable, unreachable,
  started_at, total_ms, result, steps_file, tail_n) = sys.argv[1:]
 steps = []
 with open(steps_file, encoding="utf-8") as fh:
@@ -358,7 +335,6 @@ with open(steps_file, encoding="utf-8") as fh:
 summary = {
     "host": host,
     "port": int(port),
-    "token_used": bool(token),
     "device_reachable": reachable == "1",
     "started_at": started_at,
     "duration_ms": int(total_ms),
