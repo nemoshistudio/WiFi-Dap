@@ -39,6 +39,7 @@
 
 #include "tf_dap.h"
 #include "tf_internal.h"
+#include "tf_stm32_id.h"
 #include "tf_swd.h"
 #include "wt_target_flash.h"
 
@@ -325,9 +326,14 @@ static void tf_info_clear(void)
 {
     memset(&s_info, 0, sizeof(s_info));
     snprintf(s_info.family, sizeof(s_info.family), "unknown");
+    snprintf(s_info.series, sizeof(s_info.series), "unknown");
+    snprintf(s_info.device, sizeof(s_info.device), "unknown");
+    s_info.supported = false;
     memset(&s_target, 0, sizeof(s_target));
     s_target.family = TF_FAMILY_UNKNOWN;
     snprintf(s_target.family_str, sizeof(s_target.family_str), "unknown");
+    snprintf(s_target.series, sizeof(s_target.series), "unknown");
+    snprintf(s_target.device, sizeof(s_target.device), "unknown");
 }
 
 static void tf_info_fill_from_target(void)
@@ -335,6 +341,10 @@ static void tf_info_fill_from_target(void)
     memset(&s_info, 0, sizeof(s_info));
     s_info.detected = true;
     snprintf(s_info.family, sizeof(s_info.family), "%s", s_target.family_str);
+    snprintf(s_info.series, sizeof(s_info.series), "%s", s_target.series);
+    snprintf(s_info.device, sizeof(s_info.device), "%s", s_target.device);
+    s_info.supported = s_target.supported;
+    s_info.swd_clock_hz = s_target.swd_clock_hz;
     s_info.dpidr = s_target.dpidr;
     s_info.cpuid = s_target.cpuid;
     s_info.idcode = s_target.idcode;
@@ -344,56 +354,279 @@ static void tf_info_fill_from_target(void)
     s_info.max_image_size = s_target.max_image_size;
 }
 
+/* DBGMCU IDCODE sanity: DEV_ID in bits[11:0], REV_ID in bits[31:16]. */
+static bool tf_idcode_sane(uint32_t idcode)
+{
+    uint32_t dev_id = idcode & 0xFFFU;
+    uint32_t rev_id = (idcode >> 16) & 0xFFFFU;
+
+    return (dev_id != 0U) && (dev_id != 0xFFFU) && (rev_id != 0xFFFFU);
+}
+
+/* "STM32H7" -> "stm32h7" (public family field keeps the old lower-case form). */
+static void tf_series_to_family(const char *series, char *out, size_t out_len)
+{
+    size_t i;
+
+    for (i = 0U; (i + 1U) < out_len && series[i] != '\0'; i++) {
+        char c = series[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        out[i] = c;
+    }
+    out[i] = '\0';
+}
+
+/* DEV_ID groups cover several order codes; narrow the H7 groups with FSIZE
+ * (RM0433/RM0468: H72x/H73x are single-bank up to 1 MiB, the H74x/H75x group
+ * contains 2 MiB parts and the 128 KiB STM32H750 value line).  For all other
+ * groups the DEV_ID/FSIZE combination cannot distinguish the order code, so
+ * the "/"-separated candidate list from the table is kept as is. */
+static const char *tf_model_narrow(uint16_t dev_id, uint32_t flash_size,
+                                   const char *table_model, char *buf, size_t buf_len)
+{
+    switch (dev_id) {
+    case 0x483U: /* STM32H723/H725/H730/H733/H735 (single bank, <= 1 MiB) */
+        if (flash_size <= 1024U * 1024U) {
+            snprintf(buf, buf_len, "STM32H723/H725/H730/H733/H735");
+            return buf;
+        }
+        break;
+    case 0x450U: /* STM32H742/H743/H745/H747/H750/H753/H755/H757 */
+        if (flash_size >= 2048U * 1024U) {
+            snprintf(buf, buf_len, "STM32H743/H745/H747/H750/H755/H757");
+            return buf;
+        }
+        if (flash_size > 0U && flash_size <= 128U * 1024U) {
+            snprintf(buf, buf_len, "STM32H750");
+            return buf;
+        }
+        break;
+    case 0x413U: /* STM32F405/F407/F415/F417 - all 512 KiB/1 MiB order codes */
+        if (flash_size >= 1024U * 1024U) {
+            snprintf(buf, buf_len, "STM32F405/F407/F415/F417");
+            return buf;
+        }
+        break;
+    default:
+        break;
+    }
+    return table_model;
+}
+
+/* Fill s_target for an identified table entry.  F4/H7 entries run the existing
+ * family probe (it re-validates DEV_ID/CPUID and reads FSIZE/UID); other series
+ * only get generic FSIZE/UID reads, reported as identified-but-unsupported. */
+static esp_err_t tf_target_apply_part(const tf_stm32_part_t *part, uint32_t idcode,
+                                      uint32_t cpuid, uint32_t clock_hz)
+{
+    tf_core_class_t core = tf_stm32_core_from_cpuid(cpuid);
+    uint32_t flash_size = 0U;
+    uint32_t uid[3] = {0U, 0U, 0U};
+    char model[56];
+    const char *model_str;
+    esp_err_t err = ESP_OK;
+
+    s_target.idcode = idcode;
+    s_target.cpuid = cpuid;
+    s_target.flash_base = TF_MAIN_FLASH_BASE;
+    s_target.f4_x32_mode = false;
+    s_target.swd_clock_hz = clock_hz;
+    snprintf(s_target.series, sizeof(s_target.series), "%s", part->series);
+    tf_series_to_family(part->series, s_target.family_str, sizeof(s_target.family_str));
+
+    if (part->flash_ops == TF_STM32_FLASH_OPS_F4) {
+        s_target.ops = &tf_family_stm32f4_ops;
+        s_target.family = TF_FAMILY_STM32F4;
+    } else if (part->flash_ops == TF_STM32_FLASH_OPS_H7) {
+        s_target.ops = &tf_family_stm32h7_ops;
+        s_target.family = TF_FAMILY_STM32H7;
+    } else {
+        s_target.ops = NULL;
+        s_target.family = TF_FAMILY_STM32_IDENTIFIED;
+    }
+
+    if (s_target.ops != NULL) {
+        err = s_target.ops->probe(&s_target);
+        if (err != ESP_OK) {
+            return err;
+        }
+        flash_size = s_target.flash_size;
+        s_target.supported = true;
+    } else {
+        if (part->flash_size_reg != 0U && part->flash_size_shift != 0xFFU) {
+            uint32_t reg = 0U;
+            if (tf_swd_read_u32(part->flash_size_reg, &reg) == ESP_OK) {
+                uint32_t kb = (reg >> part->flash_size_shift) & 0xFFFFU;
+                if (kb >= 16U && kb <= 8192U) {
+                    flash_size = kb * 1024U;
+                }
+            } else {
+                (void)tf_swd_recover_bus();
+            }
+        }
+        if (part->uid_base != 0U) {
+            if (tf_swd_read_mem(part->uid_base, uid, sizeof(uid)) != ESP_OK) {
+                memset(uid, 0, sizeof(uid));
+                (void)tf_swd_recover_bus();
+            }
+        }
+        memcpy(s_target.uid, uid, sizeof(s_target.uid));
+        s_target.flash_size = flash_size;
+        s_target.max_image_size = flash_size;
+        s_target.supported = false;
+    }
+
+    model_str = tf_model_narrow(part->dev_id, flash_size, part->model, model, sizeof(model));
+    snprintf(s_target.device, sizeof(s_target.device), "%s", model_str);
+
+    ESP_LOGI(TF_TAG,
+             "target identified: %s (%s) DEV_ID=0x%03X REV=0x%04X CPUID=0x%08X (%s) "
+             "flash=%u KiB UID@0x%08X supported=%d",
+             s_target.device, s_target.series, (unsigned)(idcode & 0xFFFU),
+             (unsigned)((idcode >> 16) & 0xFFFFU), (unsigned)cpuid,
+             tf_stm32_core_name(core), (unsigned)(flash_size / 1024U),
+             (unsigned)part->uid_base, (int)s_target.supported);
+    return ESP_OK;
+}
+
+/* CPUID is readable but no DBGMCU IDCODE matched: still a real STM32. */
+static void tf_target_set_unknown(uint32_t idcode, uint32_t cpuid, uint32_t dpidr,
+                                  uint32_t clock_hz)
+{
+    memset(&s_target, 0, sizeof(s_target));
+    s_target.family = TF_FAMILY_STM32_IDENTIFIED;
+    snprintf(s_target.family_str, sizeof(s_target.family_str), "stm32");
+    snprintf(s_target.series, sizeof(s_target.series), "unknown");
+    if (idcode != 0U) {
+        snprintf(s_target.device, sizeof(s_target.device), "unknown (DEV_ID=0x%03X)",
+                 (unsigned)(idcode & 0xFFFU));
+    } else {
+        snprintf(s_target.device, sizeof(s_target.device), "unknown (no DBGMCU IDCODE)");
+    }
+    s_target.dpidr = dpidr;
+    s_target.swd_clock_hz = clock_hz;
+}
+
 /**
  * Link the DAP to SWD and identify the target; fills s_target/s_info.
  * The caller must already own the DAP engine.
+ *
+ * The SWD clock is retried from 2 MHz down to 500 kHz: the STM32H7 setup in
+ * the field only answers at <=1 MHz (OpenOCD: "cannot read IDR" at 2 MHz),
+ * while F4 boards work at the default 2 MHz.  Each attempt re-runs the full
+ * line-reset/JTAG-to-SWD/DP power-up sequence with the new clock.
  */
 static esp_err_t tf_probe_link(void)
 {
-    uint32_t dpidr = 0U;
-    uint32_t cpuid = 0U;
-    uint32_t partno;
-    const tf_family_ops_t *ops;
-    esp_err_t err;
+    static const uint32_t clock_try[] = {
+        TF_SWD_CLOCK_HZ, TF_SWD_CLOCK_FALLBACK1_HZ, TF_SWD_CLOCK_FALLBACK2_HZ
+    };
+    esp_err_t last_err = ESP_ERR_NOT_FOUND;
+    bool saw_cpuid = false;
 
     tf_info_clear();
 
-    err = tf_swd_link_init(&dpidr);
-    if (err != ESP_OK) {
-        snprintf(s_info.family, sizeof(s_info.family), "unknown");
-        return (err == ESP_ERR_TIMEOUT) ? err : ESP_ERR_NOT_FOUND;
-    }
-    s_target.dpidr = dpidr;
+    for (size_t ci = 0U; ci < (sizeof(clock_try) / sizeof(clock_try[0])); ci++) {
+        uint32_t clock_hz = clock_try[ci];
+        uint32_t dpidr = 0U;
+        uint32_t cpuid = 0U;
+        esp_err_t err;
 
-    TF_STAGE(20U);
-    err = tf_swd_read_u32(TF_REG_CPUID, &cpuid);
-    if (err != ESP_OK) {
-        snprintf(s_info.family, sizeof(s_info.family), "unknown");
-        return ESP_ERR_NOT_FOUND;
-    }
-    s_target.cpuid = cpuid;
-    partno = (cpuid >> 4) & 0xFFFU;
-    if (partno == 0xC24U) {              /* Cortex-M4 */
-        ops = &tf_family_stm32f4_ops;
-    } else if (partno == 0xC27U) {       /* Cortex-M7 */
-        ops = &tf_family_stm32h7_ops;
-    } else {
-        ESP_LOGW(TF_TAG, "unsupported CPUID 0x%08X (part 0x%03X)", (unsigned)cpuid,
-                 (unsigned)partno);
-        return ESP_ERR_NOT_FOUND;
-    }
-    s_target.ops = ops;
-    s_target.family = (ops == &tf_family_stm32f4_ops) ? TF_FAMILY_STM32F4
-                                                      : TF_FAMILY_STM32H7;
+        TF_STAGE(20U);
+        err = tf_swd_link_init(clock_hz, &dpidr);
+        if (err != ESP_OK) {
+            last_err = err;
+            ESP_LOGW(TF_TAG, "probe: SWD link init @%u Hz failed (%s)",
+                     (unsigned)clock_hz, esp_err_to_name(err));
+            (void)tf_swd_recover_bus();
+            continue;
+        }
+        s_target.dpidr = dpidr;
+        s_target.swd_clock_hz = clock_hz;
 
-    TF_STAGE(21U);
-    err = ops->probe(&s_target);
-    if (err != ESP_OK) {
-        snprintf(s_info.family, sizeof(s_info.family), "unknown");
-        return (err == ESP_ERR_NOT_SUPPORTED) ? ESP_ERR_NOT_FOUND : err;
+        TF_STAGE(21U);
+        if (tf_swd_read_u32(TF_REG_CPUID, &cpuid) != ESP_OK) {
+            last_err = ESP_ERR_NOT_FOUND;
+            ESP_LOGW(TF_TAG, "probe: CPUID read @%u Hz failed", (unsigned)clock_hz);
+            (void)tf_swd_recover_bus();
+            continue;
+        }
+        s_target.cpuid = cpuid;
+        saw_cpuid = true;
+        TF_STAGE(22U);
+
+        /* Try the DBGMCU bases ordered by the CPU core class; a wrong base
+         * FAULTs and is skipped after clearing the sticky error. */
+        {
+            tf_core_class_t core = tf_stm32_core_from_cpuid(cpuid);
+            const uint32_t *bases = NULL;
+            size_t base_count = tf_stm32_dbgmc_probe_bases(core, &bases);
+            uint32_t unknown_idcode = 0U;
+            bool have_unknown = false;
+
+            ESP_LOGI(TF_TAG, "probe @%u Hz: DPIDR=0x%08X CPUID=0x%08X (%s)",
+                     (unsigned)clock_hz, (unsigned)dpidr, (unsigned)cpuid,
+                     tf_stm32_core_name(core));
+            for (size_t bi = 0U; bi < base_count; bi++) {
+                uint32_t idcode = 0U;
+                const tf_stm32_part_t *part;
+
+                if (tf_swd_read_u32(bases[bi], &idcode) != ESP_OK) {
+                    (void)tf_swd_recover_bus();
+                    continue;
+                }
+                if (!tf_idcode_sane(idcode)) {
+                    (void)tf_swd_recover_bus();
+                    continue;
+                }
+                part = tf_stm32_part_find((uint16_t)(idcode & 0xFFFU));
+                if (part != NULL) {
+                    err = tf_target_apply_part(part, idcode, cpuid, clock_hz);
+                    if (err == ESP_OK) {
+                        tf_info_fill_from_target();
+                        return ESP_OK;
+                    }
+                    last_err = err;
+                    ESP_LOGW(TF_TAG, "probe: DEV_ID 0x%03X apply failed (%s)",
+                             (unsigned)(idcode & 0xFFFU), esp_err_to_name(err));
+                    (void)tf_swd_recover_bus();
+                    continue;
+                }
+                if (!have_unknown) {
+                    have_unknown = true;
+                    unknown_idcode = idcode;
+                }
+                (void)tf_swd_recover_bus();
+            }
+
+            if (have_unknown) {
+                tf_target_set_unknown(unknown_idcode, cpuid, dpidr, clock_hz);
+                tf_info_fill_from_target();
+                ESP_LOGW(TF_TAG, "probe: unknown DEV_ID 0x%03X at @%u Hz",
+                         (unsigned)(unknown_idcode & 0xFFFU), (unsigned)clock_hz);
+                return ESP_OK;
+            }
+        }
+
+        last_err = ESP_ERR_NOT_FOUND;
+        ESP_LOGW(TF_TAG, "probe: no DBGMCU IDCODE @%u Hz", (unsigned)clock_hz);
+        (void)tf_swd_recover_bus();
     }
-    tf_info_fill_from_target();
-    return ESP_OK;
+
+    if (saw_cpuid) {
+        /* CPUID answered but DBGMCU was unreadable on every base/speed: report
+         * a detected STM32 rather than "not detected" (unsupported for flash). */
+        uint32_t last_cpuid = s_target.cpuid;
+        uint32_t last_dpidr = s_target.dpidr;
+        tf_target_set_unknown(0U, last_cpuid, last_dpidr, s_target.swd_clock_hz);
+        tf_info_fill_from_target();
+        return ESP_OK;
+    }
+
+    snprintf(s_info.family, sizeof(s_info.family), "unknown");
+    return last_err;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -513,7 +746,16 @@ static esp_err_t tf_job_probe(void *arg)
         if (a->info != NULL) {
             *a->info = s_info;
         }
-        tf_set_message("probe ok: %s", s_info.family);
+        if (s_info.supported) {
+            tf_set_message("probe ok: %s @%u kHz", s_info.device,
+                           (unsigned)(s_info.swd_clock_hz / 1000U));
+        } else {
+            tf_set_message("identified %s (%s), flash unsupported", s_info.device,
+                           s_info.series);
+        }
+        ESP_LOGI(TF_TAG, "probe result: family=%s series=%s device=%s supported=%d swd=%u Hz",
+                 s_info.family, s_info.series, s_info.device, (int)s_info.supported,
+                 (unsigned)s_info.swd_clock_hz);
         s_debug_result.info = s_info;
     } else {
         snprintf(s_info.family, sizeof(s_info.family), "unknown");
@@ -558,6 +800,11 @@ static esp_err_t tf_job_flash_begin(void *arg)
     if (err != ESP_OK) {
         tf_session_fail(err, "target probe failed");
         return err;
+    }
+    if (!s_target.supported || s_target.ops == NULL) {
+        tf_session_fail(ESP_ERR_NOT_SUPPORTED,
+                        "target identified but flash not supported for this series");
+        return ESP_ERR_NOT_SUPPORTED;
     }
     if (a->image_size > s_target.max_image_size) {
         tf_session_fail(ESP_ERR_INVALID_SIZE, "image larger than target flash");

@@ -69,15 +69,29 @@ typedef enum {
 
 /** Detected target description (filled by wt_tf_probe() / wt_tf_flash_begin()). */
 typedef struct {
-    bool detected;             /**< true when a supported target was identified */
-    char family[16];           /**< "stm32f4" / "stm32h7" / "unknown" */
+    bool detected;             /**< true when a real STM32 was identified, even
+                                    when its series is not flashable; false
+                                    only when no target answered on SWD */
+    char family[16];           /**< "stm32f4"/"stm32h7"/... (lower-case series)
+                                    or "stm32" for an unknown DEV_ID */
     uint32_t dpidr;            /**< SW-DP IDCODE register */
     uint32_t cpuid;            /**< CPUID (0xE000ED00) */
     uint32_t idcode;           /**< DBGMCU IDCODE (DEV_ID + REV_ID) */
-    uint8_t uid[12];           /**< 96-bit unique device ID */
+    uint8_t uid[12];           /**< 96-bit unique device ID (zeros if the
+                                    UID location is unknown/unreadable) */
     uint32_t flash_base;       /**< main flash base (0x08000000) */
-    uint32_t flash_size;       /**< main flash size in bytes */
+    uint32_t flash_size;       /**< main flash size in bytes (0 when unknown) */
     uint32_t max_image_size;   /**< largest image accepted by flash_begin() */
+
+    /* Extended identification (v2; old fields above keep their meaning). */
+    char series[16];           /**< "STM32H7"/"STM32F4"/.../"unknown" */
+    char device[56];           /**< candidate model list, e.g.
+                                    "STM32H723/H725/H730/H733/H735"; unknown
+                                    DEV_ID -> "unknown (DEV_ID=0x483)" */
+    bool supported;            /**< true only for families with a working
+                                    flash implementation (F4/H7 today) */
+    uint32_t swd_clock_hz;     /**< SWD clock the probe link came up with
+                                    (H7 boards may fall back to 1 MHz/500 kHz) */
 } wt_tf_info_t;
 
 /** Operation status snapshot. */
@@ -104,8 +118,10 @@ esp_err_t wt_tf_init(void);
  * Does not halt the core; takes and releases the DAP engine.
  *
  * @param[out] info detection result (may be NULL).
- * @return ESP_OK when a supported target was found, ESP_ERR_NOT_FOUND for
- *         unsupported/absent targets, other ESP_ERR_* on transport failures.
+ * @return ESP_OK when a target was identified (check info->supported for
+ *         flashability; an unknown DEV_ID still returns ESP_OK with
+ *         family="stm32"), ESP_ERR_NOT_FOUND when nothing answered on SWD,
+ *         other ESP_ERR_* on transport failures.
  */
 esp_err_t wt_tf_probe(wt_tf_info_t *info);
 

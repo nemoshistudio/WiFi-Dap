@@ -30,8 +30,12 @@ extern "C" {
 #define TF_DAP_HANDOFF_TIMEOUT_MS 3000U
 #define TF_DAP_RESTORE_TIMEOUT_MS 1000U
 
-/* SWD clock requested from the DAP engine (hardware-verified default). */
+/* SWD clock requested from the DAP engine.  H7 boards in the field need a
+ * slower link (OpenOCD only identifies the current H7 at <=1 MHz), so probe
+ * walks TF_SWD_CLOCK_HZ -> 1 MHz -> 500 kHz and keeps the first working one. */
 #define TF_SWD_CLOCK_HZ          2000000U
+#define TF_SWD_CLOCK_FALLBACK1_HZ 1000000U
+#define TF_SWD_CLOCK_FALLBACK2_HZ  500000U
 
 /* Cortex-M debug/PPB registers (accessed through the AHB-AP). */
 #define TF_REG_CPUID             0xE000ED00U
@@ -93,11 +97,13 @@ extern "C" {
                                   TF_AP_CSW_HMASTER_DEBUG)
 #define TF_AP_CSW_MODE_MASK      0x00000013U
 
-/* Target families. */
+/* Target families.  TF_FAMILY_STM32_IDENTIFIED = a real STM32 was identified
+ * (CPUID+DBGMCU DEV_ID match) but no flash implementation exists for it yet. */
 typedef enum {
     TF_FAMILY_UNKNOWN = 0,
     TF_FAMILY_STM32F4,
     TF_FAMILY_STM32H7,
+    TF_FAMILY_STM32_IDENTIFIED,
 } tf_family_t;
 
 struct tf_family_ops;
@@ -114,6 +120,12 @@ typedef struct tf_target {
     uint32_t flash_base;
     uint32_t flash_size;
     uint32_t max_image_size;
+
+    /* Detailed identification (static DEV_ID table, tf_stm32_id.c). */
+    char series[16];          /* "STM32H7"; "unknown" if the DEV_ID is unknown */
+    char device[56];          /* candidate model list or "unknown (DEV_ID=0x...)" */
+    bool supported;           /* a flash implementation exists (F4/H7 only) */
+    uint32_t swd_clock_hz;    /* SWD clock the link came up with */
 
     /* STM32F4: false = x64 (PSIZE=3) programming, true = x32 fallback. */
     bool f4_x32_mode;
