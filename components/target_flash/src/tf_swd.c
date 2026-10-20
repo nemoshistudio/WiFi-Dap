@@ -94,21 +94,23 @@ static esp_err_t tf_swd_write_ap(uint32_t reg, uint32_t value)
 
 esp_err_t tf_swd_read_u32(uint32_t addr, uint32_t *value)
 {
-    tf_dap_item_t items[2];
-    uint32_t data[1];
-    size_t count = 1U;
+    uint32_t data[1] = {0U};
 
     if (value == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    items[0].request = TF_REQ_AP_WRITE(TF_AP_TAR);
-    items[0].data = addr;
-    items[1].request = TF_REQ_AP_READ(TF_AP_DRW);
-    items[1].data = 0U;
-
+    /* Single-word reads go through DAP_TransferBlock (auto-increment AP read),
+     * which is the path OpenOCD/OpenOCD-over-USBIP uses on this firmware and
+     * that is known-good.  A posted AP read via DAP_Transfer (TAR write + DRW
+     * read items in one batch) crashed the device on the STM32F407; keep the
+     * block path for every CPUID/DBGMCU/UID/FLASH_SIZE/FLASH_SR read. */
     TF_STAGE(30U);
-    if (tf_dap_transfer(items, 2U, data, &count) != ESP_OK || count != 1U) {
-        ESP_LOGE(TF_TAG, "read32 0x%08X failed", (unsigned)addr);
+    if (tf_swd_write_ap(TF_AP_TAR, addr) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "read32 0x%08X: TAR write failed", (unsigned)addr);
+        return ESP_FAIL;
+    }
+    if (tf_dap_transfer_block(TF_REQ_AP_READ(TF_AP_DRW), 1U, data, true) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "read32 0x%08X: block read failed", (unsigned)addr);
         return ESP_FAIL;
     }
     TF_STAGE(31U);
@@ -186,10 +188,19 @@ static esp_err_t tf_swd_read_words(uint32_t addr, uint32_t word_count, uint32_t 
 
     while (done < word_count) {
         uint32_t chunk = word_count - done;
+        /* The AHB-AP auto-increment wraps at 1 KiB boundaries, so a block read
+         * must not cross a 1 KiB page.  Split the chunk at the page end (480 B
+         * chunks otherwise cross 0x400 boundaries and silently return wrapped
+         * data - flashed-image read-back SHA mismatched because of this). */
+        uint32_t aligned_addr = addr + done * 4U;
+        uint32_t page_left = 0x400U - (aligned_addr & 0x3FFU);
         if (chunk > TF_SWD_WORD_CHUNK) {
             chunk = TF_SWD_WORD_CHUNK;
         }
-        if (tf_swd_write_ap(TF_AP_TAR, addr + done * 4U) != ESP_OK) {
+        if (chunk > page_left / 4U) {
+            chunk = page_left / 4U;
+        }
+        if (tf_swd_write_ap(TF_AP_TAR, aligned_addr) != ESP_OK) {
             return ESP_FAIL;
         }
         if (tf_dap_transfer_block(TF_REQ_AP_READ(TF_AP_DRW), chunk,
@@ -460,9 +471,10 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         return ESP_FAIL;
     }
     TF_STAGE(12U);
-    if (tf_swd_read_ap(TF_AP_CSW, &csw) == ESP_OK && csw != TF_AP_CSW_32BIT_INC) {
-        ESP_LOGW(TF_TAG, "SWD: AP CSW read-back 0x%08X (wanted 0x%08X)",
-                 (unsigned)csw, (unsigned)TF_AP_CSW_32BIT_INC);
+    if (tf_swd_read_ap(TF_AP_CSW, &csw) == ESP_OK &&
+        (csw & TF_AP_CSW_MODE_MASK) != (TF_AP_CSW_32BIT_INC & TF_AP_CSW_MODE_MASK)) {
+        ESP_LOGW(TF_TAG, "SWD: AP CSW read-back 0x%08X (wanted size/inc 0x%08X)",
+                 (unsigned)csw, (unsigned)(TF_AP_CSW_32BIT_INC & TF_AP_CSW_MODE_MASK));
     }
 
     if (dpidr != NULL) {

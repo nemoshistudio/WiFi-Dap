@@ -37,6 +37,8 @@
 #include "web_host_guard.h"
 #include "web_uri_module.h"
 
+#include "tf_panic_capture.h"
+
 #include "wt_target_flash.h"
 #include "wt_target_flash_debug.h"
 
@@ -47,7 +49,7 @@ extern esp_err_t wt_uart_bridge_resume(void) __attribute__((weak));
 
 #define TF_DEBUG_TAG "target_flash_debug"
 #define TF_HTTP_BODY_CHUNK 2048U
-#define TF_HTTP_JSON_MAX 1024U
+#define TF_HTTP_JSON_MAX 1536U
 
 /* Boot counter + previous-boot stage in RTC no-init memory: lets the host see
  * whether a probe caused a device reboot between two status queries. */
@@ -116,9 +118,11 @@ static void tf_http_status_json(char *buf, size_t len)
 {
     wt_tf_status_t st;
     tf_debug_result_t res;
+    tf_panic_capture_t pc;
 
     wt_tf_get_status(&st);
     tf_debug_get_result(&res);
+    tf_panic_capture_get(&pc);
     snprintf(buf, len,
              "{\"ok\":true,\"state\":%d,\"total\":%u,\"written\":%u,\"verified\":%u,"
              "\"percent\":%d,\"err\":%d,\"message\":\"%s\","
@@ -129,7 +133,11 @@ static void tf_http_status_json(char *buf, size_t len)
              "\"dpidr\":\"0x%08X\",\"cpuid\":\"0x%08X\",\"idcode\":\"0x%08X\","
              "\"flash_base\":\"0x%08X\",\"flash_size\":%u,\"max_image_size\":%u,"
              "\"last_stage\":%u,\"prev_stage\":%u,\"boot_count\":%u,"
-             "\"reset_reason\":%d}",
+             "\"reset_reason\":%d,"
+             "\"panic_valid\":%s,\"panic_pc\":\"0x%08X\","
+             "\"panic_reason\":\"%s\",\"panic_desc\":\"%s\","
+             "\"assert_file\":\"%s\",\"assert_line\":%u,"
+             "\"assert_expr\":\"%s\",\"abort\":\"%s\"}",
              (int)st.state, (unsigned)st.total, (unsigned)st.written,
              (unsigned)st.verified, st.percent, st.err, st.message,
              res.valid ? "true" : "false", res.sha_match ? "true" : "false",
@@ -140,7 +148,10 @@ static void tf_http_status_json(char *buf, size_t len)
              (unsigned)res.info.flash_base, (unsigned)res.info.flash_size,
              (unsigned)res.info.max_image_size, (unsigned)tf_debug_last_stage(),
              (unsigned)s_prev_stage, (unsigned)s_boot_count,
-             (int)esp_reset_reason());
+             (int)esp_reset_reason(), pc.valid ? "true" : "false",
+             (unsigned)pc.fault_pc, pc.panic_reason, pc.panic_desc,
+             pc.assert_file, (unsigned)pc.assert_line, pc.assert_expr,
+             pc.abort_details);
 }
 
 static esp_err_t tf_http_handler(httpd_req_t *req)

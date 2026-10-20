@@ -80,8 +80,18 @@ extern "C" {
 #define TF_AP_TAR                0x04U
 #define TF_AP_DRW                0x0CU
 
-/* AHB-AP CSW: 32-bit accesses, single address increment. */
-#define TF_AP_CSW_32BIT_INC      0x00000012U
+/* AHB-AP CSW fields.
+ * CSW_32BIT | CSW_ADDRINC_SINGLE are 0x02 | 0x10.  For Cortex-M debug accesses
+ * the CSW must additionally assert HPROT1 (privileged, bit 25) and
+ * HMASTER_DEBUG (bit 29): without bit 25 the AHB-AP returns FAULT for the
+ * PPB debug region (CPUID/DBGMCU/DHCSR), which is exactly what the STM32F407
+ * bring-up showed.  Matches OpenOCD's CSW_AHB_DEFAULT (minus DbgSwEnable bit31
+ * which this AP does not implement). */
+#define TF_AP_CSW_HPROT_PRIV     (1U << 25)
+#define TF_AP_CSW_HMASTER_DEBUG  (1U << 29)
+#define TF_AP_CSW_32BIT_INC      (0x00000012U | TF_AP_CSW_HPROT_PRIV | \
+                                  TF_AP_CSW_HMASTER_DEBUG)
+#define TF_AP_CSW_MODE_MASK      0x00000013U
 
 /* Target families. */
 typedef enum {
