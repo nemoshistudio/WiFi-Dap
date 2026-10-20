@@ -2,23 +2,27 @@
 #define _UART_BRIDGE_H_
 
 /*
- * UART TCP bridge (WP-114)
- * ------------------------
- * A 2025 implementation of the fork's main/uart_bridge.c, componentized:
- * a plain TCP server on port 1346 (default) forwards bytes to/from the target
- * UART at 115200-8N1.  The first text packet of a new connection may be a
- * decimal baud rate (2-7 digits) that reconfigures the bridge.
+ * UART TCP bridge (WP-114 / WP-203)
+ * --------------------------------
+ * A plain TCP server on port 1346 (default) that forwards bytes to/from the
+ * target UART at 115200-8N1.  The first text packet of a new connection may be
+ * a decimal baud rate (2-7 digits) that reconfigures the UART.
  *
- * UART instance, TX/RX pins, TCP port and baud rate are all project/board
- * contract values from components/board/include/birdiebot_board.h:
- *   BIRDIEBOT_UART_BRIDGE_UART_NUM  UART instance (1 on S3/C3, 2 on ESP32)
- *   UART_BRIDGE_TX_PIN / UART_BRIDGE_RX_PIN
- *   BIRDIEBOT_UART_BRIDGE_PORT      1346  (deprecated A value: 1234)
- *   UART_BRIDGE_BAUDRATE            115200 (deprecated A value: 74880)
+ * The bridge is a *client* of components/uart_service, which is the single
+ * owner of the target UART (pins/port from components/board).  The bridge no
+ * longer installs the UART driver itself, so the Web UART (JSON module 4 and
+ * the WS binary router) can use the same UART at the same time:
+ *   TCP -> uart_service_write()
+ *   UART RX -> uart_service RX fan-out -> bridge stream buffer -> TCP
+ *
+ * Port 1346 is BIRDIEBOT_UART_BRIDGE_PORT from the board contract; the baud and
+ * line settings live in the UART service (default 115200-8N1, deprecated A
+ * values 1234/74880 are not used).
  *
  * The bridge can be compiled out with CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE=n
  * (default y); the functions below then exist as no-ops so that the fixed
- * app_main task creation keeps linking.
+ * app_main task creation keeps linking, and the UART service is not touched
+ * (Web UART keeps working).
  *
  * Security: the bridge is unauthenticated and plain-text.  It is enabled by
  * default for laboratory use only (docs/INTEGRATION-PLAN.md P7.1).
