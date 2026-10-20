@@ -4,5 +4,5 @@ file(GLOB SOURCES *.c)
 idf_component_register(
         SRCS ${SOURCES}
         INCLUDE_DIRS "."
-        PRIV_REQUIRES board wt_common bootloader_support
+        PRIV_REQUIRES board wt_common esp_app_format
 )
