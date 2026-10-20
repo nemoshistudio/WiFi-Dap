@@ -39,6 +39,11 @@ int dap_handle_wait_reset(uint32_t timeout_ms);
  * component, no-op on boards without status LEDs). */
 void dap_led_init(void);
 
+/* Submit one USBIP OUT URB payload to the DAP task.
+ * length = number of payload bytes actually received for this URB (validated
+ * by usbip_server.c, <= DAP_PACKET_SIZE).  The fixed-size DAP packet is
+ * zero-filled behind `length` so stale bytes from a previous URB/session can
+ * never reach DAP_ProcessCommand (docs/security-review-dap.md N8). */
 void handle_dap_data_request(usbip_stage2_header *header, uint32_t length);
 void handle_swo_trace_response(usbip_stage2_header *header);
 void handle_dap_unlink();

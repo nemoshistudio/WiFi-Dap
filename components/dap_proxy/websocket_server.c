@@ -898,19 +898,41 @@ static esp_err_t co_websocket_handshake_process(co_cb_t *cb, co_socket_cb_t *scb
 _Static_assert(WS_DAP_BUFFER_SIZE - WS_DAP_MAX_HEADER >= DAP_PACKET_SIZE,
                "WS-DAP response buffer must hold a full DAP packet");
 
-static void websocket_buffer_malloc(void) {
-    if (ws_process_buffer != NULL)
-        return;
+/* Maximum time to wait for the DAP task to release the ring buffers. */
+#define WEBSOCKET_RESET_WAIT_MS 1000
 
-    /* Ring buffer lifecycle is owned by the DAP task (DAP_handle.h): ask it to
-     * release the USBIP ring buffers and wait until they are gone before this
-     * TCP task starts executing DAP commands inline. */
+/**
+ * Prepare the inline WS-DAP execution buffer.
+ *
+ * @return 0 on success, -1 when the session must be refused.
+ *
+ * N7 (docs/security-review-dap.md, P2): the ring buffers are owned by the DAP
+ * task (DAP_handle.h).  If it does not acknowledge the DELETE request within
+ * the timeout it may still be executing a USBIP command on the shared
+ * DAP_Data/GPIO/SPI state machine, so running DAP_ExecuteCommand() inline from
+ * this TCP task would race with it (protocol corruption / SWD bus contention).
+ * Reject the WS-DAP session instead of continuing.
+ */
+static int websocket_buffer_malloc(void) {
+    if (ws_process_buffer != NULL)
+        return 0;
+
     dap_handle_request_reset(DELETE_HANDLE);
-    if (dap_handle_wait_reset(1000) != 0) {
-        ESP_LOGW(CO_TAG, "DAP ring buffers still busy, continuing WS-DAP session");
+    if (dap_handle_wait_reset(WEBSOCKET_RESET_WAIT_MS) != 0) {
+        ESP_LOGE(CO_TAG, "DAP task still busy after %d ms, refusing WS-DAP session",
+                 WEBSOCKET_RESET_WAIT_MS);
+        return -1;
     }
 
     ws_process_buffer = malloc(WS_DAP_BUFFER_SIZE);
+    if (ws_process_buffer == NULL) {
+        /* P3 (security review §3.2): the old code used the buffer without a
+         * NULL check. */
+        ESP_LOGE(CO_TAG, "failed to allocate WS-DAP response buffer");
+        return -1;
+    }
+
+    return 0;
 }
 
 static void websocket_buffer_free() {
@@ -923,6 +945,11 @@ static void websocket_buffer_free() {
 static void co_websocket_process_dap(uint8_t *data, size_t len) {
     uint8_t *buf;
     int max_offset, res, offset;
+
+    if (ws_process_buffer == NULL) {
+        ESP_LOGE(CO_TAG, "WS-DAP buffer not allocated, frame dropped");
+        return;
+    }
 
     max_offset = co_websocket_get_res_payload_offset(1500);
     /*
@@ -967,7 +994,9 @@ int websocket_worker(int fd, uint8_t *base, uint32_t length) {
             return ret;
     } while (scb.status == CO_SOCKET_HANDSHAKE);
 
-    websocket_buffer_malloc();
+    if (websocket_buffer_malloc() != 0) {
+        return -1;
+    }
 
     // websocket data process
     do {

@@ -287,7 +287,14 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
                     dap_req_num--;
             } else if (likely(ep == 1 && dir == USBIP_DIR_OUT)) {
                 dap_req_num++;
-                handle_dap_data_request(header, length);
+                /*
+                 * N8 (docs/security-review-dap.md, P2): pass the payload bytes
+                 * actually received for this URB (validated above, <=
+                 * DAP_PACKET_SIZE) instead of the TCP buffer capacity.  The DAP
+                 * handler zero-fills the rest so a short OUT packet can never
+                 * forward stale bytes from a previous URB/session.
+                 */
+                handle_dap_data_request(header, data_length);
             } else if (ep == 0) {
                 unpack(base, sizeof(usbip_stage2_header));
                 handleUSBControlRequest(header);

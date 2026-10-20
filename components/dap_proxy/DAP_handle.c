@@ -80,6 +80,10 @@ TaskHandle_t kDAPTaskHandle = NULL;
 
 static DapPacket_t DAPDataProcessed;
 static int dap_respond = 0;
+/* N8: bounded, zero-filled copy of one OUT URB request.  Only the TCP task
+ * (handle_dap_data_request) touches it, and xRingbufferSend() copies it
+ * immediately, so a single static buffer is sufficient. */
+static DapPacket_t dap_request_packet;
 
 // SWO Trace
 static uint8_t *swo_data_to_send = NULL;
@@ -154,29 +158,22 @@ int dap_handle_wait_reset(uint32_t timeout_ms)
 
 void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
 {
-    uint8_t *data_in = (uint8_t *)header;
-    data_in = &(data_in[sizeof(usbip_stage2_header)]);
-    // Point to the beginning of the URB packet
+    const uint8_t *data_in = (const uint8_t *)header + sizeof(usbip_stage2_header);
+    /* Point to the beginning of the URB payload */
 
-#if (USE_WINUSB == 1)
-    send_stage2_submit_data_fast(header, NULL, 0);
-
-    /* The ring buffers can legitimately be absent while a WebSocket/elaphureLink
-     * session owns the DAP data path (DAP_handle.h).  The transport is about to
-     * be torn down in that case, so only answer the zero-length RET_SUBMIT and
-     * do not touch the ring buffer. */
-    if (dap_dataIN_handle == NULL) {
-        printf("DAP: data IN ring buffer not available, request dropped\r\n");
-        return;
+    /* N8 (docs/security-review-dap.md, P2): only the bytes actually received
+     * belong to this request.  The old code always copied DAP_HANDLE_SIZE
+     * (516 B) from the shared TCP buffer, so a short OUT URB forwarded stale
+     * bytes from the previous URB/session into the DAP command parser.
+     * Copy `length` bytes and zero-fill the rest of the fixed-size packet. */
+    if (length > DAP_PACKET_SIZE) {
+        length = DAP_PACKET_SIZE;
     }
 
-    // always send constant size buf -> cuz we don't care about the IN packet size
-    // and to unify the style, we set aside the length of the section
-    xRingbufferSend(dap_dataIN_handle, data_in - sizeof(uint32_t), DAP_HANDLE_SIZE, portMAX_DELAY);
-    if (kDAPTaskHandle)
-        xTaskNotifyGive(kDAPTaskHandle);
-
-#else
+    /* The ring buffers can legitimately be absent while a
+     * WebSocket/elaphureLink session owns the DAP data path (DAP_handle.h).
+     * The transport is about to be torn down in that case, so only answer the
+     * zero-length RET_SUBMIT and do not touch the ring buffer. */
     send_stage2_submit_data_fast(header, NULL, 0);
 
     if (dap_dataIN_handle == NULL) {
@@ -184,11 +181,14 @@ void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
         return;
     }
 
-    xRingbufferSend(dap_dataIN_handle, data_in, DAP_HANDLE_SIZE, portMAX_DELAY);
+    memset(&dap_request_packet, 0, sizeof(dap_request_packet));
+    if (length > 0) {
+        memcpy(dap_request_packet.buf, data_in, length);
+    }
+
+    xRingbufferSend(dap_dataIN_handle, &dap_request_packet, DAP_HANDLE_SIZE, portMAX_DELAY);
     if (kDAPTaskHandle)
         xTaskNotifyGive(kDAPTaskHandle);
-
-#endif
 }
 
 void handle_swo_trace_response(usbip_stage2_header *header)
