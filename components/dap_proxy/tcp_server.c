@@ -44,7 +44,7 @@ int kSock = -1;
 
 void tcp_server_task(void *pvParameters)
 {
-    uint8_t tcp_rx_buffer[1500] = {0};
+    static uint8_t tcp_rx_buffer[4096]; /* static: keep it off the task stack */
     char addr_str[128];
     enum usbip_server_state_t usbip_state = WAIT_DEVLIST;
     uint8_t *data;

@@ -29,7 +29,7 @@
  * P0 (REPORT §8.1): the old code used the network-provided 32-bit data_length
  * directly as recv() size, i.e. any client could overwrite the TCP task stack.
  */
-#define USBIP_STAGE2_RX_BUFFER_SIZE 1500U
+#define USBIP_STAGE2_RX_BUFFER_SIZE 4096U
 #define USBIP_STAGE2_MAX_OUT_DATA \
     (USBIP_STAGE2_RX_BUFFER_SIZE - (uint32_t)sizeof(usbip_stage2_header))
 

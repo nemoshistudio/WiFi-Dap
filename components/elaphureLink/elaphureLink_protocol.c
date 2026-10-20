@@ -39,7 +39,7 @@
 /* EL_PROCESS_BUFFER_SIZE: elaphureLink's own out/in buffer. Must be large
  * enough for one 0x88 vendor frame (4-byte vendor header + one DAP command
  * response) - keep the A-tree value (1500). */
-#define EL_PROCESS_BUFFER_SIZE 1500U
+#define EL_PROCESS_BUFFER_SIZE 4096U /* must hold DAP_PACKET_SIZE (1024) + 4 */
 #define EL_PROCESS_BUFFER_MAX_PAYLOAD (EL_PROCESS_BUFFER_SIZE - 4U)
 #define EL_HANDSHAKE_SIZE 12U
 

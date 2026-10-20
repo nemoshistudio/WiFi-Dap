@@ -892,8 +892,8 @@ static esp_err_t co_websocket_handshake_process(co_cb_t *cb, co_socket_cb_t *scb
 /* The WebSocket-DAP response is built in ws_process_buffer: the payload is
  * written behind a fixed maximum WebSocket header prefix and the header is
  * filled in front of it.  1200 - 4 = 1196 bytes must hold the largest DAP
- * response we ever transmit (normal DAP packets are DAP_PACKET_SIZE = 512). */
-#define WS_DAP_BUFFER_SIZE 1200
+ * response we ever transmit (normal DAP packets are DAP_PACKET_SIZE = 1024). */
+#define WS_DAP_BUFFER_SIZE 4096
 #define WS_DAP_MAX_HEADER  4
 _Static_assert(WS_DAP_BUFFER_SIZE - WS_DAP_MAX_HEADER >= DAP_PACKET_SIZE,
                "WS-DAP response buffer must hold a full DAP packet");
@@ -951,7 +951,7 @@ static void co_websocket_process_dap(uint8_t *data, size_t len) {
         return;
     }
 
-    max_offset = co_websocket_get_res_payload_offset(1500);
+    max_offset = co_websocket_get_res_payload_offset(WS_DAP_BUFFER_SIZE);
     /*
      * max_offset == 4 for any response >= 126 bytes (2-byte payload length +
      * 2-byte extended length): a full DAP_PACKET_SIZE response fits behind it

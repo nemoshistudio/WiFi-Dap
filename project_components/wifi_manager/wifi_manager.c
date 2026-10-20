@@ -246,6 +246,9 @@ void wifi_manager_init(void)
 	}
 
 	ESP_ERROR_CHECK(esp_wifi_start());
+	/* The pre-start set_ps() can be overridden by start/mode changes; force
+	 * no power save again now that the driver is running (debug throughput). */
+	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 	ESP_LOGI(TAG, "wifi started");
 	esp_log_level_set("wifi", ESP_LOG_WARN);
 

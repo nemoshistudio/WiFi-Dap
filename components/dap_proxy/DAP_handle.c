@@ -58,18 +58,11 @@
  * dead-locking the DAP/TCP tasks (analysis/REPORT.md P1 #4). */
 #define DAP_RINGBUF_SEND_RETRIES 500
 
-#if (USE_WINUSB == 1)
 typedef struct
 {
-    uint32_t length;
+    uint32_t length; /* actual DAP response length (0 for requests) */
     uint8_t buf[DAP_PACKET_SIZE];
 } DapPacket_t;
-#else
-typedef struct
-{
-    uint8_t buf[DAP_PACKET_SIZE];
-} DapPacket_t;
-#endif
 
 #define DAP_HANDLE_SIZE (sizeof(DapPacket_t))
 
@@ -344,10 +337,8 @@ void DAP_Thread(void *argument)
                 resLength = (int)DAP_PACKET_SIZE;
             }
 
-            // now prepare to reply
-#if (USE_WINUSB == 1)
+            // now prepare to reply (actual length for USBIP/WinUSB)
             DAPDataProcessed.length = resLength;
-#endif
             if (dap_push_response(&DAPDataProcessed))
             {
                 if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
@@ -384,11 +375,11 @@ int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num)
         item = (DapPacket_t *)xRingbufferReceiveUpTo(dap_dataOUT_handle, &packetSize,
                                                      portMAX_DELAY, DAP_HANDLE_SIZE);
         if (packetSize == DAP_HANDLE_SIZE) {
-#if (USE_WINUSB == 1)
-            send_stage2_submit_data_fast((usbip_stage2_header *)buf, item->buf, item->length);
-#else
-            send_stage2_submit_data_fast((usbip_stage2_header *)buf, item->buf, DAP_HANDLE_SIZE);
-#endif
+            uint32_t reply_len = item->length;
+            if (reply_len > DAP_PACKET_SIZE) {
+                reply_len = DAP_PACKET_SIZE;
+            }
+            send_stage2_submit_data_fast((usbip_stage2_header *)buf, item->buf, (int32_t)reply_len);
 
             if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
                 --dap_respond;

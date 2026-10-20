@@ -34,7 +34,9 @@
 /// 1024 for High-speed USB HID and 512 for High-speed USB WinUSB.
 
 #if (USE_WINUSB == 1)
-    #define DAP_PACKET_SIZE 512U // 512 for WinUSB.
+    /* USBIP/WinUSB bulk transport: larger packets reduce the number of
+     * round-trips for DAP_TransferBlock (USBIP is latency-bound over Wi-Fi). */
+    #define DAP_PACKET_SIZE 1024U /* keeps OpenOCD DAP_Transfer count (u8) <= 255 */
 #else
     #define DAP_PACKET_SIZE 255U // 255 for USB HID
 #endif
