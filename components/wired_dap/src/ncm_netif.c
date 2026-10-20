@@ -37,6 +37,8 @@
 
 #include "tinyusb.h"
 #include "tinyusb_net.h"
+#include "esp_private/periph_ctrl.h" /* RCC atomic env for usb_serial_jtag_ll */
+#include "hal/usb_serial_jtag_ll.h"  /* C1: release USJ PHY before USB-OTG/NCM */
 
 /* lwIP <-> esp_netif glue: ethernetif_init / ethernetif_input from the
  * IDF esp_netif lwIP port (same header used by the IDF usb_ncm_iface example). */
@@ -116,6 +118,16 @@ static esp_err_t ncm_netif_recv_cb(void *buffer, uint16_t len, void *ctx)
 
 static esp_err_t ncm_usb_init(void)
 {
+    /* USB-Serial-JTAG and USB-OTG share the S3 USB PHY.  The ROM/USJ
+     * controller stays enabled after boot; release its pad and clock before
+     * installing TinyUSB, otherwise tinyusb_driver_install() fails and the
+     * host keeps seeing 303a:1001 instead of the NCM device. */
+    int __DECLARE_RCC_ATOMIC_ENV __attribute__((unused));
+    usb_serial_jtag_ll_enable_pad(false);
+    usb_serial_jtag_ll_enable_bus_clock(false);
+    usb_serial_jtag_ll_reset_register();
+    vTaskDelay(pdMS_TO_TICKS(20));
+
     const tinyusb_config_t tusb_cfg = {
         .external_phy = false,
         .self_powered = false,
