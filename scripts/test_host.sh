@@ -7,9 +7,12 @@
 #
 #   1. C unit tests:  tests/host/test_wifi_cred_logic.c
 #                     (pure logic of project_components/wifi_manager/wifi_cred_logic.c)
-#   2. Python tests:  tests/host/test_protocol_frame.py   JSON/WS wire contract
+#   2. DAP ASan harness: tests/host/dap/ (N1 0x7E recursion, N6 SWJ_Pins wait,
+#                     N9 TransferBlock bounds; compiled from the repo DAP.c)
+#   3. Python tests:  tests/host/test_protocol_frame.py   JSON/WS wire contract
 #                     tests/host/test_ota_sha.py         OTA upload contract
 #                     tests/host/test_partitions.py      frozen partition tables
+#                     tests/host/test_security_regressions.py  N2/N8/N9 guards
 #
 # Output is TAP-ish (one "ok/not ok" line per suite + "#" diagnostics) and the
 # exit code is the aggregate (0 = all suites passed).
@@ -101,9 +104,10 @@ if "$CC_BIN" "${cflags[@]}" -I"$ROOT/project_components/wifi_manager" \
     else
         c_status=$?
     fi
-    c_checks="$(grep -c '^ok\|^not ok' "$LOG_DIR/c-run.log" 2>/dev/null || echo 0)"
-    c_pass="$(grep -c '^ok ' "$LOG_DIR/c-run.log" 2>/dev/null || echo 0)"
-    c_xfail="$(grep -c '^not ok .*# TODO' "$LOG_DIR/c-run.log" 2>/dev/null || echo 0)"
+    c_checks="$(grep -c '^ok\|^not ok' "$LOG_DIR/c-run.log" 2>/dev/null || true)"
+    c_pass="$(grep -c '^ok ' "$LOG_DIR/c-run.log" 2>/dev/null || true)"
+    c_xfail="$(grep -c '^not ok .*# TODO' "$LOG_DIR/c-run.log" 2>/dev/null || true)"
+    c_checks="${c_checks:-0}"; c_pass="${c_pass:-0}"; c_xfail="${c_xfail:-0}"
     c_unexpected="$(grep '^not ok ' "$LOG_DIR/c-run.log" 2>/dev/null | grep -vc '# TODO' || true)"
     c_unexpected="${c_unexpected:-0}"
     diag "C wifi_cred_logic: checks=$c_checks pass=$c_pass expected-fail=$c_xfail unexpected-fail=$c_unexpected"
@@ -119,7 +123,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Python unittest suites (contract tests, stdlib only)
+# 2. DAP command-layer ASan harness (N1 / N6 / N9)
+#    Source: dap-dev ASan harness, integrated under tests/host/dap/ (see its
+#    README for provenance). It compiles the repository DAP.c against a stub
+#    DAP_config.h, so it is a live regression for the security-review fixes.
+# ---------------------------------------------------------------------------
+dap_runner="$HOST_DIR/dap/run.sh"
+dap_log="$LOG_DIR/dap.log"
+if [ -x "$dap_runner" ]; then
+    if SANITIZE="$use_sanitize" BUILD_DIR="$BUILD_DIR/dap" \
+            ASAN_OPTIONS="detect_leaks=0" "$dap_runner" >"$dap_log" 2>&1; then
+        dap_status=0
+    else
+        dap_status=$?
+    fi
+    dap_summary="$(grep -m1 -oE '[0-9]+ checks passed, [0-9]+ failed' "$dap_log" || true)"
+    diag "DAP harness (N1/N6/N9): ${dap_summary:-no summary line} (ASan/UBSan=$use_sanitize)"
+    if [ "$dap_status" -eq 0 ]; then
+        tap_ok "DAP command layer N1/N6/N9 (ASan: 0x7E recursion + TransferBlock bounds)"
+    else
+        tap_fail "DAP command layer N1/N6/N9 (ASan: 0x7E recursion + TransferBlock bounds)"
+        sed 's/^/#   /' "$dap_log" | tail -80
+    fi
+else
+    tap_fail "DAP host harness runner missing (tests/host/dap/run.sh)"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Python unittest suites (contract tests, stdlib only)
 # ---------------------------------------------------------------------------
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -m unittest discover \
     -s "$HOST_DIR" -p 'test_*.py' -v >"$LOG_DIR/py.log" 2>&1
