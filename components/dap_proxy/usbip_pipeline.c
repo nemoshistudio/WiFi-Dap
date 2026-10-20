@@ -19,6 +19,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "esp_timer.h"
+
 #include "lwip/sockets.h"
 
 #include "main/dap_configuration.h"
@@ -56,6 +58,9 @@ static uint32_t s_stat_queue_resp;
 static uint32_t s_stat_drop;
 static uint32_t s_stat_full;
 static uint32_t s_stat_error;
+static uint32_t s_stat_stray;
+static uint32_t s_stat_stale;
+static int64_t s_last_urb_us;
 
 /* Raw USBIP header: base.command(4) seqnum(4) devid(4) dir(4) ep(4). */
 static uint32_t raw_hdr_seqnum(const uint8_t *hdr)
@@ -97,6 +102,9 @@ void usbip_pipeline_session_start(void)
     memset(s_in_hdrs, 0, sizeof(s_in_hdrs));
     s_stat_out = s_stat_in = s_stat_send_now = s_stat_queue_in = 0;
     s_stat_queue_resp = s_stat_drop = s_stat_full = s_stat_error = 0;
+    s_stat_stray = 0;
+    s_stat_stale = 0;
+    s_last_urb_us = esp_timer_get_time();
 
     /* Drop stale responses from the previous session: the previous TCP
      * connection may have been torn down before the DAP task applied its ring
@@ -127,11 +135,60 @@ void usbip_pipeline_session_end(void)
     xSemaphoreGive(s_mux);
 
     printf("USBIP pipeline: stats out=%lu in=%lu send_now=%lu queue_in=%lu "
-           "queue_resp=%lu drop=%lu ring_full=%lu error=%lu\r\n",
+           "queue_resp=%lu drop=%lu ring_full=%lu error=%lu stray=%lu stale=%lu\r\n",
            (unsigned long)s_stat_out, (unsigned long)s_stat_in,
            (unsigned long)s_stat_send_now, (unsigned long)s_stat_queue_in,
            (unsigned long)s_stat_queue_resp, (unsigned long)s_stat_drop,
-           (unsigned long)s_stat_full, (unsigned long)s_stat_error);
+           (unsigned long)s_stat_full, (unsigned long)s_stat_error,
+           (unsigned long)s_stat_stray, (unsigned long)s_stat_stale);
+}
+
+/* Drop pipeline leftovers from a previous host session.
+ *
+ * The USBIP TCP connection lives in the kernel vhci port and survives an
+ * OpenOCD restart, so a new openocd process inherits the pairing state of the
+ * previous one.  A pending read/write URB that the old process cancelled may
+ * leave a parked IN or a stored response behind; the new session's first
+ * command would then be paired with that stale entry and time out ("CMD_INFO
+ * failed").
+ *
+ * Invariant: a live CMSIS-DAP host always has at most one round-trip in
+ * flight per command, and keeps submitting URBs while a command is outstanding.
+ * Therefore a leftover with no URB activity for STALE_IDLE_MS can only belong
+ * to a previous session and is safe to discard.  Slow DAP operations are not
+ * affected: the host has already submitted the matching IN URB, so the state is
+ * paired before the long DAP processing starts.
+ */
+#define USBIP_PL_STALE_IDLE_US (2000 * 1000) /* > any plausible Wi-Fi RTT */
+
+static void usbip_pipeline_reset_stale_locked(void)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (usbip_pl_idle(&s_state)) {
+        s_last_urb_us = now;
+        return;
+    }
+    if (s_last_urb_us != 0 && (now - s_last_urb_us) < USBIP_PL_STALE_IDLE_US) {
+        return;
+    }
+
+    usbip_pl_reset(&s_state);
+    memset(s_in_hdrs, 0, sizeof(s_in_hdrs));
+    {
+        uint32_t stale_len = 0;
+        while (dap_take_response(s_resp_buf, sizeof(s_resp_buf), &stale_len)) {
+            /* drained */
+        }
+    }
+    s_stat_stale++;
+    printf("USBIP pipeline: stale session state dropped after idle gap\r\n");
+    s_last_urb_us = now;
+}
+
+static void usbip_pipeline_touch_locked(void)
+{
+    s_last_urb_us = esp_timer_get_time();
 }
 
 void usbip_pipeline_register_out(uint32_t seqnum)
@@ -143,8 +200,10 @@ void usbip_pipeline_register_out(uint32_t seqnum)
     }
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
+    usbip_pipeline_reset_stale_locked();
     ok = usbip_pl_register_cmd(&s_state, seqnum);
     s_stat_out++;
+    usbip_pipeline_touch_locked();
     if (!ok) {
         /* Should not happen with the OpenOCD queue depth (3); if a host keeps
          * pushing commands faster than the DAP task drains them, finish the
@@ -171,7 +230,29 @@ bool usbip_pipeline_handle_in(uint8_t *raw_header48)
     seq = raw_hdr_seqnum(raw_header48);
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
+    usbip_pipeline_reset_stale_locked();
     s_stat_in++;
+    usbip_pipeline_touch_locked();
+
+    /* Stray read URB (OpenOCD cmsis_dap_flush_read sends reads before any
+     * command): answer an empty RET_SUBMIT immediately, exactly like the
+     * legacy fast_reply() path with dap_req_num==0.  Parking it would make it
+     * swallow the first real DAP response (observed with OpenOCD master:
+     * "CMD_INFO failed" after the flush). */
+    if (usbip_pl_idle(&s_state)) {
+        usbip_stage2_header *reply = (usbip_stage2_header *)raw_header48;
+
+        reply->base.command = PP_HTONL(USBIP_STAGE2_RSP_SUBMIT);
+        reply->base.direction = PP_HTONL(USBIP_DIR_OUT);
+        reply->u.ret_submit.status = 0;
+        reply->u.ret_submit.data_length = 0;
+        reply->u.ret_submit.error_count = 0;
+        usbip_network_send(kSock, raw_header48, sizeof(usbip_stage2_header), 0);
+        s_stat_stray++;
+        xSemaphoreGive(s_mux);
+        return true;
+    }
+
     action = usbip_pl_in(&s_state, seq, &slot);
 
     if (action == USBIP_PL_IN_QUEUE) {
@@ -236,7 +317,9 @@ bool usbip_pipeline_handle_unlink(uint8_t *header48)
     }
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
+    usbip_pipeline_reset_stale_locked();
     matched = usbip_pl_unlink(&s_state, header->u.cmd_unlink.seqnum);
+    usbip_pipeline_touch_locked();
     xSemaphoreGive(s_mux);
 
     /* Always answer the unlink URB (status -1 = "unlinked" as before); the
@@ -270,6 +353,7 @@ void usbip_pipeline_complete_response(const uint8_t *data, uint32_t length)
     }
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
+    usbip_pipeline_touch_locked();
     action = usbip_pl_response(&s_state, &slot, &seq);
 
     if (action == USBIP_PL_RESP_SEND) {
@@ -310,6 +394,54 @@ bool usbip_pipeline_is_active(void)
 
 void usbip_pipeline_session_start(void) {}
 void usbip_pipeline_session_end(void) {}
+/* Drop pipeline leftovers from a previous host session.
+ *
+ * The USBIP TCP connection lives in the kernel vhci port and survives an
+ * OpenOCD restart, so a new openocd process inherits the pairing state of the
+ * previous one.  A pending read/write URB that the old process cancelled may
+ * leave a parked IN or a stored response behind; the new session's first
+ * command would then be paired with that stale entry and time out ("CMD_INFO
+ * failed").
+ *
+ * Invariant: a live CMSIS-DAP host always has at most one round-trip in
+ * flight per command, and keeps submitting URBs while a command is outstanding.
+ * Therefore a leftover with no URB activity for STALE_IDLE_MS can only belong
+ * to a previous session and is safe to discard.  Slow DAP operations are not
+ * affected: the host has already submitted the matching IN URB, so the state is
+ * paired before the long DAP processing starts.
+ */
+#define USBIP_PL_STALE_IDLE_US (2000 * 1000) /* > any plausible Wi-Fi RTT */
+
+static void usbip_pipeline_reset_stale_locked(void)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (usbip_pl_idle(&s_state)) {
+        s_last_urb_us = now;
+        return;
+    }
+    if (s_last_urb_us != 0 && (now - s_last_urb_us) < USBIP_PL_STALE_IDLE_US) {
+        return;
+    }
+
+    usbip_pl_reset(&s_state);
+    memset(s_in_hdrs, 0, sizeof(s_in_hdrs));
+    {
+        uint32_t stale_len = 0;
+        while (dap_take_response(s_resp_buf, sizeof(s_resp_buf), &stale_len)) {
+            /* drained */
+        }
+    }
+    s_stat_stale++;
+    printf("USBIP pipeline: stale session state dropped after idle gap\r\n");
+    s_last_urb_us = now;
+}
+
+static void usbip_pipeline_touch_locked(void)
+{
+    s_last_urb_us = esp_timer_get_time();
+}
+
 void usbip_pipeline_register_out(uint32_t seqnum) { (void)seqnum; }
 
 bool usbip_pipeline_handle_in(uint8_t *raw_header48)

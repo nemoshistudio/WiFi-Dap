@@ -194,6 +194,28 @@ static int test_wrap_around(void)
     return 0;
 }
 
+/* Idle detection: a stray IN (flush read) must be recognised while nothing is
+ * outstanding, and not after a command/response/IN is pending. */
+static int test_idle_detection(void)
+{
+    unsigned slot;
+    uint32_t seq;
+
+    reset();
+    CHECK(usbip_pl_idle(&st));
+    CHECK(usbip_pl_register_cmd(&st, 1));
+    CHECK(!usbip_pl_idle(&st));
+    CHECK(usbip_pl_in(&st, 11, &slot) == USBIP_PL_IN_QUEUE);
+    CHECK(!usbip_pl_idle(&st));
+    CHECK(usbip_pl_response(&st, &slot, &seq) == USBIP_PL_RESP_SEND);
+    CHECK(usbip_pl_idle(&st));
+    /* stray IN while a response is stored must not be treated as idle */
+    CHECK(usbip_pl_register_cmd(&st, 2));
+    CHECK(usbip_pl_response(&st, &slot, &seq) == USBIP_PL_RESP_QUEUE);
+    CHECK(!usbip_pl_idle(&st));
+    return 0;
+}
+
 /* Command ring full: registration must fail instead of overwriting. */
 static int test_cmd_ring_full(void)
 {
@@ -214,7 +236,8 @@ int main(void)
     checks = 0;
     if (test_writes_then_reads() || test_ping_pong() || test_reads_before_responses() ||
         test_unlink_pending_in() || test_unlink_pending_cmd() ||
-        test_in_ring_full() || test_wrap_around() || test_cmd_ring_full()) {
+        test_in_ring_full() || test_wrap_around() || test_cmd_ring_full() ||
+        test_idle_detection()) {
         return 1;
     }
     printf("ok - usbip pipeline logic (%d checks)\n", checks);

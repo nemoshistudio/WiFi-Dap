@@ -100,4 +100,10 @@ bool usbip_pl_unlink(usbip_pl_state_t *st, uint32_t seq);
 unsigned usbip_pl_pending_in(const usbip_pl_state_t *st);
 unsigned usbip_pl_pending_resp(const usbip_pl_state_t *st);
 
+/* True when no command ticket, stored response or parked IN URB is pending.
+ * A SUBMIT/DIR_IN in this state is a stray read (e.g. OpenOCD's flush_read
+ * before init) and must be answered with an empty RET_SUBMIT, not parked -
+ * otherwise it would consume the next real response. */
+bool usbip_pl_idle(const usbip_pl_state_t *st);
+
 #endif /* __USBIP_PIPELINE_LOGIC_H__ */

@@ -142,3 +142,8 @@ unsigned usbip_pl_pending_resp(const usbip_pl_state_t *st)
 {
     return st->resp_queued;
 }
+
+bool usbip_pl_idle(const usbip_pl_state_t *st)
+{
+    return (st->cmd_count == 0U) && (st->resp_queued == 0U) && (st->in_count == 0U);
+}
