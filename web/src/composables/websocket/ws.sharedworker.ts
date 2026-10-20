@@ -3,6 +3,7 @@ import {ControlEvent, ControlMsgType} from "@/api";
 import {WebsocketWrapper} from "@/composables/websocket/websocketWrapper";
 import {toClient, toClientCtrl, toServer} from "@/composables/broadcastChannelDef";
 import {isDevMode} from "@/composables/buildMode";
+import {normalizeAuthToken} from "@/composables/websocket/auth";
 
 declare const self: SharedWorkerGlobalScope;
 
@@ -25,9 +26,13 @@ self.onconnect = function(event) {
             console.log('Received message in SharedWorker:', e.data);
         }
         if (e.data.type === ControlMsgType.WS_SET_HOST) {
-            if (host === "" && e.data.data !== "") {
-                host = e.data.data;
-                websocket.init(host, msgBroadcast, ctrlBroadcast);
+            const nextHost = typeof e.data.data === 'string' ? e.data.data : '';
+            const token = normalizeAuthToken(e.data.token);
+            // Keep the first host (multi-tab / multi-device safety) but allow a
+            // later tab to supply/refresh the auth token for the same device.
+            if (nextHost !== "" && (host === "" || host === nextHost)) {
+                host = nextHost;
+                websocket.init(host, msgBroadcast, ctrlBroadcast, token);
             }
         } else if (e.data.type === ControlMsgType.WS_GET_STATE) {
             websocket.getSocketStatus();

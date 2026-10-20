@@ -1,6 +1,7 @@
 {
-  "name": "vue-project",
-  "version": "0.0.0",
+  "name": "birdiebot-wifi-dap-web",
+  "version": "1.0.0",
+  "description": "WiFi Dap Web UI",
   "private": true,
   "type": "module",
   "scripts": {

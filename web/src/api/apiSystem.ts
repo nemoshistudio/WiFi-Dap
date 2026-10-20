@@ -9,6 +9,8 @@ export enum WtSytemCmd {
 export interface ISysFmInfo extends ApiJsonMsg {
     fm_ver: string;
     upd_date: string;
+    /** 固件协议版本（docs/protocol.md §2.1 / docs/versioning.md §5.2）；旧固件无此字段 */
+    protocol_version?: number;
 }
 
 export interface ISysHwInfo extends ApiJsonMsg {
@@ -18,6 +20,10 @@ export interface ISysHwInfo extends ApiJsonMsg {
 
 export interface ISysInfo {
     sn: string;
+    /** 硬件版本，构建注入，可为空字符串 */
+    hw_ver?: string;
+    /** 生产日期，构建注入，可为空字符串 */
+    mf_date?: string;
 }
 
 export function wt_sys_get_fm_info() {

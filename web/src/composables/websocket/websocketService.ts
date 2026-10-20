@@ -4,6 +4,7 @@ import {toClient, toClientCtrl, toServer} from "@/composables/broadcastChannelDe
 import type {ControlMsg, ServerMsg} from "@/api";
 import {ControlMsgType} from "@/api";
 import {isDevMode} from "@/composables/buildMode";
+import {resolveAuthToken} from "@/composables/websocket/auth";
 
 export interface IWebsocketService {
     init(host: string,
@@ -27,6 +28,7 @@ class WebsocketShared implements IWebsocketService {
     private msgCallback: (msg: ServerMsg) => any;
 
     private ctrlCallback: (msg: ControlMsg) => any;
+    private readonly portMessageProxy: (ev: MessageEvent<ControlMsg>) => void;
 
     public static getInstance(): IWebsocketService {
         if (!WebsocketShared.instance) {
@@ -46,7 +48,11 @@ class WebsocketShared implements IWebsocketService {
         this.ctrlCallback = () => {}
         this.messageEventProxy = this.messageEventProxy.bind(this);
         this.controlEventProxy = this.controlEventProxy.bind(this);
+        this.portMessageProxy = this.onPortMessage.bind(this);
         this.worker = new MyWorker();
+        // Worker 通过 port 回消息（当前只有 LOADED 握手）；D 的实现从未监听端口，
+        // 导致 ControlEvent.LOADED 成为死枚举值。这里统一转给 ctrlCallback。
+        this.worker.port.onmessage = this.portMessageProxy;
     }
 
     init(host: string, msgCallback: (msg: ServerMsg) => any, ctrlCallback: (msg: ControlMsg) => any): void {
@@ -59,7 +65,11 @@ class WebsocketShared implements IWebsocketService {
         this.ctrlCallback = ctrlCallback;
         toClient.addEventListener("message", this.messageEventProxy);
         toClientCtrl.addEventListener("message", this.controlEventProxy);
-        this.worker.port.postMessage({type: ControlMsgType.WS_SET_HOST, data: host} as ControlMsg)
+        this.worker.port.postMessage({
+            type: ControlMsgType.WS_SET_HOST,
+            data: host,
+            token: resolveAuthToken(),
+        } as ControlMsg)
     }
 
     deinit(): void {
@@ -82,6 +92,19 @@ class WebsocketShared implements IWebsocketService {
     controlEventProxy(ev: MessageEvent<ControlMsg>) {
 
         this.ctrlCallback(ev.data);
+    }
+
+    private onPortMessage(ev: MessageEvent<ControlMsg>) {
+        const msg = ev.data;
+        if (isDevMode()) {
+            console.log("SharedWorker port message:", msg);
+        }
+        if (!msg || typeof msg !== "object") {
+            return;
+        }
+        if (msg.type === ControlMsgType.WS_EVENT) {
+            this.ctrlCallback(msg);
+        }
     }
 
     getSocketStatus() {
@@ -110,7 +133,7 @@ class WebsocketClassic implements IWebsocketService{
         if (isDevMode()) {
             console.log("Websocket Service INIT called", WebsocketClassic.count);
         }
-        this.socket.init(host, msgCallback, ctrlCallback);
+        this.socket.init(host, msgCallback, ctrlCallback, resolveAuthToken());
     }
 
     deinit(): void {

@@ -1,19 +1,30 @@
+/**
+ * Build-time feature switches (Vite env, injected by scripts/gen-env.mjs).
+ *
+ * Trial mode was removed by contract (docs/i18n-keys.md §10.2); do not add it back.
+ * Feature flags default to enabled so a plain `npm run build` keeps the full UI.
+ */
+
 export function isDevMode() {
     return import.meta.env.VITE_APP_MODE === 'dev';
 }
 
+/**
+ * OTA page/module switch. Kept false for Wave 1; WP-207 enables it when the
+ * browser upload flow is ready (docs/versioning.md §6, docs/ota-local-upload.md).
+ */
 export function isOTAEnabled() {
     return import.meta.env.VITE_ENABLE_OTA === 'true' || false;
 }
 
-export function isTrialMode() {
-    return import.meta.env.VITE_TRIAL_MODE === "true" || false;
+export function isDataFlowEnabled() {
+    return import.meta.env.VITE_ENABLE_DATA_FLOW !== 'false';
 }
 
-export function getTrialDate() {
-    return import.meta.env.VITE_TRIAL_DATE || "1970-01-01";
+export function isUartEnabled() {
+    return import.meta.env.VITE_ENABLE_UART !== 'false';
 }
 
-export function getTrialMsg() {
-    return import.meta.env.VITE_TRIAL_MSG || "感谢您试用允斯开放固件,若您喜欢,欢迎关注我的B站或者加入允斯群,新项目和更新都会在第一时间在这里发布. 使用愉快^_^";
+export function isWidgetEnabled() {
+    return import.meta.env.VITE_ENABLE_WIDGET !== 'false';
 }

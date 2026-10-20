@@ -1,6 +1,7 @@
 import type {ControlMsg, ServerMsg} from "@/api";
 import {ControlEvent, ControlMsgType} from "@/api";
 import {isDevMode} from "@/composables/buildMode";
+import {buildAuthRequest, buildWebSocketUrl} from "@/composables/websocket/auth";
 
 
 interface IWebsocket {
@@ -29,6 +30,7 @@ class WebsocketDummy implements IWebsocket {
 class OneTimeWebsocket implements IWebsocket {
     private readonly heartBeatTimeout: number = 1;
     private readonly host: string;
+    private readonly token: string;
     private readonly intervalId: number;
     private readonly msgCallback: (ev: ServerMsg) => any;
     private readonly ctrlCallback: (msg: ControlMsg) => any;
@@ -42,9 +44,11 @@ class OneTimeWebsocket implements IWebsocket {
     constructor(host: string,
                 msgCallback: (ev: ServerMsg) => any,
                 ctrlCallback: (msg: ControlMsg) => any,
-                closeCallback: () => void
+                closeCallback: () => void,
+                token: string = ''
     ) {
         this.host = host;
+        this.token = token;
         this.stoped = false;
         this.cleared = false;
         this.hasBeenConnected = false;
@@ -54,7 +58,7 @@ class OneTimeWebsocket implements IWebsocket {
         this.heartBeatTimeCount = 0;
         this.intervalId = 0;
 
-        this.socket = new WebSocket(`ws://${this.host}/ws`);
+        this.socket = new WebSocket(buildWebSocketUrl(this.host, this.token));
         this.setSocketProp();
 
         this.intervalId = setInterval(() => {
@@ -121,6 +125,11 @@ class OneTimeWebsocket implements IWebsocket {
             }
             this.heartBeatTimeCount = 0;
             this.hasBeenConnected = true;
+            // Protocol requires the auth frame before any business request
+            // (docs/protocol.md §1). No token => auth disabled / lab mode.
+            if (this.token) {
+                this.socket.send(buildAuthRequest(this.token));
+            }
             const msg: ControlMsg = {
                 type: ControlMsgType.WS_EVENT,
                 data: ControlEvent.CONNECTED,
@@ -193,6 +202,7 @@ export class WebsocketWrapper {
     private ctrlCallback: (msg: ControlMsg) => any;
     private timeoutId: number;
     private host: string;
+    private token: string;
     private stoped: boolean;
 
     constructor() {
@@ -201,6 +211,7 @@ export class WebsocketWrapper {
         this.ctrlCallback = () => {};
         this.timeoutId = 0;
         this.host = "";
+        this.token = "";
         this.stoped = false;
 
         this.closeCallback = this.closeCallback.bind(this);
@@ -208,23 +219,26 @@ export class WebsocketWrapper {
 
     init(host: string,
          msgCallback: (ev: ServerMsg) => any,
-         ctrlCallback: (msg: ControlMsg) => any)
+         ctrlCallback: (msg: ControlMsg) => any,
+         token: string = '')
     {
-        if (this.host === host) {
+        if (this.host === host && this.token === token) {
             return;
         }
-        this.newConnection(host, msgCallback, ctrlCallback);
+        this.newConnection(host, msgCallback, ctrlCallback, token);
     }
 
     private newConnection(host: string,
               msgCallback: (ev: ServerMsg) => any,
-              ctrlCallback: (msg: ControlMsg) => any)
+              ctrlCallback: (msg: ControlMsg) => any,
+              token: string)
     {
         this.socket.close();
         this.host = host;
+        this.token = token;
         this.msgCallback = msgCallback;
         this.ctrlCallback = ctrlCallback;
-        this.socket = new OneTimeWebsocket(host, this.msgCallback, this.ctrlCallback, this.closeCallback);
+        this.socket = new OneTimeWebsocket(host, this.msgCallback, this.ctrlCallback, this.closeCallback, token);
     }
 
     private closeCallback() {
@@ -232,7 +246,7 @@ export class WebsocketWrapper {
             return;
         }
         this.timeoutId = setTimeout(() =>
-                this.newConnection(this.host, this.msgCallback, this.ctrlCallback),
+                this.newConnection(this.host, this.msgCallback, this.ctrlCallback, this.token),
             1000);
     }
 
