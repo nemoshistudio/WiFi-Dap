@@ -34,6 +34,12 @@ typedef struct {
 extern uint8_t tf_dap_last_status;
 extern uint8_t tf_dap_last_count;
 
+/** Last raw CMSIS-DAP response (echo..end) and its length, for byte-level
+ *  bring-up comparison against a known-working host command sequence. */
+#define TF_DAP_LAST_RESP_MAX 16U
+extern uint8_t tf_dap_last_resp[TF_DAP_LAST_RESP_MAX];
+extern uint8_t tf_dap_last_resp_len;
+
 /** DAP_Connect(SWD) - returns the connected port byte. */
 esp_err_t tf_dap_connect_swd(uint8_t *port_out);
 
