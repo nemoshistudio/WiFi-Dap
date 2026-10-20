@@ -689,11 +689,9 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT_ENABLE(void)
   // A 2025 fork: dedicated-GPIO OEN user CSR bit 0
   SWDIO_OUT_ENABLE();
 #elif defined CONFIG_IDF_TARGET_ESP32S3
-  /* WP-101: the fork left this empty. DAP_SPI_Deinit() routes SWDIO to
-   * CORE1_GPIO_OUT0 and selects the GPIO peripheral as pad OEN source
-   * (oen_sel=1), so the pad output enable must be toggled here during the SWD
-   * turnaround; otherwise host and target both drive SWDIO (analysis R2). */
-  gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
+  /* A 2025 behaviour: SWDIO pad OEN stays enabled from DAP_SPI_Deinit().
+   * Toggling it here was tested on hardware and broke the second SWD
+   * transaction (JUNK ACK); keep the proven implementation. */
 #endif
 }
 
@@ -714,9 +712,7 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT_DISABLE(void)
   SWDIO_OUT_DISABLE();
   PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI]);
 #elif defined CONFIG_IDF_TARGET_ESP32S3
-  // Release the pad: SWDIO becomes input only during the ACK / data phase.
-  gpio_ll_output_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
-  gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
+  /* A 2025 behaviour: see PIN_SWDIO_OUT_ENABLE above. */
 #endif
 }
 

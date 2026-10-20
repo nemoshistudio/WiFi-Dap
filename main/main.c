@@ -94,6 +94,12 @@ static void ota_confirm_schedule(void)
 }
 #endif /* CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE && !CONFIG_BIRDIEBOT_OTA_AUTO_MARK_VALID */
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#define DAP_TASK_AFFINITY 1 /* dedicated GPIO bit-banging must stay on core 1 */
+#else
+#define DAP_TASK_AFFINITY 0
+#endif
+
 void app_main()
 {
 	/* docs/versioning.md §2.4: first log line, before WiFi/mDNS can flood it. */
@@ -120,10 +126,10 @@ void app_main()
 
 	start_webserver();
 
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 14, NULL);
+    xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL, 14, NULL, DAP_TASK_AFFINITY);
 
     // DAP handle task
-    xTaskCreate(DAP_Thread, "DAP_Task", 2048, NULL, 10, NULL);
+    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 2048, NULL, 10, NULL, DAP_TASK_AFFINITY);
 
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 
