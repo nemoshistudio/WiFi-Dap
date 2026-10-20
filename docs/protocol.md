@@ -117,6 +117,24 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 
 ---
 
+
+### 2.6 TARGET(6)（Web 端直烧 STM32，HTTP 接口）
+
+浏览器上传 `.bin`，ESP32 固件通过 SWD 直接烧录目标 STM32（F4/H7），流式写入、无需 staging 分区。**module=6** 只用于 JSON 信封；实际传输为 HTTP，不走 WebSocket。详细流程/算法见 `docs/stm32-web-flash-plan.md`。
+
+| 方法/路径 | 请求 | 响应 |
+|---|---|---|
+| `GET /api/target/info` | – | `{module:6,cmd:1,ok,detected,family,dpidr,cpuid,idcode,uid,flash_base,flash_size,max_image_size}`；未接目标时 `ok:false,code:5`（HTTP 200） |
+| `POST /api/target/flash` | Header `Content-Type: application/octet-stream`、`Content-Length`、`X-Target-SHA256`（64 hex）；Body 为镜像 | 成功 `{module:6,cmd:2,ok,family,idcode,uid,written,verified,sha256,state,message}`；错误 `{ok:false,err,code}` |
+| `GET /api/target/status` | – | `{module:6,cmd:3,ok,state,total,written,verified,percent,err,message,busy}` |
+| `POST /api/target/reset` | `{"run":true}`（可选） | `{module:6,cmd:4,ok,run}` |
+
+- 支持目标：`family=stm32f4`（首台 STM32F407 真机验证）、`stm32h7`（代码路径完整，待 H7 真机验证）；未知目标拒绝。
+- 错误：`400/411/415` 请求头/类型错误，`409` 忙/单会话冲突，`413` 超过目标 flash 大小，`422` 探测失败/SHA 或回读校验失败，`408` 上传超时，`500/503` 内部/超时；JSON `code` 沿用 2/3/5/6。
+- 烧录/读取期间**暂停无线串口**（UART TCP 桥 1346、UART 转发/广播），**但网络/WiFi/AP/HTTP/WS/USBIP 保持可用**，结束后自动恢复。
+- 烧录期间 DAP 被独占，不能同时用 OpenOCD/USBIP 访问探针；完成后恢复。
+- Host/Origin 校验始终启用；无登录/鉴权（实验室内网）。
+
 ## 3. 二进制帧协议（UART/数据面）
 
 4 字节头（`wt_bin_data_hdr_t`）：
@@ -140,7 +158,7 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 
 ## 4. 兼容性与版本
 
-- 本协议在 D 的现有 JSON 命令（module 0/1/2/4/5 语义）基础上扩展：SYSTEM cmd 3、WIFI cmd 11–14、OTA 上传方式改为浏览器上传（原 D 的 URL 更新不用）。
+- 本协议在 D 的现有 JSON 命令（module 0/1/2/4/5 语义）基础上扩展：SYSTEM cmd 3、WIFI cmd 11–14、OTA 上传方式改为浏览器上传（原 D 的 URL 更新不用）、TARGET(6) Web 直烧 HTTP 接口。
 - `protocol_version` 握手：WS 连接后前端发 `SYSTEM/GET_FM_INFO`，比较响应中的 `protocol_version` 与本端常量；不匹配则用 toast 提示“固件与网页版本不匹配，请刷新/升级”，但不阻塞使用。
 - 前端请求字段名保持 D 的驼峰/下划线约定（以 D 的 `src/api/*.ts` 为准）；后端响应用 C 的下划线字段名。
 
