@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 318
+const EXPECTED_TOTAL = 306
 const EXPECTED_BASELINE = 180
-const EXPECTED_ADDED = 138
+const EXPECTED_ADDED = 126
 
 const errors = []
 const warnings = []
@@ -98,7 +98,7 @@ const ADDED_KEYS = [
         'cancel', 'confirm', 'close', 'save', 'delete', 'edit', 'back', 'retry', 'refresh',
         'reset', 'apply', 'loading', 'success', 'failed', 'error', 'warning', 'unknown',
         'yes', 'no', 'copy', 'copied', 'notConnected', 'unsupported', 'details', 'required', 'actions',
-        'select', 'labWarning',
+        'select',
     ]),
     ...keys('protocol', [
         'title', 'version', 'webVersion', 'firmwareVersion', 'buildTag', 'buildTime', 'match',
@@ -117,13 +117,9 @@ const ADDED_KEYS = [
         'fileDate', 'fileInvalid', 'tooLarge', 'sha256', 'verifyingFile', 'upload', 'uploading',
         'cancel', 'cancelConfirm', 'progress', 'speed', 'eta', 'verifying', 'ready',
         'rebootNote', 'success', 'failed', 'aborted', 'sameVersionWarn', 'downgradeWarn',
-        'authRequired', 'current', 'labWarning', 'slotSize', 'slotFree',
+        'current', 'slotSize', 'slotFree',
     ]),
     ...keys('ota.status', ['idle', 'receiving', 'verifying', 'ready', 'applying', 'error']),
-    ...keys('auth', [
-        'title', 'description', 'tokenLabel', 'tokenPlaceholder', 'login', 'logout',
-        'invalidToken', 'required', 'labMode',
-    ]),
     ...keys('about', ['hardwareVersion', 'manufactureDate', 'board', 'copyInfo']),
     ...keys('system', ['reboot', 'rebooting']),
     ...keys('widget', ['commandLabel', 'commandValue', 'responsePrefix', 'resetConfirm']),

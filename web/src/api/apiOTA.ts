@@ -1,5 +1,4 @@
 import {type ApiJsonMsg, sendJsonMsg, WtModuleID, WtOtaCmd} from '@/api'
-import {buildAuthHeaders} from '@/composables/websocket/auth'
 
 /**
  * OTA(5) 与固件本地上传协议（docs/protocol.md §2.5 / docs/ota-local-upload.md）。
@@ -165,7 +164,6 @@ function parseJsonSafe(text: string): Record<string, unknown> | null {
  * 浏览器本地固件上传（XHR，用于获取 upload.onprogress）。
  *
  * - Body 直接传 File：浏览器自动生成 Content-Length，避免 chunked（契约 §3.1）
- * - 鉴权开启时附加 `Authorization: Bearer <token>`（默认无 token 不带任何头）
  * - 不计算/不发送 X-SHA256（HTTP 明文非 secure context，契约 §6.3 允许降级）
  */
 export function wt_ota_upload(file: File, handlers: IOtaUploadHandlers): IOtaUploadHandle {
@@ -182,9 +180,6 @@ export function wt_ota_upload(file: File, handlers: IOtaUploadHandlers): IOtaUpl
 
     xhr.open('POST', OTA_UPLOAD_PATH, true)
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-    for (const [name, value] of Object.entries(buildAuthHeaders())) {
-        xhr.setRequestHeader(name, value)
-    }
 
     xhr.upload.onprogress = (event: ProgressEvent) => {
         if (event.lengthComputable && handlers.onUploadProgress) {

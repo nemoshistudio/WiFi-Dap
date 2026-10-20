@@ -305,7 +305,6 @@ export default {
         required: 'Required',
         actions: 'Actions',
         select: 'Select',
-        labWarning: 'No auth enabled; trusted LAN only',
     },
 
     navbar: {
@@ -358,9 +357,7 @@ export default {
             aborted: 'Update cancelled',
             sameVersionWarn: 'The selected firmware has the same version. Reflash anyway?',
             downgradeWarn: 'The selected firmware is older. Downgrade anyway?',
-            authRequired: 'Firmware authentication is enabled. Sign in first.',
             current: 'Currently running',
-            labWarning: 'Authentication is disabled by default. Use this page only on a trusted LAN; anyone who can reach the device can upload firmware.',
             slotSize: 'OTA slot size',
             slotFree: 'OTA slot free',
         },
@@ -374,17 +371,6 @@ export default {
         },
     },
 
-    auth: {
-        title: 'Authentication',
-        description: 'Web authentication is enabled. Enter the pairing code shown on the device.',
-        tokenLabel: 'Pairing code',
-        tokenPlaceholder: 'Enter the pairing code',
-        login: 'Sign in',
-        logout: 'Sign out',
-        invalidToken: 'Invalid pairing code',
-        required: 'Sign in to continue',
-        labMode: 'Lab mode: authentication disabled',
-    },
 
     about: {
         hardwareVersion: 'Hardware version',

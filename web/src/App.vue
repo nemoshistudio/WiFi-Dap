@@ -3,11 +3,10 @@ import { useWsStore } from '@/stores/websocket'
 import { useSystemStore } from '@/stores/useSystemStore'
 import type { IWebsocketService } from '@/composables/websocket/websocketService'
 import { getWebsocketService } from '@/composables/websocket/websocketService'
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted } from 'vue'
 import { changeFavicon } from '@/composables/importFavicon'
 import { logHelloMessage } from '@/composables/logConsoleMsg'
 import NavBar from '@/views/navigation/NavBar.vue'
-import AuthDialog from '@/components/AuthDialog.vue'
 import type { ControlMsg, ServerMsg } from '@/api'
 import { ControlEvent, ControlMsgType, PROTOCOL_VERSION } from '@/api'
 import { routeCtrlMsg, routeModuleServerMsg } from '@/router/msgRouter'
@@ -24,7 +23,6 @@ import { useDataFlowModule } from '@/composables/useDataFlowModule'
 import { useUartModule } from '@/composables/useUartModule'
 import { useUpdateModule } from '@/composables/useUpdateModule'
 import { translate } from '@/locales'
-import { authState } from '@/composables/useAuthSession'
 
 const wsState = useWsStore()
 const systemStore = useSystemStore()
@@ -83,8 +81,6 @@ function initWebsocket() {
     return
   }
   websocketService = getWebsocketService()
-  // auth.ts 的 resolveAuthToken() 在 init 内读取 ?token=/localStorage，
-  // token 变更后再次 init 会让 wrapper 以新 token 重建连接。
   websocketService.init(deviceHost(), onServerMsg, onClientCtrl)
   websocketService.getSocketStatus()
 }
@@ -94,31 +90,13 @@ onMounted(() => {
   registerModules()
   initWebsocket()
   changeFavicon()
-  // 安全审查 B：?token= 已从地址栏清除并保存到 localStorage，提示一次（不回显 token）
-  if (authState.urlTokenConsumed) {
-    authState.urlTokenConsumed = false
-    globalNotify(`${translate('auth.tokenLabel')}: ${translate('common.success')}`, 'success')
-  }
-})
-
-// token 保存/清除后重连 WS（URL ?token= / 首帧 SYSTEM cmd0 AUTH 由 wrapper 处理）
-watch(() => authState.epoch, () => {
-  initWebsocket()
 })
 
 /**
- * 全局持久提示条（非阻塞）：
- * 1) 未授权（JSON code=7 / HTTP 401/403）优先提示输入 pairing token；
- * 2) 协议版本 mismatch / legacy / unknown 常驻提示（OTA 上传另行禁用）。
+ * 全局持久提示条（非阻塞）：协议版本 mismatch / legacy / unknown 常驻提示
+ * （OTA 上传另行禁用）。
  */
 const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; description: string } | null>(() => {
-  if (authState.unauthorized) {
-    return {
-      type: 'warning',
-      title: translate('auth.required'),
-      description: translate('auth.description'),
-    }
-  }
   const fwProtocol = systemStore.fwProtocolVersion === null ? '?' : systemStore.fwProtocolVersion
   switch (systemStore.protocolState) {
     case 'mismatch':
@@ -164,7 +142,6 @@ const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; des
         show-icon
     />
     <RouterView />
-    <AuthDialog />
   </div>
 </template>
 

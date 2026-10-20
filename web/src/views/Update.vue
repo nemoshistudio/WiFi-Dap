@@ -3,16 +3,6 @@
     <h1 class="page-title">{{ translate('page.update') }}</h1>
     <p class="text-center text-xs opacity-70">{{ translate('protocol.refreshHint') }}</p>
 
-    <el-alert
-        v-if="!hasToken"
-        class="mt-2"
-        type="warning"
-        :title="translate('common.labWarning')"
-        :description="translate('ota.upload.labWarning')"
-        :closable="false"
-        show-icon
-    />
-
     <el-descriptions class="mt-4" :title="translate('protocol.title')" border :column="1">
       <el-descriptions-item :label="translate('protocol.firmwareVersion')">
         {{ currentRunningVersion }}
@@ -225,7 +215,6 @@ import {wt_sys_get_fm_info, wt_sys_get_sys_info, wt_sys_reboot} from "@/api/apiS
 import {translate} from "@/locales";
 import {PROTOCOL_VERSION} from "@/api";
 import {isOTAEnabled} from "@/composables/buildMode";
-import {hasToken, isHttpAuthFailure, markUnauthorized} from "@/composables/useAuthSession";
 import {globalNotify} from "@/composables/notification";
 
 const sysStore = useSystemStore();
@@ -469,9 +458,6 @@ function describeHttpError(failure: IOtaHttpError): { message: string; detail: s
     const slotSize = formatBytes(store.info.slot_size > 0 ? store.info.slot_size : OTA_DEFAULT_SLOT_SIZE);
     const raw = failure.err ?? (failure.httpStatus > 0 ? `HTTP ${failure.httpStatus}` : 'network error');
     switch (failure.httpStatus) {
-        case 401:
-        case 403:
-            return {message: translate('ota.upload.authRequired'), detail: raw};
         case 413:
             return {message: translate('ota.upload.tooLarge', {size: slotSize}), detail: raw};
         case 415:
@@ -497,10 +483,6 @@ function startRebootWatchdog() {
 function handleUploadFailure(failure: IOtaHttpError) {
     if (failure.err === 'aborted') {
         return;
-    }
-    if (isHttpAuthFailure(failure.httpStatus)) {
-        // 固件已开启鉴权：统一进入 auth session（提示输入 pairing token）
-        markUnauthorized();
     }
     const described = describeHttpError(failure);
     store.failUpload(described.message, described.detail);

@@ -126,11 +126,6 @@ export function useSystemModule() {
     }
 
     function onClientMsg(msg: ApiJsonMsg) {
-        // 鉴权失败（code=7）由 auth session 统一提示；不当作固件/协议错误处理
-        if (msg.err !== undefined && msg.code === 7) {
-            clearHandshakeTimers();
-            return;
-        }
         switch (msg.cmd as WtSytemCmd) {
             case WtSytemCmd.WT_SYS_REBOOT:
                 sysStore.rebootInProgress = true;
@@ -139,7 +134,7 @@ export function useSystemModule() {
                 clearHandshakeTimers();
                 sysStore.handshakeSettled = true;
                 if (msg.err !== undefined) {
-                    // 请求失败（非鉴权类）：视为无法确认版本，提示但不阻塞业务
+                    // 请求失败：视为无法确认版本，提示但不阻塞业务
                     sysStore.protocolState = 'unknown';
                     sysStore.fwProtocolVersion = null;
                     reportProtocolState('unknown', null);
