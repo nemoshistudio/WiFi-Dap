@@ -1,5 +1,9 @@
 import {type ApiJsonMsg} from '@/api'
+import {WtDataType} from '@/api/binDataDef'
 import * as api from "@/api/index";
+
+/** DATA_FLOW 命令号以 api/index.ts 的协议枚举为唯一来源（docs/protocol.md §2.3）。 */
+export {WtDataFlowCmd} from "@/api/index";
 
 export enum WtDataFlowType {
     NONE = 0,
@@ -26,22 +30,9 @@ export enum WtDataFlowType {
     USB,
 }
 
-export enum WtDataFlowCmd {
-    UNKNOWN              = 0,
-    GET_INS_LIST         = 1,
-    GET_CUR_INS          = 2,
-    GET_CUR_ATTACH_LIST  = 3,
-    GET_ATTACH_LIST      = 4,
-    ATTACH               = 5,
-    ATTACH_CUR_TO_RECVER = 6,
-    ATTACH_CUR_TO_SENDER = 7,
-    DETACH_SINGLE        = 8,
-    DETACH_CUR_FROM      = 9,
-    SET_DATA_TYPE        = 10,
-}
-
 export interface IWtDataFlowJsonMsg extends ApiJsonMsg {
-    data_type?: 3 | 4,
+    /** 数据面类型，使用二进制头语义：RAW=0x20（docs/protocol.md §2.3/§3） */
+    data_type?: WtDataType,
     ins_idx?: number,
 }
 
@@ -70,7 +61,7 @@ export interface AttachInfo {
     attach_idx: number,
     s_ins_idx: number,
     r_ins_idx: number,
-    data_type: 3 | 4,
+    data_type: WtDataType,
 }
 
 export interface IAttachList extends ApiJsonMsg {
@@ -79,7 +70,7 @@ export interface IAttachList extends ApiJsonMsg {
 
 export function wt_data_flow_get_instance_list() {
     const jsonMsg: IWtDataFlowJsonMsg = {
-        cmd: WtDataFlowCmd.GET_INS_LIST,
+        cmd: api.WtDataFlowCmd.GET_INS_LIST,
         module: api.WtModuleID.DATA_FLOW,
     }
     api.sendJsonMsg(jsonMsg);
@@ -87,9 +78,9 @@ export function wt_data_flow_get_instance_list() {
 
 export function wt_data_flow_attach_cur_to_sender(instance_index: number) {
     const jsonMsg: IWtDataFlowJsonMsg = {
-        cmd: WtDataFlowCmd.ATTACH_CUR_TO_SENDER,
+        cmd: api.WtDataFlowCmd.ATTACH_CUR_TO_SENDER,
         module: api.WtModuleID.DATA_FLOW,
-        data_type: 3,
+        data_type: WtDataType.RAW,
         ins_idx: instance_index,
     }
     api.sendJsonMsg(jsonMsg);
@@ -97,7 +88,7 @@ export function wt_data_flow_attach_cur_to_sender(instance_index: number) {
 
 export function wt_data_flow_get_attach_list() {
     const jsonMsg: IWtDataFlowJsonMsg = {
-        cmd: WtDataFlowCmd.GET_ATTACH_LIST,
+        cmd: api.WtDataFlowCmd.GET_ATTACH_LIST,
         module: api.WtModuleID.DATA_FLOW,
     }
     api.sendJsonMsg(jsonMsg);

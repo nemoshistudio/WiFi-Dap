@@ -1,13 +1,13 @@
 <script setup lang="ts">
-
+import {translate} from "@/locales";
 </script>
 
 <template>
   <div class="text-layout">
     <h1 class="page-title">404</h1>
-    <h2 class="text-center">页面不存在</h2>
+    <h2 class="text-center">{{ translate('common.unknown') }}</h2>
     <RouterLink to="/">
-      <el-card class="text-center">返回首页</el-card>
+      <el-card class="text-center">{{ translate('common.back') }}</el-card>
     </RouterLink>
   </div>
 </template>

@@ -117,7 +117,7 @@ const executeOnce = () => {
 
 const runCommands = async () => {
   if (useWsStore().state !== 'CONNECTED') {
-    globalNotify('Device not connected', 'error');
+    globalNotify(translate('common.notConnected'), 'error');
     return
   }
   
