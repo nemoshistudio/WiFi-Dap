@@ -100,6 +100,22 @@ static void ota_confirm_schedule(void)
 #define DAP_TASK_AFFINITY 0
 #endif
 
+/* B1 task-tuning knobs (components/dap_proxy/Kconfig).  The defaults keep the
+ * pre-B1 placement/priorities; the values are A/B measured in the hardware
+ * window.  Guarded so existing sdkconfig files without the new options still
+ * build. */
+#ifndef CONFIG_BIRDIEBOT_USBIP_TCP_PRIORITY
+#define CONFIG_BIRDIEBOT_USBIP_TCP_PRIORITY 14
+#endif
+#ifndef CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY
+#define CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY 16
+#endif
+#if defined(CONFIG_BIRDIEBOT_USBIP_TCP_CORE) && (CONFIG_BIRDIEBOT_USBIP_TCP_CORE != 1)
+#define TCP_TASK_AFFINITY CONFIG_BIRDIEBOT_USBIP_TCP_CORE
+#else
+#define TCP_TASK_AFFINITY DAP_TASK_AFFINITY
+#endif
+
 void app_main()
 {
 	/* docs/versioning.md §2.4: first log line, before WiFi/mDNS can flood it. */
@@ -136,8 +152,12 @@ void app_main()
      *  - both stay pinned to core 1 because the SWD/JTAG bit-banging uses
      *    dedicated GPIO with a hard core affinity requirement.
      */
-    xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL, 14, NULL, DAP_TASK_AFFINITY);
-    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 2048, NULL, 16, NULL, DAP_TASK_AFFINITY);
+    xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL,
+                            CONFIG_BIRDIEBOT_USBIP_TCP_PRIORITY, NULL, TCP_TASK_AFFINITY);
+    /* 3072: with B1 (BIRDIEBOT_USBIP_PIPELINE) the DAP task also builds/sends
+     * the USBIP RET_SUBMIT for a parked IN URB, so it needs lwIP send stack. */
+    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 3072, NULL,
+                            CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY, NULL, DAP_TASK_AFFINITY);
 
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 

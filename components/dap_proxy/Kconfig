@@ -16,4 +16,62 @@ menu "WiFi Dap proxy (USBIP / WebSocket-DAP)"
 
             Default: y (laboratory mode, same as the fork).
 
+    config BIRDIEBOT_USBIP_PIPELINE
+        bool "Enable multi-URB USBIP pipeline (B1)"
+        default y
+        help
+            Decouples the USBIP TCP reader from the DAP command execution so
+            that several URBs can be in flight per Wi-Fi round-trip (the host
+            kernel vhci + OpenOCD cmsis-dap keep up to 3 pending requests).
+            OUT URBs are ACKed immediately and IN URBs are answered by the DAP
+            task when the matching response is ready; UNLINKs keep the
+            response/IN FIFOs aligned.  The legacy single-URB path is used when
+            this option is disabled or the pipeline detects an inconsistency.
+
+            Default: y (same transport, lower latency on a real Wi-Fi link).
+
+    config BIRDIEBOT_USBIP_TCP_CORE
+        int "Core affinity of the USBIP tcp_server task"
+        range 0 1
+        default 1
+        help
+            The DAP task must run on core 1 (dedicated-GPIO SWD bit-banging).
+            Keeping the USBIP tcp_server task on core 1 (default) minimizes the
+            hand-off latency to the DAP task; core 0 decouples the Wi-Fi/lwIP
+            handling from the DAP bit-banging CPU time.  Both placements are
+            measured in the B1 hardware window.
+
+    config BIRDIEBOT_USBIP_TCP_PRIORITY
+        int "Priority of the USBIP tcp_server task"
+        range 5 24
+        default 14
+        help
+            FreeRTOS priority of the USBIP/EL/WS-DAP TCP task.  The DAP command
+            task priority is BIRDIEBOT_DAP_TASK_PRIORITY (default 16); raising
+            this above the DAP task lets network ACKs preempt SWD bit-banging,
+            lowering the per-URB latency at some SWD throughput cost.
+
+    config BIRDIEBOT_DAP_TASK_PRIORITY
+        int "Priority of the DAP command task"
+        range 5 24
+        default 16
+
+    config BIRDIEBOT_DAP_PACKET_SIZE
+        int "DAP packet size reported to the debugger (bytes, ESP32-S3)"
+        range 256 4048
+        default 1280
+        help
+            CMSIS-DAP packet size returned by DAP_Info and used for the USBIP
+            stage2 payload buffer.  The USBIP transport is latency-bound, so a
+            larger packet means more SWD data per OUT+IN URB round-trip.
+
+            OpenOCD 0.12 (cmsis-dap DAP_Transfer, u8 transfer count) derives its
+            block size as (packet-4)/5 and is only correct up to 1280
+            ((1280-4)/5 = 255 transfers).  OpenOCD master uses DAP_TransferBlock
+            (u16 count) and can use a much larger packet (e.g. 4000-4048);
+            this is A/B measured in the B1 hardware window and the release
+            default is chosen from that data.
+
+            Other targets are fixed at 1024 by main/dap_configuration.h.
+
 endmenu
