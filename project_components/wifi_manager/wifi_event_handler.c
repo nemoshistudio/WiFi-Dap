@@ -80,6 +80,24 @@ static wifi_event_ctx_t event_ctx = {
 	.conn.disconn_handler = NULL,
 };
 
+/* Last STA disconnect information. The rotation code uses the counter to make
+ * sure it only maps a reason to the connection attempt it started, and the
+ * reason to decide whether a credential is bad (auth fail => skip it for this
+ * power cycle, contract wifi-credential-memory.md §4.5). Accessed from task
+ * context only (WiFi event task writes, wifi_manager task reads). */
+static volatile uint32_t last_disco_count;
+static volatile int last_disco_reason = -1;
+
+uint32_t wifi_event_get_disconnect_count(void)
+{
+	return last_disco_count;
+}
+
+int wifi_event_get_last_disconnect_reason(void)
+{
+	return last_disco_reason;
+}
+
 static void wifi_on_scan_done(wifi_event_sta_scan_done_t *event)
 {
 	if (!event_ctx.cb || !event_ctx.ap) {
@@ -182,6 +200,8 @@ void wifi_event_handler(void *handler_arg __attribute__((unused)),
 		printf("event: WIFI_EVENT_STA_DISCONNECTED ");
 		printf("sta %02X:%02X:%02X:%02X:%02X:%02X disconnect reason %d\n",
 		       m[0], m[1], m[2], m[3], m[4], m[5], event->reason);
+		last_disco_reason = event->reason;
+		++last_disco_count;
 		event_ctx.is_connected = 0;
 		reconnect_after_disco();
 		break;
@@ -222,10 +242,16 @@ int wifi_event_trigger_connect(uint8_t attempt, wifi_event_connect_done_cb cb, v
 	event_ctx.conn.cb = cb;
 	event_ctx.conn.arg = arg;
 	if (event_ctx.is_connected) {
-		err = esp_wifi_disconnect();
-	} else {
-		err = esp_wifi_connect();
+		/* The driver reports the disconnect asynchronously; its return value
+		 * must not abort the pending connect request. */
+		int disconnect_err = esp_wifi_disconnect();
+		if (disconnect_err) {
+			ESP_LOGW(TAG, "disconnect before connect: %s",
+			         esp_err_to_name(disconnect_err));
+		}
+		return 0;
 	}
+	err = esp_wifi_connect();
 	return err;
 }
 

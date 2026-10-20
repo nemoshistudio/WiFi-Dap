@@ -17,7 +17,19 @@ typedef enum wifi_api_json_cmd_t {
 	WIFI_API_JSON_SET_AP_CRED     = 8, /* ssid[32] + password[64] */
 	WIFI_API_JSON_STA_GET_STATIC_INFO =  9,
 	WIFI_API_JSON_STA_SET_STATIC_CONF = 10, /* static_ip_en: 0/1, static_dns_en: 0/1 */
+	/* Multi WiFi credential memory (docs/wifi-credential-memory.md §7) */
+	WIFI_API_JSON_GET_SAVED_LIST  = 11, /* ret:{auto_save,count,list[{idx,ssid,last_success,priority}], [connected_idx]} */
+	WIFI_API_JSON_ADD_SAVED       = 12, /* req:{ssid,password,[priority]}, ret:{idx,updated,[evicted_idx]} (no password echo) */
+	WIFI_API_JSON_DEL_SAVED       = 13, /* req:{idx} */
+	WIFI_API_JSON_SET_AUTO_SAVE   = 14, /* req:{enable:bool}, ret:{enable,auto_save} */
 } wifi_api_json_cmd_t;
+
+/* `save` values for CONNECT (docs/wifi-credential-memory.md §7.5):
+ * present 0 = do not write the table, present 1 = force write, absent = follow
+ * the current auto_save setting. */
+#define WIFI_API_CONNECT_SAVE_AUTO (-1)
+#define WIFI_API_CONNECT_SAVE_NO 0
+#define WIFI_API_CONNECT_SAVE_YES 1
 
 typedef struct wifi_api_ap_info_t {
 	ip4_addr_t ip;
@@ -77,6 +89,12 @@ int wifi_api_trigger_scan(uint16_t *max_ap_count, wifi_api_scan_done_cb cb, void
 int wifi_api_get_scan_list(uint16_t *number, wifi_api_ap_scan_info_t *ap_info);
 
 int wifi_api_connect(const char *ssid, const char *password);
+
+/**
+ * CONNECT with the optional `save` request field (contract §7.5).
+ * @param save WIFI_API_CONNECT_SAVE_AUTO/NO/YES.
+ */
+int wifi_api_connect_save(const char *ssid, const char *password, int save);
 
 int wifi_api_disconnect(void);
 
