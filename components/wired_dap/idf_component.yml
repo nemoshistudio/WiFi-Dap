@@ -1,0 +1,16 @@
+## IDF Component Manager Manifest File
+#
+# ESP TinyUSB provides the CDC-NCM class used by the wired-DAP MVP.
+# Pinned to the 1.x series: IDF 5.2.1's own tusb_ncm example requires
+# "espressif/esp_tinyusb ^1.3.0" (v1.3.0 added the NCM extension; the
+# 3.x series targets newer IDF releases).
+#
+# NOTE: the dependency is resolved for every build of this project (the
+# component manager has no Kconfig-conditional dependencies), but the USB
+# code itself is only compiled when CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y.
+dependencies:
+  espressif/esp_tinyusb:
+    version: ">=1.3.0,<2.0.0"
+    rules:
+      - if: "target in [esp32s3]"
+  idf: ">=5.2.0"
