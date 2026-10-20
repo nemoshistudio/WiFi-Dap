@@ -21,6 +21,20 @@ int wt_ws_router_broadcast(uint8_t data_type, uint8_t module, uint8_t sub_mod,
     return -1;
 }
 
+
+int wt_ws_router_set_tx_port(wt_ws_tx_port_t port)
+{
+    (void) port;
+    return -1;
+}
+
+int wt_ws_router_rx(uint8_t data_type, uint8_t module, uint8_t sub_mod,
+                    const uint8_t *payload, size_t len)
+{
+    (void) data_type; (void) module; (void) sub_mod; (void) payload; (void) len;
+    return -1;
+}
+
 size_t wt_ws_router_max_payload(void)
 {
     return 0;
