@@ -3,4 +3,9 @@ build/
 tmp/
 .history/
 sdkconfig.old
-.cache/
+sdkconfig
+.idea/
+dependencies.lock
+package-lock.json
+managed_components/
+/version.txt

@@ -1,2 +1,7 @@
-idf_component_register(SRCS "./elaphureLink_protocol.c"
-                       REQUIRES DAP)
+file(GLOB SOURCES *.c)
+
+idf_component_register(
+        SRCS ${SOURCES}
+        INCLUDE_DIRS "."
+        PRIV_REQUIRES dap_proxy
+)

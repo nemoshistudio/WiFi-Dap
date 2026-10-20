@@ -1,13 +1,3 @@
-<p align="center"><img src="https://user-images.githubusercontent.com/17078589/120061980-49274280-c092-11eb-9916-4965f6c48388.png"/></p>
-
-![image](https://user-images.githubusercontent.com/17078589/107857220-05ecef00-6e68-11eb-9fa0-506b32052dba.png)
-
-
-[![Build Status](https://github.com/windowsair/wireless-esp8266-dap/actions/workflows/main.yml/badge.svg?branch=master)](https://github.com/windowsair/wireless-esp8266-dap/actions/workflows/main.yml) master　
-[![Build Status](https://github.com/windowsair/wireless-esp8266-dap/actions/workflows/main.yml/badge.svg?branch=develop)](https://github.com/windowsair/wireless-esp8266-dap/actions/workflows/main.yml) develop
-
-[![](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](https://github.com/windowsair/wireless-esp8266-dap/LICENSE)　[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg?style=flat-square)](https://github.com/windowsair/wireless-esp8266-dap/pulls)　[![%e2%9d%a4](https://img.shields.io/badge/made%20with-%e2%9d%a4-ff69b4.svg?style=flat-square)](https://github.com/windowsair/wireless-esp8266-dap)
-
 [中文](README_CN.md)
 
 ## Introduce
@@ -27,7 +17,6 @@ For Keil users, we now also support [elaphureLink](https://github.com/windowsair
 ## Feature
 
 1. SoC Compatibility
-    - [x] ESP8266/8285
     - [x] ESP32
     - [x] ESP32C3
     - [x] ESP32S3
@@ -47,7 +36,6 @@ For Keil users, we now also support [elaphureLink](https://github.com/windowsair
     - [x] SWD protocol based on SPI acceleration (Up to 40MHz)
     - [x] Support for [elaphureLink](https://github.com/windowsair/elaphureLink), fast Keil debug without drivers
     - [x] Support for [elaphure-dap.js](https://github.com/windowsair/elaphure-dap.js), online ARM Cortex-M firmware flash
-    - [x] Support for [OpenOCD-elaphureLink](https://github.com/windowsair/openocd-elaphurelink), Get rid of USBIP!
     - [x] Support for OpenOCD/pyOCD
     - [x] ...
 
@@ -57,7 +45,7 @@ For Keil users, we now also support [elaphureLink](https://github.com/windowsair
 
 ### WIFI
 
-The default connected WIFI SSID is `DAP` or `OTA` , password `12345678`
+The default connected WIFI SSID is `无线DAP` , password `12345678`
 
 Support for specifying multiple possible WAP. It can be added here: [wifi_configuration.h](main/wifi_configuration.h)
 
@@ -68,53 +56,12 @@ You can also specify your IP in the above file (We recommend using the static ad
 
 There is built-in ipv4 only mDNS server. You can access the device using `dap.local`.
 
-mDNS name can be edited here: [wifi_configuration.h](main/wifi_configuration.h)
-
-> The mDNS in ESP8266 only supports ipv4.
-
 ![mDNS](https://user-images.githubusercontent.com/17078589/149659052-7b29533f-9660-4811-8125-f8f50490d762.png)
 
 
 
 ### Debugger
 
-
-<details>
-<summary>ESP8266</summary>
-
-| SWD            |        |
-|----------------|--------|
-| SWCLK          | GPIO14 |
-| SWDIO          | GPIO13 |
-| TVCC           | 3V3    |
-| GND            | GND    |
-
-
---------------
-
-
-| JTAG               |         |
-|--------------------|---------|
-| TCK                | GPIO14  |
-| TMS                | GPIO13  |
-| TDI                | GPIO4   |
-| TDO                | GPIO16  |
-| nTRST \(optional\) | GPIO0\* |
-| nRESET             | GPIO5   |
-| TVCC               | 3V3     |
-| GND                | GND     |
-
---------------
-
-| Other              |               |
-|--------------------|---------------|
-| LED\_WIFI\_STATUS  | GPIO15        |
-| Tx                 | GPIO2         |
-| Rx                 | GPIO3 (U0RXD) |
-
-> Rx and Tx is used for uart bridge, not enabled by default.
-
-</details>
 
 
 <details>
@@ -142,18 +89,6 @@ mDNS name can be edited here: [wifi_configuration.h](main/wifi_configuration.h)
 | TVCC               | 3V3     |
 | GND                | GND     |
 
---------------
-
-| Other              |               |
-|--------------------|---------------|
-| LED\_WIFI\_STATUS  | GPIO27        |
-| Tx                 | GPIO23        |
-| Rx                 | GPIO22        |
-
-
-> Rx and Tx is used for uart bridge, not enabled by default.
-
-
 </details>
 
 
@@ -171,27 +106,16 @@ mDNS name can be edited here: [wifi_configuration.h](main/wifi_configuration.h)
 --------------
 
 
-| JTAG               |         |
-|--------------------|---------|
-| TCK                | GPIO6   |
-| TMS                | GPIO7   |
-| TDI                | GPIO9   |
-| TDO                | GPIO8   |
-| nTRST \(optional\) | GPIO4   |
-| nRESET             | GPIO5   |
-| TVCC               | 3V3     |
-| GND                | GND     |
-
---------------
-
-| Other              |               |
-|--------------------|---------------|
-| LED\_WIFI\_STATUS  | GPIO10        |
-| Tx                 | GPIO19        |
-| Rx                 | GPIO18        |
-
-
-> Rx and Tx is used for uart bridge, not enabled by default.
+| JTAG               |        |
+|--------------------|--------|
+| TCK                | GPIO6  |
+| TMS                | GPIO7  |
+| TDI                | GPIO5  |
+| TDO                | GPIO3  |
+| nTRST \(optional\) | GPIO4  |
+| nRESET             | GPIO10 |
+| TVCC               | 3V3    |
+| GND                | GND    |
 
 
 </details>
@@ -222,77 +146,25 @@ mDNS name can be edited here: [wifi_configuration.h](main/wifi_configuration.h)
 | TVCC               | 3V3    |
 | GND                | GND    |
 
---------------
-
-| Other              |               |
-|--------------------|---------------|
-| LED\_WIFI\_STATUS  | GPIO10        |
-| Tx                 | GPIO17        |
-| Rx                 | GPIO18        |
 
 </details>
 
 ----
-
-## Hardware Reference
-
-Only a hardware reference for the ESP8266 is currently available.
-
-
-Here we provide a simple example for reference:
-
-![sch](https://user-images.githubusercontent.com/17078589/150284806-e6dff0fa-4fe1-4d86-ac45-3b657fbea6b7.png)
-
-
-***Alternatively, you can connect directly with wires as we gave at the beginning, without additional circuits.***
-
-
-In addition, a complete hardware reference design is available from contributors, see [circuit](circuit)
-
-------
 
 
 ## Build And Flash
 
 You can build locally or use Github Action to build online and then download firmware to flash.
 
-### Build with Github Action Online
-
-See: [Build with Github Action](https://github.com/windowsair/wireless-esp8266-dap/wiki/Build-with-Github-Action)
-
 
 ### General build and Flash
 
 <details>
-<summary>ESP8266</summary>
-
-1. Get ESP8266 RTOS Software Development Kit
-
-    The SDK is already included in the project. Please don't use other versions of the SDK.
-
-2. Build & Flash
-
-    Build with ESP-IDF build system.
-    More information can be found at the following link: [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html "Build System")
-
-The following example shows a possible way to build on Windows:
-
-```bash
-# Build
-python ./idf.py build
-# Flash
-python ./idf.py -p /dev/ttyS5 flash
-```
-
-</details>
-
-
-<details>
-<summary>ESP32/ESP32C3</summary>
+<summary>ESP32C3</summary>
 
 1. Get esp-idf
 
-    For now, please use esp-idf v4.4.2 : https://github.com/espressif/esp-idf/releases/tag/v4.4.2
+    For now, please use esp-idf v5.2.1 : https://github.com/espressif/esp-idf/releases/tag/v5.2.1
 
 2. Build & Flash
 
@@ -303,20 +175,14 @@ The following example shows a possible way to build:
 
 ```bash
 # Set build target
-idf.py set-target esp32
+idf.py set-target esp32c3
 # Build
 idf.py build
 # Flash
 idf.py -p /dev/ttyS5 flash
 ```
 
-> The `idf.py` in the project root directory is only applicable to the old ESP8266 target. Don't use it in ESP32.
-
 </details>
-
-
-> We also provided sample firmware for quick evaluation. See [Releases](https://github.com/windowsair/wireless-esp8266-dap/releases)
-
 
 ## Usage
 
@@ -371,7 +237,6 @@ Some LAN broadcast packets can cause serious impact, including:
 - Logitech Arx Control
 - ...
 
-For ESP8266, this is not far from UDP FLOOD...😰
 
 It is also affected by the surrounding radio environment, your AP situation (some NICs have terrible AP performance), distance, etc.
 
@@ -403,51 +268,11 @@ This project was originally designed to run on Keil, but now you can also perfor
 
 > pyOCD is now supported.
 
-### System OTA
-
-When this project is updated, you can update the firmware over the air.
-
-Visit the following website for OTA operations: [online OTA](http://corsacota.surge.sh/?address=dap.local:3241)
-
-
-For most devices, you don't need to care about flash size. However, improper setting of the flash size may cause the OTA to fail. In this case, please change the flash size with `idf.py menuconfig`, or modify `sdkconfig`:
-
-```
-# Choose a flash size.
-CONFIG_ESPTOOLPY_FLASHSIZE_1MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-
-# Then set a flash size
-CONFIG_ESPTOOLPY_FLASHSIZE="2MB"
-```
-
-If flash size is 2MB, the sdkconfig file might look like this:
-
-```
-CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="2MB"
-```
-
-
-For devices with 1MB flash size such as ESP8285, the following changes must be made:
-
-```
-CONFIG_PARTITION_TABLE_FILENAME="partitions_two_ota.1MB.csv"
-CONFIG_ESPTOOLPY_FLASHSIZE_1MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="1MB"
-CONFIG_ESP8266_BOOT_COPY_APP=y
-```
-
-The flash size of the board can be checked with the esptool.py tool:
-
-```bash
-esptool.py -p (PORT) flash_id
-```
-
 ### Uart TCP Bridge
+
+TCP server on PORT 1234.
+
+UART default baud: 74880
 
 This feature provides a bridge between TCP and Uart:
 ```
@@ -461,33 +286,38 @@ Recv data   <-  TCP  <-  Uart Rx <- external devices
 When the TCP connection is established, bridge will try to resolve the text sent for the first packet. When the text is a valid baud rate, bridge will switch to it.
 For example, sending the ASCII text `115200` will switch the baud rate to 115200.
 
+<details>
+<summary>ESP32C3</summary>
 
-For performance reasons, this feature is not enabled by default. You can modify [wifi_configuration.h](main/wifi_configuration.h) to turn it on.
+|     | PIN    |
+|-----|--------|
+| RX  | GPIO20 |
+| TX  | GPIO21 |
 
-
-### elaphure-dap.js
-
-For the ESP8266, this feature is turned off by default. You can turn it on in menuconfig:
-
-```
-CONFIG_USE_WEBSOCKET_DAP=y
-```
-
-----
-
-## Develop
-
-Check other branches to know the latest development progress.
-
-Any kind of contribute is welcome, including but not limited to new features, ideas about circuits, documentation.
-
-You can also ask questions to make this project better.
-
-- [New issues](https://github.com/windowsair/wireless-esp8266-dap/issues)
-- [New pull](https://github.com/windowsair/wireless-esp8266-dap/pulls)
+</details>
 
 
-### Issue
+<details>
+<summary>ESP32</summary>
+
+|     | PIN    |
+|-----|--------|
+| RX  | GPIO22 |
+| TX  | GPIO23 |
+
+</details>
+
+<details>
+<summary>ESP32S3</summary>
+
+|     | PIN    |
+|-----|--------|
+| RX  | GPIO18 |
+| TX  | GPIO17 |
+
+
+
+</details>
 
 2020.12.1
 
@@ -520,11 +350,12 @@ We will continue to try to make it work on USB HID. Once the USBIP problem is so
 
 Credits to the following project, people and organizations:
 
+> - https://www.github.com/windowsair/wireless-esp8266-dap origin of this project
 > - https://github.com/thevoidnn/esp8266-wifi-cmsis-dap for adapter firmware based on CMSIS-DAP v1.0
 > - https://github.com/ARM-software/CMSIS_5 for CMSIS
 > - https://github.com/cezanne/usbip-win for usbip windows
 
-
+- [@windowsair](https://www.github.com/windowsair/wireless-esp8266-dap)
 - [@HeavenSpree](https://www.github.com/HeavenSpree)
 - [@Zy19930907](https://www.github.com/Zy19930907)
 - [@caiguang1997](https://www.github.com/caiguang1997)
