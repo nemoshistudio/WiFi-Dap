@@ -1,9 +1,10 @@
 file(GLOB SOURCES *.c)
 
-# driver: UART driver (uart_param_config/uart_driver_install/uart_set_pin)
-# board:  board pin contract (UART instance + TX/RX pins + port/baud defaults)
+# board:        BIRDIEBOT_UART_BRIDGE_PORT (1346) and Kconfig defaults
+# uart_service: single owner of the target UART (WP-203); the bridge is now
+#               just a TCP client of it (no direct UART driver usage here)
 idf_component_register(
         SRCS ${SOURCES}
         INCLUDE_DIRS "."
-        PRIV_REQUIRES driver board
+        PRIV_REQUIRES board uart_service
 )
