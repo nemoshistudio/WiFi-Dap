@@ -10,6 +10,7 @@
 #include "wt_ws_router.h"
 #include "wt_data_def.h"
 #include "birdiebot_auth.h"
+#include "web_error_json.h"
 
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -28,20 +29,12 @@
 #define TAG __FILE_NAME__
 
 
-// Error message templates
-#define ERROR_MSG_TEMPLATE(err_msg, err_code) "{\"error\":\"" err_msg "\", \"code\":" #err_code "}"
-
-// Error messages
-#define MSG_BAD_REQUEST_ERROR  ERROR_MSG_TEMPLATE("Bad json request", 2)
-#define MSG_JSON_ERROR         ERROR_MSG_TEMPLATE("JSON parse error", 3)
-#define MSG_SEND_JSON_ERROR    ERROR_MSG_TEMPLATE("JSON generation error", 3)
-#define MSG_INTERNAL_ERROR     ERROR_MSG_TEMPLATE("Internal error", 3)
-#define MSG_UNSUPPORTED_CMD    ERROR_MSG_TEMPLATE("Unsupported cmd", 4)
-#define MSG_PROPERTY_ERROR     ERROR_MSG_TEMPLATE("Property error", 5)
-#define MSG_BUSY_ERROR         ERROR_MSG_TEMPLATE("Resource busy", 6)
-#define MSG_UNAUTHORIZED       ERROR_MSG_TEMPLATE("unauthorized", 7)
-/* docs/ws-binary-router.md §3.2: malformed/oversized inbound binary frame. */
-#define MSG_BINARY_ERROR       "{\"error\":\"Bad binary frame\",\"code\":2}"
+/* Error responses are formatted uniformly by web_error_json.c (F10):
+ *   {"module":M,"cmd":C,"err":"...","code":N}
+ * module/cmd are taken from the request; they are omitted only when the
+ * request context could not be parsed. */
+#define MSG_BINARY_ERROR       "{\"err\":\"Bad binary frame\",\"code\":2}"
+#define MSG_INTERNAL_FALLBACK  "{\"err\":\"Internal error\",\"code\":3}"
 
 /* SYSTEM(0)/AUTH(0): pairing-token frame (docs/protocol.md §2.1). */
 #define WS_SYSTEM_MODULE_ID    0
@@ -98,7 +91,14 @@ static inline int ws_send_frame_safe(httpd_handle_t hd, int fd, httpd_ws_frame_t
 
 static void ws_async_resp(void *arg);
 static void async_send_out_cb(void *arg, int module_status);
-static void json_to_text(ws_msg_t *msg);
+static void json_to_text(ws_msg_t *msg, int module, int cmd);
+
+/* Uniform error frames (F10, docs/protocol.md §1.1). */
+static int ws_json_get_context(cJSON *json, int *module, int *cmd);
+static void ws_set_err_frame(httpd_ws_frame_t *p_frame, uint8_t *buf, size_t buf_len,
+                             int module, int cmd, api_json_req_status_e ret);
+static void ws_send_error_req(httpd_req_t *req, int module, int cmd,
+                              const char *err_text, int code);
 
 /* Binary data path (docs/ws-binary-router.md / docs/protocol.md §3). */
 static int ws_bin_tx_port(const uint8_t *frame, size_t len);
@@ -134,12 +134,18 @@ static esp_err_t ws_req_handler(httpd_req_t *req)
 
 	ws_msg = memory_pool_get(pdMS_TO_TICKS(10));
 	if (unlikely(ws_msg == NULL)) {
-		httpd_ws_frame_t resp_pkt;
-		resp_pkt.type = HTTPD_WS_TYPE_TEXT;
-		resp_pkt.len = strlen(MSG_BUSY_ERROR);
-		resp_pkt.payload = (uint8_t *)MSG_BUSY_ERROR;
-		resp_pkt.final = 1;
-		ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &resp_pkt);
+		char err_buf[192];
+		int err_len = web_error_json_format(err_buf, sizeof(err_buf), -1, -1,
+		                                    "Resource busy", 6);
+		httpd_ws_frame_t resp_pkt = {
+			.type = HTTPD_WS_TYPE_TEXT,
+			.final = 1,
+		};
+		if (err_len > 0) {
+			resp_pkt.payload = (uint8_t *) err_buf;
+			resp_pkt.len = (size_t) err_len;
+			ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &resp_pkt);
+		}
 		goto end;
 	}
 	ws_pkt = &ws_msg->ws_pkt;
@@ -211,12 +217,12 @@ end:
 	return err;
 }
 
-void ws_set_err_msg(httpd_ws_frame_t *p_frame, api_json_req_status_e ret);
-
 int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 {
 	int err = ESP_OK;
 	int ret;
+	int module = -1; /* request context for error frames (F10) */
+	int cmd = -1;
 	httpd_ws_frame_t *ws_pkt;
 
 	ws_pkt = &ws_msg->ws_pkt;
@@ -231,10 +237,15 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 	/* Decode */
 	ws_msg->json.in = cJSON_ParseWithLength((char *)ws_pkt->payload, ws_pkt->len);
 	if (unlikely(ws_msg->json.in == NULL)) {
-		ws_pkt->payload = (uint8_t *)MSG_JSON_ERROR;
-		ws_pkt->len = strlen(MSG_JSON_ERROR);
+		/* No request context available: {"err":"...","code":N}. */
+		int n = web_error_json_format((char *)ws_msg->payload, PAYLOAD_LEN, -1, -1,
+		                              "JSON parse error", 3);
+		ws_pkt->final = 1;
+		ws_pkt->payload = ws_msg->payload;
+		ws_pkt->len = n > 0 ? (size_t)n : 0;
 		goto put_buf;
 	}
+	(void)ws_json_get_context(ws_msg->json.in, &module, &cmd);
 
 #if BIRDIEBOT_AUTH_ENABLED
 	/* Web auth gate (docs/protocol.md §1/§2.1): while the connection is not
@@ -242,17 +253,6 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 	 * {"err":"unauthorized","code":7} and is not routed to a module. */
 	{
 		int fd = httpd_req_to_sockfd(req);
-		int module = -1;
-		int cmd = -1;
-		cJSON *module_json = cJSON_GetObjectItem(ws_msg->json.in, "module");
-		cJSON *cmd_json = cJSON_GetObjectItem(ws_msg->json.in, "cmd");
-
-		if (cJSON_IsNumber(module_json)) {
-			module = module_json->valueint;
-		}
-		if (cJSON_IsNumber(cmd_json)) {
-			cmd = cmd_json->valueint;
-		}
 
 		if (module == WS_SYSTEM_MODULE_ID && cmd == WS_SYS_CMD_AUTH) {
 			const char *token = cJSON_GetStringValue(
@@ -294,7 +294,9 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 		/* ret, buf will be release latter in async send out */
 		return ESP_OK;
 	} else if (ret != API_JSON_OK) {
-		ws_set_err_msg(ws_pkt, ret);
+		/* Keep module/cmd so the front-end can degrade gracefully on code=4
+		 * (unknown module/cmd of an older firmware, F10). */
+		ws_set_err_frame(ws_pkt, ws_msg->payload, PAYLOAD_LEN, module, cmd, ret);
 		goto end;
 	} else if (ws_msg->json.out == NULL) {
 		/* API exec ok */
@@ -302,7 +304,7 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 	}
 
 	/* api function returns something, send it to http client */
-	json_to_text(ws_msg);
+	json_to_text(ws_msg, module, cmd);
 
 end:
 	cJSON_Delete(ws_msg->json.in);
@@ -313,49 +315,110 @@ put_buf:
 	return err;
 }
 
-void ws_set_err_msg(httpd_ws_frame_t *p_frame, api_json_req_status_e ret)
+/** Extract module/cmd from a parsed JSON request (-1 when absent/invalid). */
+static int ws_json_get_context(cJSON *json, int *module, int *cmd)
 {
-	p_frame->final = 1;
+	cJSON *module_json;
+	cJSON *cmd_json;
+
+	*module = -1;
+	*cmd = -1;
+	if (json == NULL) {
+		return -1;
+	}
+	module_json = cJSON_GetObjectItem(json, "module");
+	cmd_json = cJSON_GetObjectItem(json, "cmd");
+	if (cJSON_IsNumber(module_json)) {
+		*module = module_json->valueint;
+	}
+	if (cJSON_IsNumber(cmd_json)) {
+		*cmd = cmd_json->valueint;
+	}
+	return 0;
+}
+
+/**
+ * @brief Fill a WS text frame with the frozen JSON error shape (docs/protocol.md §1.1).
+ *
+ * Uses the caller-provided buffer; falls back to a static context-less frame if
+ * the buffer is too small.
+ */
+static void ws_set_err_frame(httpd_ws_frame_t *p_frame, uint8_t *buf, size_t buf_len,
+                             int module, int cmd, api_json_req_status_e ret)
+{
+	const char *err_text;
+	int code;
+	int n;
+
 	switch (ret) {
 	case API_JSON_BAD_REQUEST:
-		p_frame->len = strlen(MSG_BAD_REQUEST_ERROR);
-		p_frame->payload = (uint8_t *)MSG_BAD_REQUEST_ERROR;
-		break;
-	case API_JSON_BUSY:
-		p_frame->len = strlen(MSG_BUSY_ERROR);
-		p_frame->payload = (uint8_t *)MSG_BUSY_ERROR;
+		err_text = "Bad json request";
+		code = 2;
 		break;
 	case API_JSON_UNSUPPORTED_CMD:
-		p_frame->len = strlen(MSG_UNSUPPORTED_CMD);
-		p_frame->payload = (uint8_t *)MSG_UNSUPPORTED_CMD;
+		err_text = "Unsupported cmd";
+		code = 4;
 		break;
 	case API_JSON_PROPERTY_ERR:
-		p_frame->len = strlen(MSG_PROPERTY_ERROR);
-		p_frame->payload = (uint8_t *)MSG_PROPERTY_ERROR;
+		err_text = "Property error";
+		code = 5;
+		break;
+	case API_JSON_BUSY:
+		err_text = "Resource busy";
+		code = 6;
 		break;
 	case API_JSON_UNAUTHORIZED:
-		p_frame->len = strlen(MSG_UNAUTHORIZED);
-		p_frame->payload = (uint8_t *)MSG_UNAUTHORIZED;
+		err_text = "unauthorized";
+		code = 7;
 		break;
+	case API_JSON_OK:
+	case API_JSON_ASYNC:
+	case API_JSON_INTERNAL_ERR:
 	default:
-		p_frame->len = strlen(MSG_INTERNAL_ERROR);
-		p_frame->payload = (uint8_t *)MSG_INTERNAL_ERROR;
+		err_text = "Internal error";
+		code = 3;
+		break;
+	}
+
+	n = web_error_json_format((char *)buf, buf_len, module, cmd, err_text, code);
+	p_frame->final = 1;
+	p_frame->type = HTTPD_WS_TYPE_TEXT;
+	if (n > 0) {
+		p_frame->payload = buf;
+		p_frame->len = (size_t)n;
+	} else {
+		p_frame->payload = (uint8_t *)MSG_INTERNAL_FALLBACK;
+		p_frame->len = strlen(MSG_INTERNAL_FALLBACK);
+	}
+}
+
+/** Send a JSON error frame to one request fd (module/cmd kept when known). */
+static void ws_send_error_req(httpd_req_t *req, int module, int cmd,
+                              const char *err_text, int code)
+{
+	char buf[192];
+	int n = web_error_json_format(buf, sizeof(buf), module, cmd, err_text, code);
+	httpd_ws_frame_t pkt = {
+		.type = HTTPD_WS_TYPE_TEXT,
+		.final = 1,
+	};
+
+	if (n <= 0) {
 		return;
 	}
+	pkt.payload = (uint8_t *)buf;
+	pkt.len = (size_t)n;
+	ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &pkt);
 }
 
 _Static_assert(sizeof(httpd_ws_frame_t) <= 16, "bin_data_internal padding not sufficient for httpd_ws_frame_t");
 
-/* Reply with docs/ws-binary-router.md §3.2 error frame (text, FIN=1). */
+/* Reply with docs/ws-binary-router.md §3.2 error frame (text, FIN=1).
+ * A binary frame has no cmd, so the context stays empty (F10 keeps this
+ * optional): {"err":"Bad binary frame","code":2}. */
 static void ws_send_binary_error(httpd_req_t *req)
 {
-	httpd_ws_frame_t pkt = {
-		.type = HTTPD_WS_TYPE_TEXT,
-		.final = 1,
-		.payload = (uint8_t *)MSG_BINARY_ERROR,
-		.len = strlen(MSG_BINARY_ERROR),
-	};
-	ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &pkt);
+	ws_send_error_req(req, -1, -1, "Bad binary frame", 2);
 }
 
 #if BIRDIEBOT_AUTH_ENABLED
@@ -379,20 +442,7 @@ static void ws_send_text_literal(httpd_req_t *req, const char *text)
  */
 static void ws_send_unauthorized(httpd_req_t *req, int module, int cmd)
 {
-	char buf[96];
-	int len = snprintf(buf, sizeof(buf),
-	                   "{\"module\":%d,\"cmd\":%d,\"err\":\"unauthorized\",\"code\":7}",
-	                   module < 0 ? 0 : module, cmd < 0 ? 0 : cmd);
-	if (len <= 0 || len >= (int) sizeof(buf)) {
-		return;
-	}
-	httpd_ws_frame_t pkt = {
-		.type = HTTPD_WS_TYPE_TEXT,
-		.final = 1,
-		.payload = (uint8_t *) buf,
-		.len = (size_t) len,
-	};
-	ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &pkt);
+	ws_send_error_req(req, module, cmd, "unauthorized", 7);
 }
 #endif /* BIRDIEBOT_AUTH_ENABLED */
 
@@ -553,12 +603,16 @@ static void ws_async_resp(void *arg)
 void async_send_out_cb(void *arg, int module_status)
 {
 	ws_msg_t *req = arg;
+	int module = -1;
+	int cmd = -1;
+
+	(void)ws_json_get_context(req->json.in, &module, &cmd);
 	cJSON_Delete(req->json.in);
 	ESP_LOGI(TAG, "send out %d", module_status);
 
 	if (module_status != API_JSON_OK) {
-		req->ws_pkt.payload = req->payload;
-		ws_set_err_msg(&req->ws_pkt, module_status);
+		ws_set_err_frame(&req->ws_pkt, req->payload, PAYLOAD_LEN, module, cmd,
+		                 (api_json_req_status_e) module_status);
 		int err = ws_send_frame_safe(req->hd, req->fd, &req->ws_pkt);
 		if (err) {
 			ESP_LOGE(TAG, "send out %s", esp_err_to_name(err));
@@ -567,7 +621,7 @@ void async_send_out_cb(void *arg, int module_status)
 	}
 
 	int err;
-	json_to_text(req);
+	json_to_text(req, module, cmd);
 	err = httpd_queue_work(req->hd, ws_async_resp, req);
 	if (likely(err == ESP_OK)) {
 		/* msg queued, let callee release the buffer */
@@ -581,7 +635,7 @@ end:
 	memory_pool_put(req);
 }
 
-void json_to_text(ws_msg_t *ws_msg)
+void json_to_text(ws_msg_t *ws_msg, int module, int cmd)
 {
 	int err;
 	httpd_ws_frame_t *ws_pkt = &ws_msg->ws_pkt;
@@ -589,9 +643,9 @@ void json_to_text(ws_msg_t *ws_msg)
 	err = !cJSON_PrintPreallocated(ws_msg->json.out, (char *)ws_pkt->payload, PAYLOAD_LEN - 5, 0);
 	cJSON_Delete(ws_msg->json.out);
 	if (unlikely(err)) {
-		ws_pkt->len = strlen(MSG_SEND_JSON_ERROR);
-		ws_pkt->payload = (uint8_t *)MSG_SEND_JSON_ERROR;
-		ws_pkt->final = 1;
+		ws_set_err_frame(ws_pkt, ws_msg->payload, PAYLOAD_LEN, module, cmd,
+		                 API_JSON_INTERNAL_ERR);
+		return;
 	}
 	ws_pkt->len = strlen((char *)ws_pkt->payload);
 }

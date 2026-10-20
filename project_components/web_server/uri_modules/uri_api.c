@@ -1,6 +1,7 @@
 #include "web_uri_module.h"
 #include "api_json_router.h"
 #include "birdiebot_auth.h"
+#include "web_error_json.h"
 #include "request_runner.h"
 #include "memory_pool.h"
 
@@ -10,8 +11,6 @@
 #include <cJSON.h>
 
 #define TAG __FILE_NAME__
-
-#define HTTPD_STATUS_503 "503 Busy"
 
 typedef struct post_request_t {
 	api_json_req_t json;
@@ -23,12 +22,97 @@ typedef struct post_request_t {
 static void async_send_out_cb(void *arg, int module_status);
 static int uri_api_send_out(httpd_req_t *req, post_request_t *post_req, int err);
 
+/** Extract module/cmd from a parsed JSON request (-1 when absent/invalid). */
+static void api_json_get_context(cJSON *json, int *module, int *cmd)
+{
+	*module = -1;
+	*cmd = -1;
+	if (json == NULL) {
+		return;
+	}
+	cJSON *module_json = cJSON_GetObjectItem(json, "module");
+	cJSON *cmd_json = cJSON_GetObjectItem(json, "cmd");
+	if (cJSON_IsNumber(module_json)) {
+		*module = module_json->valueint;
+	}
+	if (cJSON_IsNumber(cmd_json)) {
+		*cmd = cmd_json->valueint;
+	}
+}
+
+/** HTTP status + JSON code/text for an api_json_req_status_e (docs/protocol.md §1.1). */
+static void api_err_status(api_json_req_status_e ret, const char **status,
+                           const char **text, int *code)
+{
+	switch (ret) {
+	case API_JSON_BAD_REQUEST:
+		*status = "400 Bad Request";
+		*text = "Bad json request";
+		*code = 2;
+		break;
+	case API_JSON_UNSUPPORTED_CMD:
+		*status = "400 Bad Request";
+		*text = "Unsupported cmd";
+		*code = 4;
+		break;
+	case API_JSON_PROPERTY_ERR:
+		*status = "400 Bad Request";
+		*text = "Property error";
+		*code = 5;
+		break;
+	case API_JSON_BUSY:
+		*status = "503 Service Unavailable";
+		*text = "Resource busy";
+		*code = 6;
+		break;
+	case API_JSON_UNAUTHORIZED:
+		*status = "401 Unauthorized";
+		*text = "unauthorized";
+		*code = 7;
+		break;
+	case API_JSON_INTERNAL_ERR:
+	case API_JSON_OK:
+	case API_JSON_ASYNC:
+	default:
+		*status = "500 Internal Server Error";
+		*text = "Internal error";
+		*code = 3;
+		break;
+	}
+}
+
+/** Send a uniform JSON error body (module/cmd kept when known, F10). */
+static esp_err_t api_send_error(httpd_req_t *req, const char *status, int module,
+                                int cmd, const char *text, int code)
+{
+	char buf[192];
+	int n = web_error_json_format(buf, sizeof(buf), module, cmd, text, code);
+
+	httpd_resp_set_status(req, status);
+	httpd_resp_set_type(req, "application/json");
+	return httpd_resp_send(req, n > 0 ? buf : "", n > 0 ? (size_t) n : 0);
+}
+
+/** Send the error body matching an api_json_req_status_e. */
+static esp_err_t api_send_route_error(httpd_req_t *req, cJSON *json, api_json_req_status_e ret)
+{
+	int module;
+	int cmd;
+	const char *status;
+	const char *text;
+	int code;
+
+	api_json_get_context(json, &module, &cmd);
+	api_err_status(ret, &status, &text, &code);
+	return api_send_error(req, status, module, cmd, text, code);
+}
+
 
 static esp_err_t api_post_handler(httpd_req_t *req)
 {
 	uint32_t buf_len;
 	int data_len;
-	int err;
+	int err = ESP_OK;
 	post_request_t *post_req;
 	char *buf;
 	uint32_t remaining = req->content_len;
@@ -37,30 +121,29 @@ static esp_err_t api_post_handler(httpd_req_t *req)
 	/* Web auth (docs/protocol.md §1/§5): /api requires Authorization: Bearer
 	 * <pair_code> (or ?token=) plus a valid Host/Origin when enabled. */
 	if (!birdiebot_auth_http_ok(req)) {
-		static const char unauthorized[] = "{\"err\":\"unauthorized\",\"code\":7}";
-		httpd_resp_set_status(req, "401 Unauthorized");
-		httpd_resp_set_type(req, "application/json");
-		return httpd_resp_send(req, unauthorized, strlen(unauthorized));
+		return api_send_error(req, "401 Unauthorized", -1, -1, "unauthorized", 7);
 	}
 #endif
 
 	buf_len = memory_pool_get_buf_size() - sizeof(post_request_t);
 	if (unlikely(buf_len < remaining)) {
 		ESP_LOGE(TAG, "req size %lu > buf_len %lu", remaining, buf_len);
-		return ESP_FAIL;
+		return api_send_error(req, "413 Payload Too Large", -1, -1,
+		                      "Bad json request", 2);
 	}
 
 	post_req = memory_pool_get(pdMS_TO_TICKS(20));
 	if (unlikely(post_req == NULL)) {
 		ESP_LOGE(TAG, "static buf busy");
-		return ESP_FAIL;
+		return api_send_error(req, "503 Service Unavailable", -1, -1,
+		                      "Resource busy", 6);
 	}
 	buf = post_req->buf;
 
 	data_len = httpd_req_recv(req, buf, buf_len);
 	if (unlikely(data_len <= 0)) {
 		ESP_LOGE(TAG, "httpd recv error");
-		err = ESP_FAIL;
+		err = api_send_error(req, "400 Bad Request", -1, -1, "Bad json request", 2);
 		goto put_buf;
 	}
 
@@ -72,8 +155,8 @@ static esp_err_t api_post_handler(httpd_req_t *req)
 	/* Decode */
 	post_req->json.in = cJSON_ParseWithLength(buf, data_len);
 	if (unlikely(post_req->json.in == NULL)) {
-		httpd_resp_set_status(req, HTTPD_400);
-		goto end;
+		(void)api_send_error(req, "400 Bad Request", -1, -1, "Bad json request", 2);
+		goto put_buf;
 	}
 
 	post_req->json.out = NULL;
@@ -85,13 +168,13 @@ static esp_err_t api_post_handler(httpd_req_t *req)
 		if (req_queue_push_long_run(&post_req->async.req_task, pdMS_TO_TICKS(20))) {
 			/* queued failed */
 			httpd_req_async_handler_complete(post_req->req_out);
-			httpd_resp_set_status(req, HTTPD_STATUS_503);
-			goto end;
+			(void)api_send_route_error(req, post_req->json.in, API_JSON_BUSY);
+			goto put_buf;
 		}
 		return ESP_OK;
 	} else if (unlikely(err != API_JSON_OK)) {
-		httpd_resp_set_status(req, HTTPD_400);
-		goto end;
+		(void)api_send_route_error(req, post_req->json.in, (api_json_req_status_e) err);
+		goto put_buf;
 	}
 
 	if (post_req->json.out == NULL) {
@@ -139,9 +222,18 @@ int uri_api_send_out(httpd_req_t *req, post_request_t *post_req, int err)
 void async_send_out_cb(void *arg, int module_status)
 {
 	post_request_t *req = arg;
+	int module;
+	int cmd;
+
 	if (module_status != API_JSON_OK) {
-		httpd_sess_trigger_close(req->req_out->handle,
-		                         httpd_req_to_sockfd(req->req_out));
+		/* Uniform error body with the original request context (F10). */
+		api_json_get_context(req->json.in, &module, &cmd);
+		(void)api_send_route_error(req->req_out, req->json.in,
+		                           (api_json_req_status_e) module_status);
+		cJSON_Delete(req->json.in);
+		httpd_req_async_handler_complete(req->req_out);
+		memory_pool_put(req);
+		return;
 	}
 
 	uri_api_send_out(req->req_out, req, module_status);
