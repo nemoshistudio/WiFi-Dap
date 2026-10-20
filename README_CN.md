@@ -4,7 +4,7 @@
 
 基于 **ESP32-S3** 的无线 CMSIS-DAP 调试器，并内嵌一套完整的 Web 管理面板：一根 USB 线烧好固件后，即可通过 Wi-Fi 完成 SWD/JTAG 调试、串口转发、设备管理与浏览器本地 OTA。
 
-项目由 [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap)（MIT）与 [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools)（平台层）合并重构而来，升级到 **ESP-IDF 5.2.1**，并加入 Web UI 与 JSON/WebSocket 协议。完整文档见 **[docs/README.md](docs/README.md)**。
+项目由 [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap)（MIT）与 [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools)（Apache-2.0 平台层）合并重构而来，升级到 **ESP-IDF 5.2.1**，并加入 Web UI 与 JSON/WebSocket 协议。完整文档见 **[docs/README.md](docs/README.md)**。
 
 > ⚠️ **安全默认**：Web/JSON API、WebSocket-DAP、UART TCP 桥、OTA 上传默认**均无鉴权**，且 HTTP 为明文。请仅部署在**可信局域网**，并阅读 [§9 安全默认与加固](#9-安全默认与加固)。
 
@@ -294,17 +294,19 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 - **默认无鉴权**：HTTP **80**（`/`、`/ws`、`/api`）、TCP **3240**（USBIP / elaphureLink / WS-DAP）、TCP **1346**（UART TCP 桥）默认全部无鉴权，同一网络内即可完全控制设备与目标 MCU。
 - **默认 AP 口令 `12345678`**：物理邻近即可加入设备热点，进而获得上述全部能力；首次使用必须修改。
-- **鉴权 token 强度/传输/存储有限**：pairing token 仅 **32-bit**（8 hex），无失败限速；以明文经 HTTP/WS 传输，明文保存于 NVS（未启用 NVS 加密）与浏览器 `localStorage`，并会打印到串口日志。
+- **鉴权 token 强度/传输/存储（P1-4）**：早期 pairing token 仅 **32-bit** 且无失败限速；Web 侧已加强为 **128-bit token + AUTH 失败限速**（web-dev；N5）。token 仍以明文经 HTTP/WS 传输，明文保存于 NVS（未启用 NVS 加密）与浏览器 `localStorage`，并会打印到串口日志——作为工作室内网可接受风险保留。
 - **Web 鉴权只覆盖 80**：开启 `BIRDIEBOT_WEB_AUTH` 后，3240/1346 仍不受 token 保护，需显式关闭（Kconfig）或通过网络隔离。
 - **OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot；默认无鉴权（或 token 持有者）可写入任意有效镜像；`POST /api/ota/upload` 合入后风险等级提高，需按审查报告 §4.3 复审。
 
 > 另：默认 `auth=n` 时服务端不校验 Origin/Host，浏览器恶意页面可发起 CSWSH / DNS-rebinding（见审查报告 §1.2）。部署加固清单见 [docs/security.md](docs/security.md)。
 
+**Accepted risks (studio LAN)**：用户已决定，以下风险在**可信实验室内网**部署下**接受、不修复**：P1-1 默认无鉴权（80/3240/1346）与默认 AP 口令、P1-3 Web 鉴权不覆盖 3240/1346、P1-4 token 明文传输/存储、条件性 P0（`auth=n` 时 OTA 上传端点无鉴权）；N3/N4 与 P1-1/P1-3 同源，按同一决策接受。使用约束与 N1–N9 修复状态见 [docs/security.md#accepted-risks-studio-lan](docs/security.md#accepted-risks-studio-lan)。**勿把设备暴露到公网或不可信 Wi-Fi。**
+
 ### 9.3 启用 Web 鉴权
 
 `idf.py menuconfig → WiFi Dap web server → Enable Web UI/API token authentication (`BIRDIEBOT_WEB_AUTH`)`：
 
-- **配对码（pair code）**：默认每次启动随机生成 8 位 hex 并持久化到 `wt_nvs`，启动日志会打印
+- **配对码（pair code）**：默认自动生成 **128-bit（32 hex）** token 并持久化到 `wt_nvs`（旧 8-hex token 会自动轮换；AUTH 失败有限速），启动日志会打印
   `Web auth ENABLED; pairing token: <code>`；可用 `BIRDIEBOT_WEB_TOKEN` 固定（URL-safe，≤256 字符）。
 - **客户端携带方式**：
   - WebSocket：`ws://<ip>/ws?token=<code>`，或首帧 `{"module":0,"cmd":0,"token":"<code>"}`；
@@ -444,8 +446,11 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 - **关键契约**：[protocol.md](docs/protocol.md)（JSON/WS 协议）、[ota-local-upload.md](docs/ota-local-upload.md)、[wifi-credential-memory.md](docs/wifi-credential-memory.md)、[versioning.md](docs/versioning.md)、[board-pins.md](docs/board-pins.md)。
 - **安全**：[docs/security.md](docs/security.md)（部署加固指南）、[docs/security-review-web.md](docs/security-review-web.md)（Web/OTA/WiFi 面安全审查，P0/P1/P2 分级与证据）。
 - **反馈**：Web UI 的 Feedback 页；作者主页 <https://yunsi.studio/>；项目主页 <https://yunsi.studio/wireless-debugger>。
-- **许可证**：
-  - 本仓库整体以 **Apache License 2.0** 发布（根目录 [LICENSE](LICENSE)）。
-  - `components/DAP`、`components/USBIP`、`components/elaphureLink`、`components/dap_proxy` 保留上游 windowsair 的 **MIT** 许可（各目录内 `LICENSE`）。
-  - `web/` 前端来自 kerms 的 **MIT** 许可项目（[web/LICENCE.txt](web/LICENCE.txt)）。
-  - 各上游版权与出处见 [§11](#11-与上游的关系--变更说明) 与 [docs/merge-map.md](docs/merge-map.md)。
+- **许可证**（混合许可；完整声明见 [NOTICE](NOTICE)，全文见 [LICENSES/](LICENSES/)）：
+  - **本项目原创部分**：**Apache License 2.0**（根目录 [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)）；个别文件头另行标注（如部分 `scripts/` 为 SPDX MIT）。
+  - **第三方组件按各自原许可证**：
+    - windowsair/wireless-esp8266-dap —— **MIT**，覆盖 `components/DAP`、`components/USBIP`、`components/elaphureLink`、`components/dap_proxy`（各目录 `LICENSE`）；
+    - kerms/wireless-esp32-tools —— **Apache-2.0**，覆盖 ESP-IDF 5.2.1 平台层组件（源文件 SPDX 头）；
+    - kerms/wireless-esp32-tools-web-host —— **MIT**，覆盖 `web/` 前端（[web/LICENCE.txt](web/LICENCE.txt)）；
+    - ARM CMSIS-DAP —— **Apache-2.0**，覆盖 `components/DAP/cmsis-dap/**`。
+  - MIT 全文：[LICENSES/MIT.txt](LICENSES/MIT.txt)；版权署名与出处汇总：[NOTICE](NOTICE)；上游差异见 [§11](#11-与上游的关系--变更说明)。
