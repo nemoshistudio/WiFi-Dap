@@ -16,6 +16,17 @@
 # host user's uid/gid. ccache lives in ~/.cache/birdiebot-ccache on the host and
 # is mounted at /ccache inside the container.
 #
+# Git metadata: a linked git worktree (git worktree add) stores only a `.git`
+# *file* in the worktree, pointing at `<main>/.git/worktrees/<name>` outside the
+# project directory. Without that gitdir the containerized CMake/git calls fail
+# (`git describe`, `git show -s --format=%cd` for FW_UPD_DATE) and PROJECT_VER /
+# FW_UPD_DATE silently become empty. Before starting the container we therefore
+# resolve `git rev-parse --git-common-dir` / `--git-dir` on the host and bind-
+# mount those directories read-only at their *original absolute paths* so git
+# inside the container can follow the worktree `.git` file. If the resolution
+# fails (no git, source archive) we log a warning and continue; the build then
+# uses cmake/version.cmake's version.txt / v1.0.0 fallback.
+#
 # This script only builds locally; it never pushes, changes branches or touches
 # the git remotes.
 #
@@ -45,6 +56,8 @@ Usage: idf-docker.sh [-C <project-dir>] [-B <build-dir>] <idf.py args...>
   -B <dir>   build directory; relative to the project root (default: idf.py's own
              default, i.e. "build"). Created if missing and kept inside the project
              mount so artifacts survive the container.
+  --git-probe  print the container's git metadata (describe/commit/date) and exit;
+             use this to verify that a linked worktree's gitdir is reachable.
   -h         show this help
 
 Any other argument is forwarded verbatim to idf.py, e.g.:
@@ -60,6 +73,7 @@ EOF
 # ---------------------------------------------------------------- arg parsing
 PROJECT_DIR=""
 BUILD_DIR=""
+GIT_PROBE=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -81,6 +95,10 @@ while [ "$#" -gt 0 ]; do
             BUILD_DIR="${1#-B}"
             shift
             ;;
+        --git-probe)
+            GIT_PROBE=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -96,7 +114,11 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ "$#" -gt 0 ] || die "no idf.py arguments given (try '$SCRIPT_NAME --version' or '$SCRIPT_NAME -h')"
+if [ "$GIT_PROBE" -eq 0 ]; then
+    [ "$#" -gt 0 ] || die "no idf.py arguments given (try '$SCRIPT_NAME --version' or '$SCRIPT_NAME -h')"
+else
+    [ "$#" -eq 0 ] || die "--git-probe does not take idf.py arguments (got: $*)"
+fi
 
 # ------------------------------------------------------------- host paths
 if [ -n "$PROJECT_DIR" ]; then
@@ -106,7 +128,7 @@ else
     PROJECT_ABS="$(pwd -P)"
 fi
 
-if [ "$1" != "--version" ] && [ ! -f "$PROJECT_ABS/CMakeLists.txt" ]; then
+if [ "$GIT_PROBE" -eq 0 ] && [ "$1" != "--version" ] && [ ! -f "$PROJECT_ABS/CMakeLists.txt" ]; then
     log "warning: $PROJECT_ABS does not look like an ESP-IDF project root (no CMakeLists.txt)"
 fi
 
@@ -132,6 +154,74 @@ if [ -n "$BUILD_DIR" ]; then
     IDF_ARGS+=(-B "/project/$BUILD_REL")
 fi
 
+# ------------------------------------------------------------- git metadata
+# Linked worktrees (git worktree add) keep only a `.git` file inside the project
+# directory; the real gitdir lives outside the /project mount. Resolve both the
+# common dir and the worktree admin dir on the host and bind-mount them read-only
+# at the same absolute paths, otherwise git inside the container cannot follow
+# the `.git` file. Resolution failure is only a warning: cmake/version.cmake has
+# a version.txt -> v1.0.0 fallback for source archives / no-git builds.
+GIT_MOUNT_ARGS=()
+GIT_MOUNTED_DIRS=()
+GIT_MOUNT_NOTES=()
+
+_normalize_dir() {
+    local dir="$1"
+    [ -n "$dir" ] || return 1
+    case "$dir" in
+        /*) ;;
+        *) dir="$PROJECT_ABS/$dir" ;;
+    esac
+    dir="$(realpath -m "$dir" 2>/dev/null || true)"
+    [ -n "$dir" ] && [ -d "$dir" ] && printf '%s\n' "$dir"
+}
+
+_git_dir_from_rev_parse() {
+    local what="$1" out=""
+    out="$(git -C "$PROJECT_ABS" rev-parse --path-format=absolute "--$what" 2>/dev/null || true)"
+    if [ -z "$out" ]; then
+        # git < 2.31: no --path-format; rev-parse may print a relative path.
+        out="$(git -C "$PROJECT_ABS" rev-parse "--$what" 2>/dev/null || true)"
+    fi
+    _normalize_dir "$out"
+}
+
+_add_git_mount() {
+    local dir="$1" covered=""
+    [ -n "$dir" ] || return 0
+    # Already inside the /project mount? Nothing to do.
+    case "$dir" in
+        "$PROJECT_ABS" | "$PROJECT_ABS"/*) return 0 ;;
+    esac
+    for covered in "${GIT_MOUNTED_DIRS[@]:-}"; do
+        [ -n "$covered" ] || continue
+        case "$dir" in
+            "$covered" | "$covered"/*) return 0 ;;
+        esac
+    done
+    GIT_MOUNT_ARGS+=(-v "$dir:$dir:ro")
+    GIT_MOUNTED_DIRS+=("$dir")
+    GIT_MOUNT_NOTES+=("$dir")
+}
+
+if command -v git >/dev/null 2>&1; then
+    GIT_COMMON_DIR="$(_git_dir_from_rev_parse git-common-dir || true)"
+    GIT_DIR="$(_git_dir_from_rev_parse git-dir || true)"
+    if [ -n "$GIT_COMMON_DIR" ] || [ -n "$GIT_DIR" ]; then
+        # Parent first so a worktree admin dir (usually inside the common dir)
+        # is not mounted twice.
+        _add_git_mount "$GIT_COMMON_DIR"
+        _add_git_mount "$GIT_DIR"
+        if [ "${#GIT_MOUNTED_DIRS[@]}" -eq 0 ]; then
+            log "git metadata: not a linked worktree (gitdir lives inside the project mount)"
+        fi
+    else
+        log "warning: cannot resolve git metadata dirs for $PROJECT_ABS; containerized git may be unavailable"
+    fi
+else
+    log "warning: git not installed on the host; containerized git may be unavailable (version fallback applies)"
+fi
+
 # ------------------------------------------------------------- docker checks
 command -v docker >/dev/null 2>&1 || die "docker is not installed or not in PATH"
 
@@ -155,6 +245,12 @@ DOCKER_ARGS=(
     -w /project
 )
 
+# Read-only git metadata mounts for linked worktrees (see the git metadata block
+# above). Mounted at the same absolute path so the worktree `.git` file resolves.
+if [ "${#GIT_MOUNT_ARGS[@]}" -gt 0 ]; then
+    DOCKER_ARGS+=("${GIT_MOUNT_ARGS[@]}")
+fi
+
 # Allocate a TTY only when attached to one, so CI / redirected output still works.
 [ -t 0 ] && DOCKER_ARGS+=(-i)
 [ -t 1 ] && DOCKER_ARGS+=(-t)
@@ -168,5 +264,31 @@ log "image=$IMAGE"
 log "project=$PROJECT_ABS (-> /project)"
 [ -n "$BUILD_DIR" ] && log "build=$BUILD_ABS (-> ${IDF_ARGS[1]})"
 log "ccache=$CCACHE_HOST (-> /ccache)"
+if [ "${#GIT_MOUNT_NOTES[@]}" -gt 0 ]; then
+    log "git metadata (ro): ${GIT_MOUNT_NOTES[*]}"
+fi
+
+if [ "$GIT_PROBE" -eq 1 ]; then
+    # Verifies that a linked worktree's gitdir is reachable from inside the
+    # container (used to debug empty PROJECT_VER / FW_UPD_DATE). Exits non-zero
+    # if git describe or the commit-date query fails.
+    read -r -d '' PROBE_CMD <<'PROBE' || true
+fail=0
+probe() {
+    printf '%-24s: ' "$1"; shift
+    if out="$("$@" 2>&1)"; then printf '%s\n' "$out"; else printf 'FAILED (%s)\n' "$out"; fail=1; fi
+}
+printf '%-24s: %s\n' "git-version" "$(git --version 2>&1)"
+probe "git-common-dir" git -C /project rev-parse --path-format=absolute --git-common-dir
+probe "git-dir" git -C /project rev-parse --path-format=absolute --git-dir
+probe "describe --tags" git -C /project describe --tags --always --dirty
+probe "describe v-match" git -C /project describe --tags --dirty --always --match 'v[0-9]*'
+probe "rev-parse --short" git -C /project rev-parse --short HEAD
+probe "commit-date" git -C /project show -s --format=%cd --date=format:%Y-%m-%d
+exit "$fail"
+PROBE
+    log "git probe (container)"
+    exec docker "${DOCKER_ARGS[@]}" "$IMAGE" bash -c "$PROBE_CMD"
+fi
 
 exec docker "${DOCKER_ARGS[@]}" "$IMAGE" idf.py "${IDF_ARGS[@]}" "$@"
