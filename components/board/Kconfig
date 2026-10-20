@@ -1,0 +1,54 @@
+menu "WiFi Dap board configuration"
+
+    choice BIRDIEBOT_BOARD
+        prompt "Target board"
+        default BIRDIEBOT_BOARD_ZXR_DAP_S3 if IDF_TARGET_ESP32S3
+        default BIRDIEBOT_BOARD_GENERIC_C3 if IDF_TARGET_ESP32C3
+        default BIRDIEBOT_BOARD_GENERIC_ESP32 if IDF_TARGET_ESP32
+        help
+            Board pin map used by the CMSIS-DAP layer (components/DAP),
+            the UART TCP bridge and the status LEDs.
+
+            The pin tables are documented in docs/board-pins.md.
+            Select the board that matches `idf.py set-target ...`; a
+            mismatch only produces a build warning (see
+            src/birdiebot_board.c), it is not a hard error so that
+            compile-only target bring-up stays possible.
+
+        config BIRDIEBOT_BOARD_ZXR_DAP_S3
+            bool "BOARD_ZXR_DAP_S3 (default, WiFi Dap ESP32-S3 DAP)"
+            depends on IDF_TARGET_ESP32S3
+            help
+                Default WiFi Dap board (8MB ESP32-S3):
+                SWCLK=12 SWDIO=11 TDO=15 TDI=16 nTRST=14 nRESET=13,
+                UART1 bridge TX=10 RX=9, status LEDs 5/6, WiFi LED 4.
+
+        config BIRDIEBOT_BOARD_GENERIC_S3
+            bool "BOARD_GENERIC_S3 (upstream generic ESP32-S3 wiring)"
+            depends on IDF_TARGET_ESP32S3
+            help
+                Upstream / fork generic ESP32-S3 wiring:
+                SWCLK=12 SWDIO=11 TDO=9 TDI=10 nTRST=14 nRESET=13,
+                UART1 bridge TX=17 RX=18, no status LEDs.
+
+        config BIRDIEBOT_BOARD_GENERIC_C3
+            bool "BOARD_GENERIC_C3 (compile-only, ESP32-C3)"
+            depends on IDF_TARGET_ESP32C3
+            help
+                Upstream generic ESP32-C3 wiring:
+                SWCLK=6 SWDIO=7 TDO=3 TDI=5 nTRST=4 nRESET=10,
+                UART1 bridge TX=21 RX=20, no status LEDs.
+                Compile-only in this project (no hardware validation).
+
+        config BIRDIEBOT_BOARD_GENERIC_ESP32
+            bool "BOARD_GENERIC_ESP32 (compile-only, ESP32)"
+            depends on IDF_TARGET_ESP32
+            help
+                Upstream generic ESP32 wiring:
+                SWCLK=14 SWDIO=13 TDO=19 TDI=18 nTRST=25 nRESET=26,
+                UART2 bridge TX=23 RX=22, no status LEDs.
+                Compile-only in this project (no hardware validation).
+
+    endchoice
+
+endmenu
