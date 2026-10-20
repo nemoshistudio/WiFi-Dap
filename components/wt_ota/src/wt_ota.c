@@ -465,6 +465,9 @@ esp_err_t wt_ota_upload_begin(uint32_t content_length)
 
 	s_ota.handle = handle;
 	mbedtls_sha256_init(&s_ota.sha);
+	/* mbedtls requires an explicit starts() call after init(); without it the
+	 * digest is computed over an uninitialised state (hardware-verified bug). */
+	mbedtls_sha256_starts(&s_ota.sha, 0);
 	s_ota.sha_active = true;
 	s_ota.sha_hex[0] = '\0';
 	ota_unlock();
