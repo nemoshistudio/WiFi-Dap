@@ -32,6 +32,7 @@
 | 4 | `Unsupported cmd` |
 | 5 | `Property error`（字段缺失/类型错/取值非法） |
 | 6 | `Busy`（内存池/请求队列满，稍后重试） |
+| 7 | `Unauthorized`（鉴权开启且 token 缺失/错误） |
 
 ---
 
@@ -43,6 +44,7 @@
 
 | cmd | 名称 | 请求 | 响应 | 说明 |
 |---|---|---|---|---|
+| **0** | **AUTH** | `{"module":0,"cmd":0,"token":"<pair_code>"}` | `{"module":0,"cmd":0,"ok":true}`；失败 `{"err":"unauthorized","code":7}` | 仅在 `BIRDIEBOT_WEB_AUTH=y` 时必需；也可用 `?token=` 或 `Authorization: Bearer` 免首帧 |
 | 1 | GET_FM_INFO | – | `{"fm_ver":"v1.0.0","upd_date":"YYYY-MM-DD","protocol_version":1}` | 固件版本 + 协议版本；`upd_date` 由构建注入 |
 | 2 | REBOOT | – | 回显请求 | 2 秒后重启 |
 | 3 | GET_SYS_INFO | – | `{"sn":"XXXXXXXXXXXX","hw_ver":"...","mf_date":"YYYY-MM-DD"}` | SN 默认 = WiFi STA MAC 无分隔大写 12 hex；hw_ver/mf 由构建注入，可留空字符串 |
