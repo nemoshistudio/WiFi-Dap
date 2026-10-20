@@ -3,13 +3,13 @@
     <div v-if="props.editCell">
       <div>
         <div class="mb-1">
-          <el-input v-model="model.label" placeholder="Label" size="small">
-            <template #prepend>Label</template>
+          <el-input v-model="model.label" :placeholder="translate('widget.commandLabel')" size="small">
+            <template #prepend>{{ translate('widget.commandLabel') }}</template>
           </el-input>
         </div>
         <div class="mb-1">
-          <el-input v-model="model.command" placeholder="UART Command" size="small">
-            <template #prepend>Command</template>
+          <el-input v-model="model.command" :placeholder="translate('widget.commandValue')" size="small">
+            <template #prepend>{{ translate('widget.commandValue') }}</template>
           </el-input>
         </div>
       </div>
@@ -20,7 +20,7 @@
         <p class="ml-1 font-mono text-gray-500 text-[10px]">{{ model.command }}</p>
       </div>
       <div>
-        <strong>R:</strong>
+        <strong>{{ translate('widget.responsePrefix') }}:</strong>
         <el-text class="ml-1 font-mono">{{ model.response }}</el-text>
       </div>
     </div>
@@ -37,7 +37,8 @@
 </template>
 
 <script setup lang="ts">
-import { defineModel, type PropType, ref } from 'vue'
+import { defineModel, ref } from 'vue'
+import {translate} from "@/locales"
 import { ElInput, ElText } from 'element-plus'
 import { useElementSize } from '@vueuse/core'
 

@@ -51,7 +51,7 @@
             <p class="text-xs">{{ $t('uart.actual') }} {{ $t('uart.baudrate') }}:{{ store.uartBaudReal }}</p>
 
             <el-form-item :label="translate('uart.dataBits')" class="mb-2">
-              <el-select v-model="store.uartConfig.data_bits" :teleported="false" @change="onUartConfigChange">
+              <el-select v-model="store.uartConfig.data_bits" :teleported="false" :placeholder="translate('common.select')" @change="onUartConfigChange">
                 <el-option
                     v-for="item in uartDataBitsOptions"
                     :key="item.key"
@@ -62,7 +62,7 @@
             </el-form-item>
 
             <el-form-item :label="translate('uart.parity')" class="mb-2">
-              <el-select v-model="store.uartConfig.parity" :teleported="false" @change="onUartConfigChange">
+              <el-select v-model="store.uartConfig.parity" :teleported="false" :placeholder="translate('common.select')" @change="onUartConfigChange">
                 <el-option
                     v-for="item in uartParityOptions"
                     :key="item.key"
@@ -73,7 +73,7 @@
             </el-form-item>
 
             <el-form-item :label="translate('uart.stopBits')">
-              <el-select v-model="store.uartConfig.stop_bits" :teleported="false" @change="onUartConfigChange">
+              <el-select v-model="store.uartConfig.stop_bits" :teleported="false" :placeholder="translate('common.select')" @change="onUartConfigChange">
                 <el-option
                     v-for="item in uartStopBitsOptions"
                     :key="item.key"
@@ -111,10 +111,10 @@
                     <el-checkbox border v-model="store.showText" :label="translate('uart.text')"/>
                   </div>
                   <div class="flex flex-col">
-                    <el-checkbox border v-model="store.showHex" label="HEX"/>
+                    <el-checkbox border v-model="store.showHex" :label="translate('uart.hexMode')"/>
                   </div>
                   <div class="flex flex-col">
-                    <el-checkbox border v-model="store.showHexdump" label="HEXDUMP"/>
+                    <el-checkbox border v-model="store.showHexdump" :label="translate('uart.hexdumpMode')"/>
                   </div>
                   <div class="flex flex-col">
                     <el-checkbox border v-model="store.showTimestamp" :label="translate('uart.timestamp')"/>
@@ -124,13 +124,13 @@
                   </div>
 
                   <el-tag type="success">
-                    <el-text type="success">RX HEXDUMP {{ $t("uart.highlight") }}</el-text>
+                    <el-text type="success">{{ translate("uart.highlightRx") }}</el-text>
                     <el-color-picker v-model="store.RxHexdumpColor" show-alpha :predefine="store.predefineColors"
                                      size="small"/>
                   </el-tag>
 
                   <el-tag type="primary">
-                    <el-text type="primary">TX HEXDUMP {{ $t("uart.highlight") }}</el-text>
+                    <el-text type="primary">{{ translate("uart.highlightTx") }}</el-text>
                     <el-color-picker v-model="store.TxHexdumpColor" show-alpha :predefine="store.predefineColors"
                                      size="small"/>
                   </el-tag>

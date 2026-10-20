@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 302
+const EXPECTED_TOTAL = 314
 const EXPECTED_BASELINE = 180
-const EXPECTED_ADDED = 122
+const EXPECTED_ADDED = 134
 
 const errors = []
 const warnings = []
@@ -98,6 +98,7 @@ const ADDED_KEYS = [
         'cancel', 'confirm', 'close', 'save', 'delete', 'edit', 'back', 'retry', 'refresh',
         'reset', 'apply', 'loading', 'success', 'failed', 'error', 'warning', 'unknown',
         'yes', 'no', 'copy', 'copied', 'notConnected', 'unsupported', 'details', 'required', 'actions',
+        'select', 'labWarning',
     ]),
     ...keys('protocol', [
         'title', 'version', 'webVersion', 'firmwareVersion', 'buildTag', 'buildTime', 'match',
@@ -124,9 +125,11 @@ const ADDED_KEYS = [
     ]),
     ...keys('about', ['hardwareVersion', 'manufactureDate', 'board', 'copyInfo']),
     ...keys('system', ['reboot', 'rebooting']),
+    ...keys('widget', ['commandLabel', 'commandValue', 'responsePrefix', 'resetConfirm']),
     ...keys('uart', [
         'instance', 'connectFailed', 'overflowWarning', 'binaryError', 'remoteUnsupported',
-        'invalidHex',
+        'invalidHex', 'hexMode', 'hexdumpMode', 'highlightRx', 'highlightTx',
+        'sendShortcut', 'noResponse',
     ]),
 ]
 

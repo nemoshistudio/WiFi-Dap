@@ -170,7 +170,7 @@
       </el-tooltip>
 
       <el-link @click="store.isSendTextFormat = !store.isSendTextFormat">
-        <el-tag class="font-mono font-bold" size="small">{{ translate('uart.sendFormat') }}：{{ store.isSendTextFormat ? translate("uart.text") : "HEX" }}</el-tag>
+        <el-tag class="font-mono font-bold" size="small">{{ translate('uart.sendFormat') }}：{{ store.isSendTextFormat ? translate("uart.text") : translate("uart.hexMode") }}</el-tag>
       </el-link>
     </div>
     <div class="flex gap-2">
@@ -198,10 +198,10 @@
     <el-input type="textarea" :autosize="{ minRows: 1, maxRows: 6}" v-model="store.uartInputTextBox" clearable
               :placeholder="store.isSendTextFormat ?
               translate('uart.textAndEscape') :
-              'HEX'"
+              translate('uart.hexMode')"
               @keydown="handleTextboxKeydown"
     ></el-input>
-    <el-tooltip content="Ctrl+Enter" placement="top" :auto-close="500">
+    <el-tooltip :content="translate('uart.sendShortcut') + ': Ctrl+Enter'" placement="top" :auto-close="500">
       <el-button type="primary"
                  @click="onSendClick">
         {{ (store.isSendTextFormat || store.isHexStringValid) ? translate("uart.send") : translate("uart.format") }}
