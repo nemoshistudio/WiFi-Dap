@@ -1,5 +1,31 @@
 menu "WiFi Dap web server (HTTP / WebSocket)"
 
+    config BIRDIEBOT_TARGET_FLASH_ENABLE
+        bool "Enable Web target-flash endpoints (/api/target/*)"
+        default y
+        help
+            Registers the browser-driven direct-flash HTTP endpoints:
+
+              GET  /api/target/info     probe the SWD target, return identity
+                                        (family/DPIDR/CPUID/IDCODE/UID/flash)
+              POST /api/target/flash    octet-stream upload; the body is
+                                        streamed over SWD and programmed into the
+                                        target flash while it arrives (no
+                                        staging partition)
+              GET  /api/target/status   flash engine status snapshot
+              POST /api/target/reset    optional {"run":true} SWD reset/run
+
+            The flash algorithm lives in components/target_flash (CMSIS-DAP
+            over the existing SWD pins).  While flashing, the flash engine owns
+            the DAP exclusively: USBIP / WS-DAP / elaphureLink sessions are
+            paused and restored afterwards.  The browser-side upload progress
+            is driven by XHR events; other HTTP requests are only serviced
+            between chunks and during the erase/verify phases.
+
+            Intended for an internal/lab LAN only (the web login feature was
+            removed by project decision; the browser Host/Origin guard still
+            applies to these endpoints).  Disable to compile the endpoints out.
+
     config BIRDIEBOT_WEB_ALLOWED_ORIGIN
         string "Extra allowed Host/Origin entries (comma separated)"
         default ""
