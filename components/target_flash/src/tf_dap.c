@@ -9,6 +9,8 @@
 
 #include "cmsis-dap/include/DAP.h"
 
+#include "tf_internal.h"
+
 #include "tf_dap.h"
 
 #define DAP_TRANSFER_STATUS_OK 0x01U
@@ -41,7 +43,9 @@ static esp_err_t tf_dap_exec(uint32_t req_len)
     }
 
     memset(s_resp, 0, sizeof(s_resp));
+    tf_stage_mark(70U);
     ret = DAP_ExecuteCommand(s_req, s_resp);
+    tf_stage_mark(71U);
     s_resp_len = ret & 0xFFFFU;
 
     if (s_resp_len < 2U || s_resp_len > TF_DAP_PACKET_SIZE) {

@@ -38,6 +38,13 @@ esp_err_t tf_debug_read_pc(uint32_t *pc, bool *halted, bool *lockup);
 /** SWD link bring-up diagnostic report (text, for /tf?cmd=diag). */
 esp_err_t tf_debug_link_diag(char *out, size_t out_len);
 
+/** Last bring-up stage reached (RTC noinit; survives a panic reboot). */
+uint32_t tf_debug_last_stage(void);
+
+/** Reset the RTC stage marker at boot so a stale value from a previous run is
+ *  never reported. */
+void tf_debug_stage_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

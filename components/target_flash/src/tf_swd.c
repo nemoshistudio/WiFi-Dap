@@ -15,6 +15,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <esp_attr.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 
@@ -25,6 +26,23 @@
 #define TF_CTRL_STAT_PWR_MASK 0xA0000000U
 #define TF_CTRL_STAT_PWR_REQ  0x50000000U
 #define TF_DP_ABORT_CLEAR     0x0000001EU
+
+/* Last reached bring-up stage. RTC no-init memory survives a panic reboot, so
+ * after a crash the /tf debug endpoint can report where it died. */
+RTC_NOINIT_ATTR static uint32_t s_tf_stage;
+RTC_NOINIT_ATTR static uint32_t s_tf_stage_magic;
+#define TF_STAGE_MAGIC 0x54464C41U
+
+void tf_stage_mark(uint32_t stage)
+{
+    s_tf_stage_magic = TF_STAGE_MAGIC;
+    s_tf_stage = stage;
+}
+
+uint32_t tf_stage_get(void)
+{
+    return (s_tf_stage_magic == TF_STAGE_MAGIC) ? s_tf_stage : 0U;
+}
 
 uint64_t tf_now_ms(void)
 {
@@ -88,10 +106,12 @@ esp_err_t tf_swd_read_u32(uint32_t addr, uint32_t *value)
     items[1].request = TF_REQ_AP_READ(TF_AP_DRW);
     items[1].data = 0U;
 
+    tf_stage_mark(30U);
     if (tf_dap_transfer(items, 2U, data, &count) != ESP_OK || count != 1U) {
         ESP_LOGE(TF_TAG, "read32 0x%08X failed", (unsigned)addr);
         return ESP_FAIL;
     }
+    tf_stage_mark(31U);
     *value = data[0];
     return ESP_OK;
 }
@@ -329,9 +349,11 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     uint32_t idcode = 0U;
     uint32_t csw = 0U;
 
+    tf_stage_mark(1U);
     if (tf_dap_connect_swd(NULL) != ESP_OK) {
         return ESP_FAIL;
     }
+    tf_stage_mark(2U);
     /* Line reset, JTAG-to-SWD switch sequence, line reset, idle cycles. */
     if (tf_dap_swj_sequence(51U, line_reset) != ESP_OK ||
         tf_dap_swj_sequence(16U, jtag_to_swd) != ESP_OK ||
@@ -339,23 +361,30 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         tf_dap_swj_sequence(8U, idle) != ESP_OK) {
         return ESP_FAIL;
     }
+    tf_stage_mark(3U);
     if (tf_dap_swj_clock(TF_SWD_CLOCK_HZ) != ESP_OK) {
         return ESP_FAIL;
     }
+    tf_stage_mark(4U);
     if (tf_dap_swd_configure(1U, false) != ESP_OK) {
         return ESP_FAIL;
     }
+    tf_stage_mark(5U);
     if (tf_dap_transfer_configure(0U, 1000U, 100U) != ESP_OK) {
         return ESP_FAIL;
     }
+    tf_stage_mark(6U);
     /* Release nRESET before touching the target. */
     (void)tf_dap_swj_pins(0x80U, 0x80U, 0U);
+    tf_stage_mark(7U);
 
     /* The SW-DP must answer DPIDR before any write is attempted. */
+    tf_stage_mark(60U);
     if (tf_swd_read_dp(0x00U, &idcode) != ESP_OK) {
         ESP_LOGE(TF_TAG, "SWD: no DPIDR response (target absent / SWD disabled)");
         return ESP_FAIL;
     }
+    tf_stage_mark(61U);
     if (idcode == 0U || idcode == 0xFFFFFFFFU) {
         ESP_LOGE(TF_TAG, "SWD: invalid DPIDR 0x%08X", (unsigned)idcode);
         return ESP_FAIL;
@@ -366,6 +395,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
      * set), not DP ABORT (OpenOCD dap_dp_init does the same).  The ABORT clear
      * is only a best-effort follow-up: some SW-DP implementations reject it
      * before power-up and it is not required for SWD operation. */
+    tf_stage_mark(8U);
     if (tf_swd_write_dp(TF_DP_CTRL_STAT,
                         TF_CTRL_STAT_PWR_REQ | 0x00000020U /* SSTICKYERR */ |
                         0x00000002U /* SSTICKYORUN */) != ESP_OK) {
@@ -377,6 +407,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         return ESP_FAIL;
     }
 
+    tf_stage_mark(9U);
     {
         uint64_t deadline = tf_now_ms() + 1000U;
         for (;;) {
@@ -394,11 +425,13 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         }
     }
 
+    tf_stage_mark(10U);
     /* Clear any stale sticky errors (best effort; harmless if unsupported). */
     if (tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR) != ESP_OK) {
         ESP_LOGW(TF_TAG, "SWD: DP ABORT clear ignored (power-up done)");
     }
 
+    tf_stage_mark(11U);
     /* SELECT = AP0/bank0, then configure the AHB-AP for 32-bit incrementing. */
     if (tf_swd_write_dp(TF_DP_SELECT, 0U) != ESP_OK) {
         return ESP_FAIL;
@@ -407,6 +440,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         ESP_LOGE(TF_TAG, "SWD: AHB-AP CSW write failed");
         return ESP_FAIL;
     }
+    tf_stage_mark(12U);
     if (tf_swd_read_ap(TF_AP_CSW, &csw) == ESP_OK && csw != TF_AP_CSW_32BIT_INC) {
         ESP_LOGW(TF_TAG, "SWD: AP CSW read-back 0x%08X (wanted 0x%08X)",
                  (unsigned)csw, (unsigned)TF_AP_CSW_32BIT_INC);
@@ -415,6 +449,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     if (dpidr != NULL) {
         *dpidr = idcode;
     }
+    tf_stage_mark(13U);
     ESP_LOGI(TF_TAG, "SWD link up: DPIDR=0x%08X CTRL/STAT=0x%08X CSW=0x%08X",
              (unsigned)idcode, (unsigned)dp_ctrl, (unsigned)csw);
     return ESP_OK;

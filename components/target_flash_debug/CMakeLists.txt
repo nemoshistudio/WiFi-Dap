@@ -14,4 +14,12 @@ idf_component_register(
     PRIV_REQUIRES target_flash web_server esp_http_server
 )
 
+# Bring-up aid: capture the faulting PC of a panic in RTC memory so the /tf
+# endpoint can report it after the reboot (debug component only).
+target_link_options(${COMPONENT_LIB} INTERFACE
+    "-Wl,--wrap=esp_panic_handler"
+    "-Wl,--wrap=panic_abort"
+    "-Wl,--wrap=__assert_func"
+)
+
 idf_component_set_property(${COMPONENT_NAME} WHOLE_ARCHIVE ON)

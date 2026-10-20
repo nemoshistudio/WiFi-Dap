@@ -297,6 +297,7 @@ static esp_err_t tf_probe_link(void)
     }
     s_target.dpidr = dpidr;
 
+    tf_stage_mark(20U);
     err = tf_swd_read_u32(TF_REG_CPUID, &cpuid);
     if (err != ESP_OK) {
         snprintf(s_info.family, sizeof(s_info.family), "unknown");
@@ -317,6 +318,7 @@ static esp_err_t tf_probe_link(void)
     s_target.family = (ops == &tf_family_stm32f4_ops) ? TF_FAMILY_STM32F4
                                                       : TF_FAMILY_STM32H7;
 
+    tf_stage_mark(21U);
     err = ops->probe(&s_target);
     if (err != ESP_OK) {
         snprintf(s_info.family, sizeof(s_info.family), "unknown");
@@ -920,4 +922,15 @@ esp_err_t tf_debug_link_diag(char *out, size_t out_len)
     }
     tf_api_exit();
     return err;
+}
+
+
+uint32_t tf_debug_last_stage(void)
+{
+    return tf_stage_get();
+}
+
+void tf_debug_stage_reset(void)
+{
+    tf_stage_mark(0U);
 }

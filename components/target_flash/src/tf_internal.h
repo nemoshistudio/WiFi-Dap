@@ -126,6 +126,10 @@ typedef struct tf_family_ops {
 extern const tf_family_ops_t tf_family_stm32f4_ops;
 extern const tf_family_ops_t tf_family_stm32h7_ops;
 
+/* ---- bring-up stage tracking (RTC noinit; survives a panic reboot) ---- */
+void tf_stage_mark(uint32_t stage);
+uint32_t tf_stage_get(void);
+
 /* ---- helpers implemented in tf_swd.c (shared by the family modules) ---- */
 uint64_t tf_now_ms(void);
 esp_err_t tf_swd_wait_clear(uint32_t addr, uint32_t mask, uint32_t timeout_ms);
