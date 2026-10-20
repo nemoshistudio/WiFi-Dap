@@ -286,3 +286,7 @@ scripts/idf-docker.sh -C . set-target esp32     && scripts/idf-docker.sh build
 | 日期 | 变更 | 作者 |
 |---|---|---|
 | 2026-10-20 | WP-006 初版：4 块板（zxr_dap_s3 默认 + 3 通用）、Kconfig 选择、引脚/默认值契约 | board-scaffold |
+
+### WiFi 状态灯
+
+`BIRDIEBOT_BOARD_HAS_WIFI_LED=1` 的板子在 **STA 获取 IP 后**把 `PIN_LED_WIFI_STATUS` 拉高点亮（ZXR DAP S3 = GPIO4），STA 断开时拉低。实现位于 `project_components/wifi_manager/`（`wifi_manager_wifi_led_set`），不占用 Legacy LEDC 通道。
