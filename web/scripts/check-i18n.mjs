@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 295
+const EXPECTED_TOTAL = 302
 const EXPECTED_BASELINE = 180
-const EXPECTED_ADDED = 115
+const EXPECTED_ADDED = 122
 
 const errors = []
 const warnings = []
@@ -97,7 +97,7 @@ const ADDED_KEYS = [
     ...keys('common', [
         'cancel', 'confirm', 'close', 'save', 'delete', 'edit', 'back', 'retry', 'refresh',
         'reset', 'apply', 'loading', 'success', 'failed', 'error', 'warning', 'unknown',
-        'yes', 'no', 'copy', 'copied', 'notConnected', 'unsupported', 'details', 'required',
+        'yes', 'no', 'copy', 'copied', 'notConnected', 'unsupported', 'details', 'required', 'actions',
     ]),
     ...keys('protocol', [
         'title', 'version', 'webVersion', 'firmwareVersion', 'buildTag', 'buildTime', 'match',
@@ -108,14 +108,14 @@ const ADDED_KEYS = [
         'title', 'description', 'empty', 'autoSave', 'autoSaveHint', 'priority', 'lastSuccess',
         'current', 'connect', 'connecting', 'forget', 'forgetConfirm', 'forgetConfirmTitle',
         'deleted', 'add', 'addTitle', 'added', 'updated', 'invalidPassword', 'maxReached',
-        'connectFailed',
+        'connectFailed', 'apDefault', 'apCustom', 'apDefaultHint',
     ]),
     ...keys('ota.upload', [
         'title', 'description', 'selectFile', 'dragHint', 'fileName', 'fileSize', 'fileVersion',
         'fileDate', 'fileInvalid', 'tooLarge', 'sha256', 'verifyingFile', 'upload', 'uploading',
         'cancel', 'cancelConfirm', 'progress', 'speed', 'eta', 'verifying', 'ready',
         'rebootNote', 'success', 'failed', 'aborted', 'sameVersionWarn', 'downgradeWarn',
-        'authRequired', 'current',
+        'authRequired', 'current', 'labWarning', 'slotSize', 'slotFree',
     ]),
     ...keys('ota.status', ['idle', 'receiving', 'verifying', 'ready', 'applying', 'error']),
     ...keys('auth', [

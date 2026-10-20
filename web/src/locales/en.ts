@@ -230,6 +230,9 @@ export default {
             invalidPassword: "Wi-Fi password must be at least 8 characters",
             maxReached: "Saved network limit reached ({max})",
             connectFailed: "Connection failed: {err}",
+            apDefault: "Default name",
+            apCustom: "Custom name",
+            apDefaultHint: "Default AP name format: WiFi-Dap-XXXX (XXXX = last two MAC bytes, uppercase hex)",
         },
     },
 
@@ -282,6 +285,7 @@ export default {
         unsupported: 'Not supported by the current firmware',
         details: 'Details',
         required: 'Required',
+        actions: 'Actions',
     },
 
     navbar: {
@@ -336,6 +340,9 @@ export default {
             downgradeWarn: 'The selected firmware is older. Downgrade anyway?',
             authRequired: 'Firmware authentication is enabled. Sign in first.',
             current: 'Currently running',
+            labWarning: 'Authentication is disabled by default. Use this page only on a trusted LAN; anyone who can reach the device can upload firmware.',
+            slotSize: 'OTA slot size',
+            slotFree: 'OTA slot free',
         },
         status: {
             idle: 'Idle',
