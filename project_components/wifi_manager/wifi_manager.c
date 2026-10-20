@@ -40,22 +40,29 @@
 
 static const uint32_t s_rotation_backoff_ms[] = {5000, 10000, 20000, 30000};
 
+/* scan_run() result codes */
+#define WIFI_SCAN_OK 0
+#define WIFI_SCAN_FAILED 1
+#define WIFI_SCAN_CANCELED 2
+#define WIFI_SCAN_BUSY 3
+
 typedef struct wifi_ctx_t {
 	SemaphoreHandle_t lock;
 	EventGroupHandle_t events;
 	TaskHandle_t task;         /* task to notify for scan / connect results */
 	TaskHandle_t rotation_task;
 
-	union {
-		struct {
-			wifi_ap_record_t *ap;
-			uint16_t total_aps;
-			uint8_t max_ap;
-		} scan;
-		struct {
-			ip_event_got_ip_t *event;
-		} conn;
-	};
+	/* Scan operation state. ctx.lock only protects publishing/clearing this
+	 * block; the per-channel waits run WITHOUT the lock so a multi-second scan
+	 * never blocks other WiFi commands (finding F7). Only one scan runs at a
+	 * time: a Web SCAN stops the rotation task before scanning, and the rotation
+	 * task aborts its scan as soon as rotation_cancel is set. */
+	wifi_ap_record_t *scan_ap;
+	uint16_t scan_total_aps;
+	uint8_t scan_max_ap;
+
+	/* Result of the connect attempt in flight (GOT_IP event; NULL = failure). */
+	ip_event_got_ip_t *conn_event;
 
 	/* cross task flags */
 	volatile uint8_t is_endless_connect;
@@ -97,7 +104,8 @@ static int set_wifi_mode(wifi_apsta_mode_e mode);
 static void handle_wifi_connected(void);
 static void handle_wifi_disconnected(void);
 static void rotation_request_stop(void);
-static int scan_loop(void);
+static int scan_run(wifi_ap_record_t *aps, uint16_t max_ap, uint16_t *found,
+                    bool cancellable);
 static void delayed_set_ap_stop(void *arg);
 static void delayed_set_ap_start(void *arg);
 
@@ -354,29 +362,62 @@ static void wifi_led_set_on(void)
 static void wifi_event_scan_channel_done(uint16_t number, wifi_ap_record_t *aps)
 {
 	(void)aps;
-	ctx.scan.total_aps += number;
+	ctx.scan_total_aps += number;
 	if (ctx.task) {
 		xTaskNotifyGive(ctx.task);
 	}
 }
 
-static int scan_loop(void)
+/**
+ * Run the per-channel scan (contract §5.3: <= 10 s, same rhythm as the C
+ * implementation).
+ *
+ * F7 fix (docs/hardware-test-wifi.md §11.3): the multi-second per-channel waits
+ * are executed WITHOUT ctx.lock. The lock is only taken to publish and clear the
+ * scan context, so other WiFi commands (GET_SAVED_LIST/GET_AP_INFO/CONNECT/...)
+ * are never blocked for the whole scan and a Web SCAN is not rejected with
+ * code=6 just because the rotation task is scanning.
+ *
+ * @param cancellable true for the rotation task: abort as soon as a Web SCAN
+ *                    requested rotation_cancel (<= one channel wait).
+ * @return WIFI_SCAN_OK / WIFI_SCAN_FAILED / WIFI_SCAN_CANCELED / WIFI_SCAN_BUSY.
+ */
+static int scan_run(wifi_ap_record_t *aps, uint16_t max_ap, uint16_t *found,
+                    bool cancellable)
 {
 	uint32_t ret;
 	uint16_t number;
+	int result = WIFI_SCAN_OK;
 
-	ctx.scan.total_aps = 0;
+	if (aps == NULL || found == NULL || max_ap == 0) {
+		return WIFI_SCAN_FAILED;
+	}
+	/* Publish the scan context under the lock, then release it for the waits. */
+	if (xSemaphoreTake(ctx.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+		ESP_LOGW(TAG, "scan setup: lock busy");
+		return WIFI_SCAN_BUSY;
+	}
+	ctx.scan_ap = aps;
+	ctx.scan_max_ap = (uint8_t)(max_ap > UINT8_MAX ? UINT8_MAX : max_ap);
+	ctx.scan_total_aps = 0;
+	ctx.task = xTaskGetCurrentTaskHandle();
+	xSemaphoreGive(ctx.lock);
 
 	for (int scan_channel = 1; scan_channel <= 13; ++scan_channel) {
-		if (ctx.scan.total_aps >= ctx.scan.max_ap) {
+		if (cancellable && ctx.rotation_cancel) {
+			result = WIFI_SCAN_CANCELED;
 			break;
 		}
-		number = ctx.scan.max_ap - ctx.scan.total_aps;
+		if (ctx.scan_total_aps >= ctx.scan_max_ap) {
+			break;
+		}
+		number = (uint16_t)(ctx.scan_max_ap - ctx.scan_total_aps);
 		if (wifi_event_trigger_scan(scan_channel,
 		                            wifi_event_scan_channel_done, number,
-		                            &ctx.scan.ap[ctx.scan.total_aps])) {
+		                            &aps[ctx.scan_total_aps])) {
 			ESP_LOGE(TAG, "trigger scan %d error", scan_channel);
-			return 1;
+			result = WIFI_SCAN_FAILED;
+			break;
 		}
 		/* shadow wifi_event_scan_channel_done() called */
 		vTaskDelay(pdMS_TO_TICKS(100));
@@ -384,17 +425,23 @@ static int scan_loop(void)
 		if (ret == 0) {
 			/* timeout */
 			ESP_LOGE(TAG, "scan channel %d timeout", scan_channel);
-			return 1;
+			result = WIFI_SCAN_FAILED;
+			break;
 		}
 	}
 
-	return 0;
+	xSemaphoreTake(ctx.lock, portMAX_DELAY);
+	*found = ctx.scan_total_aps;
+	ctx.task = NULL;
+	xSemaphoreGive(ctx.lock);
+	return result;
 }
 
 int wifi_manager_get_scan_list(uint16_t *number, wifi_ap_record_t *aps)
 {
-	int err;
 	bool interrupted_rotation = false;
+	uint16_t found = 0;
+	int result;
 
 	if (number == NULL || aps == NULL || *number == 0) {
 		return ESP_ERR_INVALID_ARG;
@@ -402,49 +449,48 @@ int wifi_manager_get_scan_list(uint16_t *number, wifi_ap_record_t *aps)
 
 	/* A Web scan interrupts an in-flight rotation (contract §5.7). The rotation
 	 * task is stopped at a safe point instead of vTaskDelete() so no task ever
-	 * dies while holding ctx.lock. */
+	 * dies while holding ctx.lock; its cancellable scan aborts within one
+	 * channel wait. */
 	ctx.rotation_suppressed = 1;
 	ctx.rotation_pending = 0;
 	if (ctx.rotation_task != NULL) {
 		rotation_request_stop();
 		interrupted_rotation = true;
 	}
-
-	if (xSemaphoreTake(ctx.lock, pdMS_TO_TICKS(3000)) != pdTRUE) {
+	if (ctx.rotation_task != NULL) {
+		/* Rotation could not stop in time (radio stuck): tell the caller to
+		 * retry instead of blocking/stealing the scan (JSON code=6, F7). */
+		ESP_LOGW(TAG, "scan requested while rotation is still running");
 		ctx.rotation_suppressed = 0;
 		return ESP_ERR_NOT_FINISHED;
 	}
-
 	if (ctx.is_endless_connect) {
 		ctx.is_endless_connect = 0;
 	}
 	if (interrupted_rotation) {
 		/* Rotation may have been connecting with a stale credential. */
+		ESP_LOGI(TAG, "Web scan interrupts credential rotation (F7 unlocked path)");
 		esp_wifi_disconnect();
-		vTaskDelay(pdMS_TO_TICKS(100));
+		vTaskDelay(pdMS_TO_TICKS(50));
 	}
 
-	ctx.scan.ap = aps;
-	ctx.scan.max_ap = *number;
-	ctx.task = xTaskGetCurrentTaskHandle();
-
-	err = scan_loop();
-
-	ctx.task = NULL;
-	*number = ctx.scan.total_aps;
-	xSemaphoreGive(ctx.lock);
-	ctx.rotation_suppressed = 0;
+	result = scan_run(aps, *number, &found, false);
+	*number = found;
 
 	/* Resume automatic reconnection after the Web scan finished. Also covers a
 	 * disconnect that happened while the scan was running (disconn_handler()
 	 * was suppressed during the scan). Do not start a fresh rotation when the
 	 * STA was idle all along (AP only / no saved credentials). */
+	ctx.rotation_suppressed = 0;
 	if (ctx.auto_reconnect && ctx.is_sta_connected == 0 &&
 	    (interrupted_rotation || ctx.rotation_pending)) {
 		ctx.rotation_pending = 0;
 		disconn_handler();
 	}
-	return err ? ESP_FAIL : ESP_OK;
+	if (result == WIFI_SCAN_BUSY) {
+		return ESP_ERR_NOT_FINISHED; /* code=6, retryable */
+	}
+	return (result == WIFI_SCAN_OK) ? ESP_OK : ESP_FAIL;
 }
 
 void *wifi_manager_get_ap_netif(void)
@@ -464,7 +510,7 @@ void *wifi_manager_get_sta_netif(void)
 static void try_connect_done(void *arg, ip_event_got_ip_t *event)
 {
 	(void)arg;
-	ctx.conn.event = event;
+	ctx.conn_event = event;
 	if (ctx.task) {
 		xTaskNotifyGive(ctx.task);
 	}
@@ -567,26 +613,22 @@ static bool ssid_in_visible_list(const char *ssid,
  */
 static int rotation_scan_visible(void)
 {
-	int err;
+	uint16_t found = 0;
 	int count = 0;
+	int result;
 
 	if (ctx.rotation_cancel) {
 		return 0;
 	}
-	if (xSemaphoreTake(ctx.lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+	/* Cancellable scan: a Web SCAN sets rotation_cancel and this aborts within
+	 * one channel wait, WITHOUT holding ctx.lock for the scan (F7). */
+	result = scan_run(s_rotation_scan_aps, WIFI_ROTATION_SCAN_MAX_AP, &found, true);
+	if (result == WIFI_SCAN_CANCELED) {
+		ESP_LOGD(TAG, "rotation scan canceled");
 		return 0;
 	}
-	ctx.scan.ap = s_rotation_scan_aps;
-	ctx.scan.max_ap = WIFI_ROTATION_SCAN_MAX_AP;
-	ctx.scan.total_aps = 0;
-	ctx.task = xTaskGetCurrentTaskHandle();
-	err = scan_loop();
-	uint16_t found = ctx.scan.total_aps;
-	ctx.task = NULL;
-	xSemaphoreGive(ctx.lock);
-
-	if (err) {
-		ESP_LOGW(TAG, "rotation scan failed");
+	if (result != WIFI_SCAN_OK) {
+		ESP_LOGW(TAG, "rotation scan failed (%d)", result);
 		return 0;
 	}
 
@@ -646,7 +688,7 @@ static int rotation_execute_candidate(const wifi_cred_candidate_t *candidate)
 	if (err == 0) {
 		rotation_prepare_pending(candidate->ssid, candidate->password,
 		                         WIFI_API_CONNECT_SAVE_AUTO);
-		ctx.conn.event = NULL;
+		ctx.conn_event = NULL;
 		xEventGroupClearBits(ctx.events, WIFI_EVT_CONNECT_DONE);
 		disco_count_before = wifi_event_get_disconnect_count();
 		err = wifi_event_trigger_connect(0, try_connect_done, NULL);
@@ -666,8 +708,8 @@ static int rotation_execute_candidate(const wifi_cred_candidate_t *candidate)
 	if (bits & WIFI_EVT_CANCEL) {
 		return -1;
 	}
-	if (ctx.conn.event != NULL) {
-		ctx.conn.event = NULL;
+	if (ctx.conn_event != NULL) {
+		ctx.conn_event = NULL;
 		return 1;
 	}
 
@@ -734,7 +776,9 @@ static void rotation_task(void *arg)
 
 	ctx.is_endless_connect = 1;
 	ctx.rotation_task = xTaskGetCurrentTaskHandle();
-	ctx.rotation_cancel = 0;
+	/* Do NOT clear ctx.rotation_cancel here: a Web SCAN may have requested the
+	 * stop between xTaskCreate() and this first instruction. disconn_handler()
+	 * already cleared it before creating the task. */
 	/* disconn_handler() took the lock before creating this task. */
 	xSemaphoreGive(ctx.lock);
 
@@ -907,17 +951,17 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 
 	if (set_sta_cred(ssid, password) == 0) {
 		ctx.task = xTaskGetCurrentTaskHandle();
-		ctx.conn.event = NULL;
+		ctx.conn_event = NULL;
 		xEventGroupClearBits(ctx.events, WIFI_EVT_CONNECT_DONE);
 		err = wifi_event_trigger_connect(2, try_connect_done, NULL);
 		if (err == 0) {
 			bits = xEventGroupWaitBits(ctx.events, WIFI_EVT_CONNECT_DONE,
 			                           pdTRUE, pdFALSE,
 			                           pdMS_TO_TICKS(WIFI_MANUAL_CONNECT_TIMEOUT_MS));
-			ret = ((bits & WIFI_EVT_CONNECT_DONE) && ctx.conn.event != NULL) ? 0 : 1;
+			ret = ((bits & WIFI_EVT_CONNECT_DONE) && ctx.conn_event != NULL) ? 0 : 1;
 		}
 		ctx.task = NULL;
-		ctx.conn.event = NULL;
+		ctx.conn_event = NULL;
 	}
 	xSemaphoreGive(ctx.lock);
 	ctx.rotation_suppressed = 0;

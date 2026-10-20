@@ -263,6 +263,9 @@ cJSON *wifi_api_json_serialize_saved_list(const wifi_cred_list_t *list)
 	wifi_api_json_set_header(root, WIFI_API_JSON_GET_SAVED_LIST);
 	cJSON_AddBoolToObject(root, "auto_save", list->auto_save);
 	cJSON_AddNumberToObject(root, "count", list->count);
+	/* Incremental field from contract b015a0c (optional for clients; the UI
+	 * falls back to 8 when missing). */
+	cJSON_AddNumberToObject(root, "max", list->max);
 	array = cJSON_AddArrayToObject(root, "list");
 	for (uint8_t i = 0; i < list->count && i < BIRDIEBOT_WIFI_CRED_MAX; ++i) {
 		cJSON *item = cJSON_CreateObject();

@@ -677,6 +677,9 @@ int wifi_cred_mem_get_list(wifi_cred_list_t *out)
 	}
 	memset(out, 0, sizeof(*out));
 	out->connected_idx = BIRDIEBOT_WIFI_CRED_NONE;
+	/* cmd 11 incremental field (docs/wifi-credential-memory.md §7.1, b015a0c):
+	 * the device side limit; clients must not hard-code 8. */
+	out->max = BIRDIEBOT_WIFI_CRED_MAX;
 	if (!cred_ready()) {
 		out->auto_save = true;
 		return ESP_ERR_INVALID_STATE;
