@@ -137,7 +137,9 @@ void app_main()
      *    dedicated GPIO with a hard core affinity requirement.
      */
     xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL, 14, NULL, DAP_TASK_AFFINITY);
-    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 2048, NULL, 16, NULL, DAP_TASK_AFFINITY);
+    /* 3072: with B1 (BIRDIEBOT_USBIP_PIPELINE) the DAP task also builds/sends
+     * the USBIP RET_SUBMIT for a parked IN URB, so it needs lwIP send stack. */
+    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 3072, NULL, 16, NULL, DAP_TASK_AFFINITY);
 
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 

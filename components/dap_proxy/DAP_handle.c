@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "usbip_server.h"
+#include "usbip_pipeline.h"
 #include "DAP_handle.h"
 #include "main/dap_configuration.h"
 #include "cmsis-dap/include/DAP.h"
@@ -314,6 +315,76 @@ static bool dap_push_response(const DapPacket_t *packet)
     return dap_dataOUT_handle != NULL;
 }
 
+/* B1: staging copy for responses that must wait in the OUT ring until their IN
+ * URB arrives (pipeline mode).  The DAP task is the only writer. */
+static DapPacket_t dap_response_staging;
+
+bool dap_push_response_data(const uint8_t *data, uint32_t length)
+{
+    uint32_t len = (length > DAP_PACKET_SIZE) ? DAP_PACKET_SIZE : length;
+
+    if (dap_dataOUT_handle == NULL) {
+        return false;
+    }
+
+    memset(&dap_response_staging, 0, sizeof(dap_response_staging));
+    dap_response_staging.length = len;
+    if (len > 0 && data != NULL) {
+        memcpy(dap_response_staging.buf, data, len);
+    }
+
+    if (!dap_push_response(&dap_response_staging)) {
+        return false;
+    }
+
+    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+        ++dap_respond;
+        xSemaphoreGive(data_response_mux);
+    }
+    return true;
+}
+
+bool dap_take_response(uint8_t *buf, uint32_t buf_size, uint32_t *length)
+{
+    DapPacket_t *item;
+    size_t packetSize = 0;
+    uint32_t len;
+
+    if (length) {
+        *length = 0;
+    }
+    if (dap_dataOUT_handle == NULL || buf == NULL || buf_size == 0) {
+        return false;
+    }
+
+    item = (DapPacket_t *)xRingbufferReceiveUpTo(dap_dataOUT_handle, &packetSize, 0,
+                                                 DAP_HANDLE_SIZE);
+    if (packetSize != DAP_HANDLE_SIZE) {
+        if (item != NULL) {
+            vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+        }
+        return false;
+    }
+
+    len = item->length;
+    if (len > buf_size) {
+        len = buf_size;
+    }
+    if (len > 0) {
+        memcpy(buf, item->buf, len);
+    }
+    if (length) {
+        *length = len;
+    }
+    vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+
+    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+        --dap_respond;
+        xSemaphoreGive(data_response_mux);
+    }
+    return true;
+}
+
 void DAP_Thread(void *argument)
 {
     size_t packetSize;
@@ -411,7 +482,12 @@ void DAP_Thread(void *argument)
 
             // now prepare to reply (actual length for USBIP/WinUSB)
             DAPDataProcessed.length = resLength;
-            if (dap_push_response(&DAPDataProcessed))
+            if (usbip_pipeline_is_active()) {
+                /* B1: pair the response with a parked IN URB and send it from
+                 * this task, or store it in the OUT ring until the IN arrives. */
+                usbip_pipeline_complete_response(DAPDataProcessed.buf,
+                                                 DAPDataProcessed.length);
+            } else if (dap_push_response(&DAPDataProcessed))
             {
                 if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
                 {

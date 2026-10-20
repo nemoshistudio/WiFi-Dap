@@ -1,6 +1,7 @@
 #ifndef __DAP_HANDLE_H__
 #define __DAP_HANDLE_H__
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "components/USBIP/usbip_defs.h"
@@ -45,6 +46,13 @@ void dap_led_init(void);
  * zero-filled behind `length` so stale bytes from a previous URB/session can
  * never reach DAP_ProcessCommand (docs/security-review-dap.md N8). */
 void handle_dap_data_request(usbip_stage2_header *header, uint32_t length);
+
+/* B1 pipeline helpers (usbip_pipeline.c): move a finished DAP response between
+ * the ring buffer and the USBIP pipeline without exposing the internal
+ * DapPacket_t layout. Both functions are only valid while a USBIP session owns
+ * the DAP data path. */
+bool dap_take_response(uint8_t *buf, uint32_t buf_size, uint32_t *length);
+bool dap_push_response_data(const uint8_t *data, uint32_t length);
 void handle_swo_trace_response(usbip_stage2_header *header);
 void handle_dap_unlink();
 

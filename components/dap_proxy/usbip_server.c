@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "usbip_server.h"
+#include "usbip_pipeline.h"
 #include "DAP_handle.h"
 #include "main/dap_configuration.h"
 
@@ -11,6 +12,9 @@
 
 #include "lwip/err.h"
 #include "lwip/sockets.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #ifndef likely
 #define likely(x)      __builtin_expect(!!(x), 1)
@@ -53,10 +57,33 @@ static void unpack(void *data, int size);
 
 static void handle_unlink(usbip_stage2_header *header);
 // unlink helper function
-static void send_stage2_unlink(usbip_stage2_header *req_header);
+void send_stage2_unlink(usbip_stage2_header *req_header);
+
+/* B1: with the multi-URB pipeline a RET_SUBMIT can be sent from the DAP task
+ * while the TCP task is sending ACKs/unlink replies on the same socket.  All
+ * USBIP writes go through this function, so one mutex keeps every message
+ * (48-byte header + optional payload) atomic on the TCP stream. */
+static StaticSemaphore_t s_tx_mux_buf;
+static SemaphoreHandle_t s_tx_mux = NULL;
+
+static void usbip_tx_init(void)
+{
+    if (s_tx_mux == NULL) {
+        s_tx_mux = xSemaphoreCreateMutexStatic(&s_tx_mux_buf);
+    }
+}
 
 int usbip_network_send(int s, const void *dataptr, size_t size, int flags) {
-    return send(s, dataptr, size, flags);
+    int ret;
+
+    if (s_tx_mux != NULL) {
+        xSemaphoreTake(s_tx_mux, portMAX_DELAY);
+    }
+    ret = send(s, dataptr, size, flags);
+    if (s_tx_mux != NULL) {
+        xSemaphoreGive(s_tx_mux);
+    }
+    return ret;
 }
 
 static int attach(uint8_t *buffer, uint32_t length)
@@ -224,6 +251,7 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
         printf("usbip: RX buffer too small: %lu (need >= %lu)\r\n",
                (unsigned long)length,
                (unsigned long)(sizeof(usbip_stage2_header) + DAP_PACKET_SIZE));
+        usbip_pipeline_session_end();
         return -1;
     }
 
@@ -239,6 +267,10 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
         payload_capacity = USBIP_STAGE2_MAX_OUT_DATA;
     if (payload_capacity > DAP_PACKET_SIZE)
         payload_capacity = DAP_PACKET_SIZE;
+
+    /* B1: enable the multi-URB pipeline for this USBIP session (it is
+     * deactivated at every exit path below). */
+    usbip_pipeline_session_start();
 
     while (1) {
         // header
@@ -267,6 +299,7 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
                        (unsigned long)data_length,
                        (unsigned long)payload_capacity,
                        (unsigned long)length);
+                usbip_pipeline_session_end();
                 return -1;
             }
         }
@@ -282,11 +315,18 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
 
         if (likely(command == USBIP_STAGE2_REQ_SUBMIT)) {
             if (likely(ep == 1 && dir == USBIP_DIR_IN)) {
-                fast_reply(base, sizeof(usbip_stage2_header), dap_req_num);
-                if (dap_req_num > 0)
-                    dap_req_num--;
+                if (!usbip_pipeline_handle_in(base)) {
+                    fast_reply(base, sizeof(usbip_stage2_header), dap_req_num);
+                    if (dap_req_num > 0)
+                        dap_req_num--;
+                }
             } else if (likely(ep == 1 && dir == USBIP_DIR_OUT)) {
                 dap_req_num++;
+                if (usbip_pipeline_is_active()) {
+                    /* B1: one ticket per OUT command; the DAP response is
+                     * paired with the parked IN URB when it is ready. */
+                    usbip_pipeline_register_out(ntohl(header->base.seqnum));
+                }
                 /*
                  * N8 (docs/security-review-dap.md, P2): pass the payload bytes
                  * actually received for this URB (validated above, <=
@@ -308,7 +348,9 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
                 printf("unlink\r\n");
             unlink_count++;
             unpack(base, sizeof(usbip_stage2_header));
-            handle_unlink(header);
+            if (!usbip_pipeline_handle_unlink((uint8_t *)header)) {
+                handle_unlink(header);
+            }
         } else {
             printf("emulate unknown command:%lu\r\n", command);
             return -1;
@@ -316,6 +358,7 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
     }
 
 out:
+    usbip_pipeline_session_end();
     if (ret < 0)
         printf("recv failed: errno %d\r\n", errno);
     return ret;
@@ -326,6 +369,8 @@ int usbip_worker(uint8_t *base, uint32_t length, enum usbip_server_state_t *stat
     uint8_t *data;
     int pre_read_sz = 4;
     int sz, ret;
+
+    usbip_tx_init();
 
     // OP_REQ_DEVLIST status field
     if (*state == WAIT_DEVLIST) {
@@ -470,7 +515,7 @@ static void handle_unlink(usbip_stage2_header *header)
     send_stage2_unlink(header);
 }
 
-static void send_stage2_unlink(usbip_stage2_header *req_header)
+void send_stage2_unlink(usbip_stage2_header *req_header)
 {
 
     req_header->base.command = USBIP_STAGE2_RSP_UNLINK;

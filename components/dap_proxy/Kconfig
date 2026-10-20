@@ -16,4 +16,18 @@ menu "WiFi Dap proxy (USBIP / WebSocket-DAP)"
 
             Default: y (laboratory mode, same as the fork).
 
+    config BIRDIEBOT_USBIP_PIPELINE
+        bool "Enable multi-URB USBIP pipeline (B1)"
+        default y
+        help
+            Decouples the USBIP TCP reader from the DAP command execution so
+            that several URBs can be in flight per Wi-Fi round-trip (the host
+            kernel vhci + OpenOCD cmsis-dap keep up to 3 pending requests).
+            OUT URBs are ACKed immediately and IN URBs are answered by the DAP
+            task when the matching response is ready; UNLINKs keep the
+            response/IN FIFOs aligned.  The legacy single-URB path is used when
+            this option is disabled or the pipeline detects an inconsistency.
+
+            Default: y (same transport, lower latency on a real Wi-Fi link).
+
 endmenu
