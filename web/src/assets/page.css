@@ -1,0 +1,21 @@
+.text-layout {
+    @apply mx-auto max-w-2xl w-full sm:min-w-[640px] px-2
+}
+
+.page-title {
+    @apply text-center my-6 text-4xl font-bold tracking-tight md:text-5xl lg:text-6xl
+}
+
+.router-link {
+    @apply text-sm text-gray-500 hover:text-gray-500
+}
+
+.router-link-active {
+    @apply text-blue-600 font-bold;
+    cursor: default;
+}
+
+.el-checkbox:hover {
+    background-color: var(--el-color-primary-light-9);
+    border-color: var(--el-color-primary-light-8);
+}
