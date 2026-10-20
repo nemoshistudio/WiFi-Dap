@@ -109,20 +109,29 @@ int el_handshake_process(int fd, void *buffer, size_t len)
 
 /* Ask the DAP task to release the USBIP ring buffers before elaphureLink runs
  * DAP commands inline in this (TCP) task. Never free them from here: the DAP
- * task may still be receiving from them (WP-112 ring buffer ownership). */
-static void el_acquire_dap_handle(void)
+ * task may still be receiving from them (WP-112 ring buffer ownership).
+ * Returns 0 when the DAP data path is ours, -1 when the hand-off timed out. */
+static int el_acquire_dap_handle(void)
 {
     if (dap_handle_request_reset != NULL) {
         dap_handle_request_reset(DELETE_HANDLE);
         if (dap_handle_wait_reset != NULL) {
-            /* bounded wait: a slow DAP task must not hang the TCP session */
-            (void)dap_handle_wait_reset(1000U);
+            /* Bounded wait: a slow DAP task must not hang the TCP session.
+             * Security review N7: if the wait times out the DAP task may still
+             * be executing a USBIP request. Running DAP commands inline now
+             * would race on the global DAP_Data/GPIO/SPI state, so refuse the
+             * session instead of "continuing anyway". */
+            if (dap_handle_wait_reset(1000U) != 0) {
+                return -1;
+            }
         }
     } else {
-        /* Legacy transport: the DAP task observes DELETE_HANDLE in its own
-         * context on the next notification; do not wait and do not free. */
+        /* Legacy transport (pre-WP-112 API): the DAP task observes
+         * DELETE_HANDLE in its own context on the next notification; there is
+         * no wait primitive here, do not free the ring buffers from this task. */
         kRestartDAPHandle = DELETE_HANDLE;
     }
+    return 0;
 }
 
 void el_dap_data_process(void* buffer, size_t len)
@@ -258,8 +267,12 @@ int el_dap_work(uint8_t* base, size_t len)
         return ret;
 
     /* DAP task owns the USBIP ring buffers: ask it to release them and wait
-     * until that happened before using DAP_ExecuteCommand inline. */
-    el_acquire_dap_handle();
+     * until that happened before using DAP_ExecuteCommand inline. If the
+     * hand-off times out, reject the session (N7) so the DAP command engine is
+     * never executed from two tasks at once. */
+    if (el_acquire_dap_handle() != 0) {
+        return -1;
+    }
     el_process_buffer_malloc();
     if (el_process_buffer == NULL) {
         return -1;
@@ -316,7 +329,24 @@ uint32_t el_native_command_passthrough(const uint8_t *request, uint8_t *response
      * 4 KB and the DAP command path below it is deep). Only one transport
      * session can run at a time, so this buffer is not re-entered. */
     static uint8_t staging[DAP_PACKET_SIZE];
+    /* Security review N1: the passthrough forwards a host-controlled DAP
+     * payload back into DAP_ExecuteCommand. A crafted payload containing
+     * another 0x88 native-passthrough would recurse without bound
+     * (el_native -> DAP_ExecuteCommand -> vendor -> el_native -> ...), so
+     * allow only one active passthrough. OpenOCD/elaphureLink never nest it.
+     * Atomic ops keep the counter balanced if the DAP task and the TCP task
+     * ever race during a session hand-off. */
+    static uint8_t s_passthrough_depth = 0;
     int ret;
+
+    if (__atomic_add_fetch(&s_passthrough_depth, 1U, __ATOMIC_RELAXED) > 1U) {
+        __atomic_sub_fetch(&s_passthrough_depth, 1U, __ATOMIC_RELAXED);
+        /* status: nesting rejected, zero-length DAP response */
+        response[0] = 0x01; // status
+        response[1] = 0;
+        response[2] = 0;
+        return 4U;          // echo + 3 status bytes, no payload
+    }
 
     request += 2; // skip header (length field)
 
@@ -333,6 +363,8 @@ uint32_t el_native_command_passthrough(const uint8_t *request, uint8_t *response
     response[1] = (ret >> 8) & 0xFF;
     response[2] = ret & 0xFF;
     memcpy(response + 3, staging, (size_t)ret);
+
+    __atomic_sub_fetch(&s_passthrough_depth, 1U, __ATOMIC_RELAXED);
 
     /* bytes written by this function: 3 status/length bytes + ret payload
      * bytes (the 0x88 echo byte is counted by DAP_ProcessVendorCommand) */
@@ -354,6 +386,18 @@ uint32_t el_vendor_command(const uint8_t *request, uint8_t *response)
          * total request = 0x88 + type + 2 length bytes + payload */
         {
             uint32_t payload_len = ((uint32_t)request[0] << 8) | (uint32_t)request[1];
+
+            /* Security review P3 #6: validate the 0x88 length field before it
+             * is used for request-length accounting (the caller-supplied frame
+             * may be shorter than the field claims). */
+            if (payload_len > EL_PROCESS_BUFFER_MAX_PAYLOAD) {
+                *response++ = 0x01; // status: malformed length
+                *response++ = 0;
+                *response++ = 0;
+                request_count = 4U;
+                response_count = 4U;
+                break;
+            }
             request_count = 4U + payload_len;
         }
         ret = el_native_command_passthrough(request, response);
