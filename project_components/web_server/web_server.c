@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "web_uri_module.h"
+#include "birdiebot_auth.h"
 #include "ssdp.h"
 
 #include <esp_http_server.h>
@@ -46,6 +47,14 @@ static bool uri_match(const char *reference_uri, const char *uri_to_match, size_
 		return memcmp(reference_uri, uri_to_match, ref_length) == 0;
 	}
 
+	/* exact ref with a query string: "/api?token=..." must reach the "/api"
+	 * handler (docs/protocol.md §1 allows ?token= for HTTP too). */
+	if (ref_length < match_upto &&
+	    uri_to_match[ref_length] == '?' &&
+	    memcmp(reference_uri, uri_to_match, ref_length) == 0) {
+		return true;
+	}
+
 	/* if ref = /dir/ targets are /dir/ and /dir/... */
 	if (ref_length > 1 && reference_uri[ref_length - 1] == '/') {
 		return memcmp(reference_uri, uri_to_match, ref_length) == 0;
@@ -79,6 +88,14 @@ void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 	int err;
+
+#if BIRDIEBOT_AUTH_ENABLED
+	/* Initialize the pairing token before the first request can reach a
+	 * handler (loaded from / persisted to wt_nvs, printed on the serial
+	 * console). Compiled out entirely when CONFIG_BIRDIEBOT_WEB_AUTH=n. */
+	birdiebot_auth_init();
+	ESP_LOGW(TAG, "Web auth ENABLED: /ws and /api require the pairing token");
+#endif
 
 	config.enable_so_linger = true;
 	config.linger_timeout = 0;
