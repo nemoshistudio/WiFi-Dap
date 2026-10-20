@@ -2,7 +2,9 @@
 #define WEB_SERVER_H_GUARD
 
 #include <stdint.h>
+
 #include <esp_event_base.h>
+#include <esp_http_server.h>
 
 void disconnect_handler(void* arg, esp_event_base_t event_base,
                         int32_t event_id, void* event_data);
@@ -20,6 +22,18 @@ int server_is_running();
  * @note internal integration hook; not part of the public device API.
  */
 void web_ws_socket_closed(int fd);
+
+/**
+ * @brief Register the target-flash HTTP endpoints under /api/target.
+ *
+ * Implemented in uri_modules/uri_target.c behind
+ * CONFIG_BIRDIEBOT_TARGET_FLASH_ENABLE.  Must be called BEFORE uri_module_init()
+ * so the exact /api/target handlers are checked before the "/" SPA fallback
+ * (which otherwise serves any GET path as index.html).
+ *
+ * @note internal integration hook; not part of the public device API.
+ */
+void uri_target_register(httpd_handle_t server);
 
 
 #endif //WEB_SERVER_H_GUARD

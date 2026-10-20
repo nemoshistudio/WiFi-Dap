@@ -2,6 +2,8 @@
 #include "web_uri_module.h"
 #include "ssdp.h"
 
+#include <sdkconfig.h>
+
 #include <esp_http_server.h>
 #include <esp_event.h>
 
@@ -105,12 +107,25 @@ void start_webserver(void)
 	 * not as a generic socket error. Also used as the per-request recv timeout
 	 * by esp_http_server. */
 	config.recv_wait_timeout = 10;
+	/* URI handlers: 4x /api/target (uri_target.c) + /ws, /api, /api/ota/upload
+	 * and the "/" SPA fallback = 8 with the default limit, so keep headroom for
+	 * future endpoints. */
+	config.max_uri_handlers = 12;
 
 	ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
 	if ((err = httpd_start(&http_server, &config)) != ESP_OK) {
 		ESP_LOGE(TAG, "Error starting server!");
 		ESP_ERROR_CHECK(err);
 	}
+
+	/* Target-flash endpoints must be registered BEFORE the URI modules: the
+	 * "/" SPA fallback matches every GET path, so /api/target/info would be
+	 * served as index.html otherwise (httpd checks handlers in registration
+	 * order). */
+#if CONFIG_BIRDIEBOT_TARGET_FLASH_ENABLE
+	ESP_LOGI(TAG, "Registering target flash URI handlers");
+	uri_target_register(http_server);
+#endif
 
 	ESP_LOGI(TAG, "Registering URI handlers");
 	uri_module_init(http_server);
