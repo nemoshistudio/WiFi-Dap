@@ -86,6 +86,7 @@ export function useSystemModule() {
         handshakeNotified = false;
         sysStore.protocolState = 'unknown';
         sysStore.fwProtocolVersion = null;
+        sysStore.handshakeSettled = false;
 
         wt_sys_get_fm_info();
 
@@ -98,7 +99,9 @@ export function useSystemModule() {
 
         handshakeTimeoutId = window.setTimeout(() => {
             handshakeTimeoutId = 0;
-            if (sysStore.protocolState === 'unknown') {
+            if (!sysStore.handshakeSettled) {
+                sysStore.handshakeSettled = true;
+                sysStore.protocolState = 'unknown';
                 reportProtocolState('unknown', null);
             }
         }, HANDSHAKE_TIMEOUT_MS);
@@ -116,20 +119,35 @@ export function useSystemModule() {
             wt_sys_get_sys_info();
         } else if (msg.data === ControlEvent.DISCONNECTED) {
             clearHandshakeTimers();
+            sysStore.handshakeSettled = false;
+            sysStore.protocolState = 'unknown';
+            sysStore.fwProtocolVersion = null;
         }
     }
 
     function onClientMsg(msg: ApiJsonMsg) {
+        // 鉴权失败（code=7）由 auth session 统一提示；不当作固件/协议错误处理
+        if (msg.err !== undefined && msg.code === 7) {
+            clearHandshakeTimers();
+            return;
+        }
         switch (msg.cmd as WtSytemCmd) {
             case WtSytemCmd.WT_SYS_REBOOT:
                 sysStore.rebootInProgress = true;
                 break;
             case WtSytemCmd.WT_SYS_GET_FM_INFO: {
+                clearHandshakeTimers();
+                sysStore.handshakeSettled = true;
+                if (msg.err !== undefined) {
+                    // 请求失败（非鉴权类）：视为无法确认版本，提示但不阻塞业务
+                    sysStore.protocolState = 'unknown';
+                    sysStore.fwProtocolVersion = null;
+                    reportProtocolState('unknown', null);
+                    break;
+                }
                 const fm_info = msg as ISysFmInfo;
                 sysStore.curFmInfo.date = fm_info.upd_date;
                 sysStore.curFmInfo.ver = fm_info.fm_ver;
-                // 协议握手：拿到响应后清定时器并判定状态
-                clearHandshakeTimers();
                 const fwVersion = typeof fm_info.protocol_version === 'number'
                     ? fm_info.protocol_version
                     : null;

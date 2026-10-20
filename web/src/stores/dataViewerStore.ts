@@ -902,48 +902,20 @@ export const useDataViewerStore = defineStore('text-viewer', () => {
     /* macro buttons */
 
     /*
-     * AT 演示宏：数据显示用默认值（用户可编辑/导出）。契约 v1 的 295 个 key 未覆盖这些
-     * 演示数据 label，改用中性英文默认值，并在 web/scripts/i18n-report.md 登记为
-     * 后续契约变更项（WP-208/Wave 2 再补 key）。
+     * AT 演示宏：显示数据默认值（用户可编辑/导出/重置）。为避免硬编码英文 UI 文案，
+     * 演示 label 直接使用 AT 命令本身（语言中立的数据），需要本地化描述时由后续
+     * uart.macro.* key（见 web/scripts/i18n-report.md §9 建议）或固件下发替代。
      */
     const macroData: Ref<macroItem[]> = ref([
-        {
-            value: 'AT',
-            label: 'Test AT',
-            id: 1,
-        },{
-            value: 'AT+CSQ',
-            label: 'Signal quality',
-            id: 2,
-        },{
-            value: 'AT+CGSN',
-            label: 'Serial number',
-            id: 3,
-        }, {
-            value: 'AT+CGMR',
-            label: 'Firmware version',
-            id: 4,
-        }, {
-            value: 'AT+CMEE',
-            label: 'Terminal errors',
-            id: 5,
-        }, {
-            value: 'AT+NRB',
-            label: 'Reboot',
-            id: 6,
-        }, {
-            value: 'AT+CGATT',
-            label: 'Network attach',
-            id: 7,
-        }, {
-            value: 'AT+CEREG',
-            label: 'Network registration',
-            id: 8,
-        }, {
-            value: 'AT+CSCON',
-            label: 'Network connection',
-            id: 9,
-        }
+        { value: 'AT', label: 'AT', id: 1 },
+        { value: 'AT+CSQ', label: 'AT+CSQ', id: 2 },
+        { value: 'AT+CGSN', label: 'AT+CGSN', id: 3 },
+        { value: 'AT+CGMR', label: 'AT+CGMR', id: 4 },
+        { value: 'AT+CMEE', label: 'AT+CMEE', id: 5 },
+        { value: 'AT+NRB', label: 'AT+NRB', id: 6 },
+        { value: 'AT+CGATT', label: 'AT+CGATT', id: 7 },
+        { value: 'AT+CEREG', label: 'AT+CEREG', id: 8 },
+        { value: 'AT+CSCON', label: 'AT+CSCON', id: 9 },
     ]);
     const macroId = ref(10);
 

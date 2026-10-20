@@ -31,6 +31,21 @@
     <!--  <a class="md:ml-auto md:mr-3"></a>-->
     <div class="flex h-full">
       <div id="page-spec-slot" class="content-center h-full flex flex-row"></div>
+      <!-- Web 鉴权（WP-209f）：无 token 时为实验室模式，仅显示锁图标，不打扰用户 -->
+      <el-tooltip
+          :content="hasToken ? translate('auth.title') : translate('auth.login')"
+          :show-after="500"
+      >
+        <el-button
+            text
+            class="min-h-full mr-1"
+            :type="authState.unauthorized ? 'warning' : 'default'"
+            @click="openAuthDialog"
+        >
+          <InlineSvg :name="hasToken ? 'lock' : 'lock_open'" width="20"></InlineSvg>
+          <el-badge v-if="authState.unauthorized" is-dot/>
+        </el-button>
+      </el-tooltip>
       <div class="mr-2">
           <el-select v-model="language" class="min-w-20 h-full" @change="handleLanguageChange">
             <el-option
@@ -131,6 +146,7 @@ import {useUpdateStore} from "@/stores/useUpdateStore";
 import {isOTAEnabled} from "@/composables/buildMode";
 import {locale, setLang} from "@/i18n"
 import {LANGUAGES, getLanguageOption} from "@/constants/languages"
+import {authState, hasToken, openAuthDialog} from "@/composables/useAuthSession"
 
 const wsStore = useWsStore();
 const updateStore = useUpdateStore();

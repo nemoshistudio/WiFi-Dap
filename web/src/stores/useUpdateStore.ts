@@ -58,6 +58,12 @@ export const useUpdateStore = defineStore('update', () => {
     /** NavBar 更新角标：本期无更新源（浏览器本地选文件），恒 false。 */
     const canUpdate = ref(false);
 
+    /**
+     * 固件是否实现 OTA(5) 命令（旧固件返回 code=4 Unsupported cmd）。
+     * false 时 Update 隐藏上传区块，只保留协议/固件信息（优雅降级）。
+     */
+    const otaSupported = ref(true);
+
     /* ---- 上传 UI 状态 ---- */
     const phase = ref<OtaUploadPhase>('idle');
     const selectedFile = ref<IOtaSelectedFile | null>(null);
@@ -247,6 +253,12 @@ export const useUpdateStore = defineStore('update', () => {
         clearProgressInterval();
     }
 
+    /** 旧固件不支持 OTA(5)：隐藏上传 UI，避免错误风暴。 */
+    function markUnsupported() {
+        otaSupported.value = false;
+        clearProgressInterval();
+    }
+
     function clearError() {
         if (phase.value === 'error') {
             phase.value = 'idle';
@@ -261,6 +273,7 @@ export const useUpdateStore = defineStore('update', () => {
         progress,
         progressBarStatus,
         canUpdate,
+        otaSupported,
         phase,
         selectedFile,
         browserLoaded,
@@ -278,6 +291,7 @@ export const useUpdateStore = defineStore('update', () => {
         clearProgressInterval,
         applyInfo,
         applyProgress,
+        markUnsupported,
         resetUpload,
         setSelectedFile,
         beginUpload,

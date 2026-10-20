@@ -5,6 +5,18 @@
     </h1>
     <el-divider></el-divider>
 
+    <!-- 无 token = 实验室模式：提示仅可信局域网使用，可点登录配置 pairing token（WP-209f） -->
+    <el-alert
+        v-if="!hasToken"
+        class="mb-3"
+        type="info"
+        :title="translate('auth.labMode')"
+        :closable="false"
+        show-icon
+    >
+      <el-button link type="primary" @click="openAuthDialog">{{ translate('auth.login') }}</el-button>
+    </el-alert>
+
     <h2 class="mb-4 text-xl font-bold tracking-tight md:text-2xl lg:text-3xl">{{ translate('wifi.connection') }} Wi-Fi</h2>
     <el-form label-width="auto" ref="formRef" :model="ssidValidateForm" class="m-auto">
       <el-form-item
@@ -472,6 +484,7 @@ import {useWsStore} from "@/stores/websocket";
 import {globalNotify, globalNotifyRightSide} from "@/composables/notification";
 import {isDevMode} from "@/composables/buildMode";
 import {translate} from "@/locales";
+import {hasToken, openAuthDialog} from "@/composables/useAuthSession";
 
 const formRef = ref<FormInstance>()
 let wifiListPlaceholder = ref("MY-WIFI")
@@ -710,7 +723,8 @@ const onClientMsg = (msg: ApiJsonMsg) => {
         // 旧固件不支持 cmd 11–14：优雅降级，整块隐藏（契约 §9.1-2）
         if (msg.code === 4) {
           savedSupported.value = false;
-        } else {
+        } else if (msg.code !== 7) {
+          // code=7 由 auth session 统一提示输入 token，避免重复报错
           globalNotifyRightSide(savedErrorText(msg), "error");
         }
         break;
@@ -724,7 +738,9 @@ const onClientMsg = (msg: ApiJsonMsg) => {
     case WifiCmd.WIFI_API_JSON_ADD_SAVED: {
       savedAddSaving.value = false;
       if (msg.err !== undefined) {
-        globalNotifyRightSide(savedErrorText(msg), "error");
+        if (msg.code !== 7) {
+          globalNotifyRightSide(savedErrorText(msg), "error");
+        }
         break;
       }
       const addResult = msg as IWifiSavedAddResult;
@@ -739,7 +755,9 @@ const onClientMsg = (msg: ApiJsonMsg) => {
     }
     case WifiCmd.WIFI_API_JSON_DEL_SAVED: {
       if (msg.err !== undefined) {
-        globalNotifyRightSide(savedErrorText(msg), "error");
+        if (msg.code !== 7) {
+          globalNotifyRightSide(savedErrorText(msg), "error");
+        }
         break;
       }
       globalNotifyRightSide(translate('wifi.saved.deleted'), "success");
@@ -748,9 +766,11 @@ const onClientMsg = (msg: ApiJsonMsg) => {
     }
     case WifiCmd.WIFI_API_JSON_SET_AUTO_SAVE: {
       if (msg.err !== undefined) {
-        globalNotifyRightSide(savedErrorText(msg), "error");
-        // 失败时回读设备状态，避免开关与设备不一致
-        refreshSavedList();
+        if (msg.code !== 7) {
+          globalNotifyRightSide(savedErrorText(msg), "error");
+          // 失败时回读设备状态，避免开关与设备不一致
+          refreshSavedList();
+        }
         break;
       }
       const autoSaveResult = msg as IWifiAutoSaveResult;
