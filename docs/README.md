@@ -12,6 +12,7 @@
 | 读者/目的 | 文档 | 说明 |
 |---|---|---|
 | 新用户 / 烧录与使用 | [README_CN.md](../README_CN.md) / [README.md](../README.md) | 项目定位、功能矩阵、引脚、构建烧录、Web UI、调试接入、安全默认、故障排查 |
+| 部署加固 / 安全自查 | [security.md](security.md) | 面向部署者的精简安全指南：默认实验室模式、开鉴权/改口令/关传输、端口与发现面清单、OTA 限制 |
 | 工具链 / 构建发布 | [scripts/README.md](../scripts/README.md) | Docker ESP-IDF 5.2.1 构建、分区/板级校验、Web 资产、发布包、OTA/E2E 测试脚本 |
 | Web UI 前端开发 | [web/README.md](../web/README.md) / [web/README.cn.md](../web/README.cn.md) | Web UI 功能、开发与构建方式（Vue 3 + Vite） |
 | OTA 固件实现 | [components/wt_ota/README.md](../components/wt_ota/README.md) | OTA 核心状态机、C API、模块 5 注册、回滚与线程安全 |
@@ -45,27 +46,34 @@
 
 ## 3. 测试与验证文档
 
+> 状态：**测试文档已全部入库**（DAP / OTA / UART-DataFlow / WiFi 四类硬件清单 + host 测试报告 + DAP 边界 host 测试选题）。
+
 | 文档/工具 | 类型 | 内容 | 状态 |
 |---|---|---|---|
 | [hardware-test-ota.md](hardware-test-ota.md) | 硬件验收清单 | 8 MB S3 真机 OTA：首次烧录/otadata、Web UI 与 HTTP 直传、错误注入矩阵、回滚验证、通过标准与记录模板 | ✅ 已入库（Wave 3） |
 | [hardware-test-uart-dataflow.md](hardware-test-uart-dataflow.md) | 硬件验收清单 | UART/DataFlow/WS 二进制 E2E：T1 连通/版本、T2 UART 配置、T3 浏览器终端、T4 二进制回环、T5 TCP 桥、T6 attach、T7 双客户端广播、T8 OTA 信息 | ✅ 已入库（Wave 2/3） |
 | [hardware-test-dap.md](hardware-test-dap.md) | 硬件验收清单 | DAP/USBIP/elaphureLink/WS-DAP 真机验证（Keil/OpenOCD/pyOCD）、R2/R9 P0 项、逻辑分析仪判据 | ✅ 已入库（dap-dev） |
+| [hardware-test-wifi.md](hardware-test-wifi.md) | 硬件验收清单 | Wi-Fi 多凭据记忆/AP SSID：T0 默认 AP、T1–T5 cmd 11–14、轮换与持久化、错误码；含只读自动脚本说明 | ✅ 已入库（wifi-dev） |
+| [host-test-report.md](host-test-report.md) | host 测试报告 | Wave 3 / WP-302 纯逻辑与契约测试：C 125 checks + Python 60 tests（ASan/UBSan），2 个 suite 全部 PASS；含 F1/F2 findings 与覆盖缺口 | ✅ 已入库（QA） |
+| [dap-boundary-host-tests.md](dap-boundary-host-tests.md) | host 测试选题（只读走查） | DAP ↔ 传输层边界契约速查与 host 可测候选（HT-01…），供 QA 选题与后续测试扩展 | ✅ 已入库（Wave 3） |
 | [scripts/e2e_ws_client.py](../scripts/e2e_ws_client.py) | 自动化脚本 | 纯标准库 WS 客户端：`ping` / `wifi-scan` / `uart-echo` / `dataflow-list` / `ota-info` / `json`，供上面的清单直接引用 | ✅ 已入库 |
 | [scripts/ota_upload.py](../scripts/ota_upload.py) | 自动化脚本 | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 模块 5 `GET_INFO` 轮询，支持 `--token`/错误注入 | ✅ 已入库 |
 
 测试文档中的 **【需真机】** / **【本地】** / **【需 4MB 硬件/可选】** 标记约定见各文档开头；C3/ESP32 仅为编译验收目标。
+host 测试报告引用的 `tests/host/**`、`scripts/test_host.sh`、`scripts/dap_smoke.py`、`scripts/test_wifi_*` 等随对应 Wave 3 分支合入，本索引只索引文档、不直接链接这些脚本产物。
 
 ---
 
 ## 4. 安全审查
 
-- **安全审查报告**：[security-review-web.md](security-review-web.md)（Web/OTA/WiFi 面，Wave3）；`security-review-dap.md`（DAP 面，待交付）。
+- **安全审查报告**：[security-review-web.md](security-review-web.md)（Web/OTA/WiFi 面，Wave3；P0 现状 0 / 条件性 P0 1 / P1 4 / P2 10）；[security-review-dap.md](security-review-dap.md)（DAP 面，Wave3；P0×2 / P1×3 / P2×4）。
+- **面向部署者的加固指南**：[security.md](security.md)（默认实验室模式、开鉴权/改 AP 口令/关 3240+1346、OTA 限制、端口与发现面清单）。
 - 已入库文档中的安全相关内容可直接引用：
   - [protocol.md §5](protocol.md)（默认无鉴权、鉴权开启后的 token/Origin 要求、3240/1346 开关提示）；
   - [ota-local-upload.md §8](ota-local-upload.md)（OTA 上传端点鉴权要求）；
-  - [README §9](../README_CN.md)（面向部署者的安全默认与加固清单）；
+  - [README §9](../README_CN.md)（面向部署者的安全默认与加固清单，含 Known security limitations）；
   - [project_components/web_server/Kconfig](../project_components/web_server/Kconfig)（`BIRDIEBOT_WEB_AUTH` / `BIRDIEBOT_WEB_TOKEN` / `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 选项说明）。
-- 安全审查报告入库后，在此处补一行链接；未修复项应同时登记到报告与对应契约的“已知限制”。
+- 审查报告中的**条件性 P0** 指 WP-206 `uri_ota.c`（`POST /api/ota/upload`）合入时若未强制鉴权/校验则即时生效；合入后应通知审查人按报告 §4.3 复审一次。未修复项应同时登记到报告与对应契约的“已知限制”。
 
 ---
 
@@ -100,7 +108,8 @@ W0–W3 的设计与决策材料放在工作区的 `analysis/` 目录，**不进
 4. **测试清单**：硬件测试文档由对应模块负责人维护；新增脚本或改变设备行为时同步更新清单。
 5. **i18n**：新增/修改前端文案走 [i18n-keys.md](i18n-keys.md) 流程（`web/scripts/check-i18n.mjs` 为构建前置检查）。
 6. **状态先行**：新增文档先在本索引登记（用途 + 状态），未产出的文档标 **待产出**，不写死链接。
-7. **版本与发布**：修改版本注入/发布流程时，同步 [versioning.md](versioning.md) 与 [scripts/README.md](../scripts/README.md)。
+7. **安全限制同步**：`security-review-web.md` 的 P0/P1 结论若有变化（尤其条件性 P0 / WP-206 合入），同步更新根 README「Known security limitations」与 [security.md](security.md)。
+8. **版本与发布**：修改版本注入/发布流程时，同步 [versioning.md](versioning.md) 与 [scripts/README.md](../scripts/README.md)。
 
 ---
 
@@ -108,14 +117,19 @@ W0–W3 的设计与决策材料放在工作区的 `analysis/` 目录，**不进
 
 | 文档 | 负责人/来源 | 状态 |
 |---|---|---|
-| 根 `README.md` / `README_CN.md`（WiFi Dap 完整文档） | 文档（Wave 3） | ✅ 本次重写完成 |
-| `docs/README.md`（本索引） | 文档（Wave 3） | ✅ 本次新建 |
+| 根 `README.md` / `README_CN.md`（WiFi Dap 完整文档） | 文档（Wave 3） | ✅ 已重写（含 Known security limitations） |
+| `docs/README.md`（本索引） | 文档（Wave 3） | ✅ 本次更新 |
+| [security.md](security.md)（部署加固指南） | 文档（Wave 3） | ✅ 本次新增 |
 | 8 份冻结契约（[§2](#2-冻结契约lead-维护)） | Lead | ✅ 冻结 v1（2026-10-20） |
 | [hardware-test-ota.md](hardware-test-ota.md) | OTA/硬件验证（Wave 3） | ✅ 已入库 |
 | [hardware-test-uart-dataflow.md](hardware-test-uart-dataflow.md) | UART/DataFlow（Wave 2/3） | ✅ 已入库 |
-| `hardware-test-dap.md` | dap-dev | ✅ 已入库 |
-| [security-review-web.md](security-review-web.md) | webhost-analyst | ✅ 已入库 |
-| security-review-dap.md | dap-core-analyst | ⏳ 待产出 |
+| [hardware-test-dap.md](hardware-test-dap.md) | dap-dev | ✅ 已入库 |
+| [hardware-test-wifi.md](hardware-test-wifi.md) | wifi-dev | ✅ 已入库 |
+| [host-test-report.md](host-test-report.md) | QA（WP-302） | ✅ 已入库 |
+| [dap-boundary-host-tests.md](dap-boundary-host-tests.md) | Wave 3（只读走查） | ✅ 已入库 |
+| [security-review-web.md](security-review-web.md) | webhost-analyst（WP-304） | ✅ 已入库 |
+| [security-review-dap.md](security-review-dap.md) | dap-core-analyst | ✅ 已入库 |
+
 | [scripts/README.md](../scripts/README.md) | 构建/发布 | ✅ 已入库 |
 | [web/README.md](../web/README.md) / [web/README.cn.md](../web/README.cn.md) | Web UI | ✅ 已入库（上游来源说明） |
 | [components/wt_ota/README.md](../components/wt_ota/README.md) | OTA 固件 | ✅ 已入库 |

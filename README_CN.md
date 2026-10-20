@@ -188,7 +188,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
    - 默认口令：`12345678`（**首次使用请立即在 Wi-Fi 页修改**，见 [§9](#9-安全默认与加固)）
 3. 浏览器打开 **<http://192.168.1.1/>**（AP 模式默认网关/设备地址）。
    - 若已通过 Wi-Fi 页把设备接入局域网，则改用路由器分配给它的 IP；
-   - mDNS：设备注册 `_http._tcp` 服务，主机名默认 `dap`（见 `project_components/wt_mdns/`，板级契约目标为 `wifi-dap`），可尝试 `http://dap.local/`；以实际网络扫描结果为准。
+   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap`（见 `project_components/wt_mdns/wt_mdns_config.h`），可访问 `http://wifi-dap.local/`；若解析失败请直接使用设备 IP。
 4. 在 **Wi-Fi** 页填写并连接你的局域网（支持多网络记忆与自动切换），之后即可在局域网内访问 Web UI、调试器端口与 UART 桥。
 5. 打开 **UART** 页，选择波特率（默认 115200-8N1）即可看目标串口输出；或直接使用 USBIP/elaphureLink 开始调试（[§7](#7-调试工具接入)）。
 
@@ -288,7 +288,19 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 > 建议：仅在**可信局域网/隔离 VLAN** 中使用；不要把调试口暴露到办公网或互联网。
 
-### 9.2 启用 Web 鉴权
+### 9.2 已知安全限制（Known security limitations，实验室模式）
+
+默认固件按“实验室模式”设计，以下限制在加固前**仍然存在**。完整分级、证据行号与修复建议见 **[docs/security-review-web.md](docs/security-review-web.md)**（P0 现状 0 / 条件性 P0 1 / P1 4 / P2 10）：
+
+- **默认无鉴权**：HTTP **80**（`/`、`/ws`、`/api`）、TCP **3240**（USBIP / elaphureLink / WS-DAP）、TCP **1346**（UART TCP 桥）默认全部无鉴权，同一网络内即可完全控制设备与目标 MCU。
+- **默认 AP 口令 `12345678`**：物理邻近即可加入设备热点，进而获得上述全部能力；首次使用必须修改。
+- **鉴权 token 强度/传输/存储有限**：pairing token 仅 **32-bit**（8 hex），无失败限速；以明文经 HTTP/WS 传输，明文保存于 NVS（未启用 NVS 加密）与浏览器 `localStorage`，并会打印到串口日志。
+- **Web 鉴权只覆盖 80**：开启 `BIRDIEBOT_WEB_AUTH` 后，3240/1346 仍不受 token 保护，需显式关闭（Kconfig）或通过网络隔离。
+- **OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot；默认无鉴权（或 token 持有者）可写入任意有效镜像；`POST /api/ota/upload` 合入后风险等级提高，需按审查报告 §4.3 复审。
+
+> 另：默认 `auth=n` 时服务端不校验 Origin/Host，浏览器恶意页面可发起 CSWSH / DNS-rebinding（见审查报告 §1.2）。部署加固清单见 [docs/security.md](docs/security.md)。
+
+### 9.3 启用 Web 鉴权
 
 `idf.py menuconfig → WiFi Dap web server → Enable Web UI/API token authentication (`BIRDIEBOT_WEB_AUTH`)`：
 
@@ -300,7 +312,7 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 - **Host/Origin 校验**：默认只接受 IP 直连；若通过主机名（mDNS/反向代理）访问，需在 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 加入该来源（如 `http://wifi-dap.local`）。
 - 脚本支持：`scripts/ota_upload.py --token <code>`、`scripts/e2e_ws_client.py --token <code>`。
 
-### 9.3 关闭不需要的传输
+### 9.4 关闭不需要的传输
 
 ```text
 idf.py menuconfig
@@ -310,7 +322,7 @@ idf.py menuconfig
 
 USBIP 与 elaphureLink 没有单独开关（3240 端口保持监听）；如不需要调试功能，请在网络层限制 3240/1346 端口访问。
 
-### 9.4 其它建议
+### 9.5 其它建议
 
 - 首次使用后修改 AP 口令（Wi-Fi 页 → AP 设置）。
 - 只在可信网络配置 STA；避免把设备接入公共热点。
@@ -410,7 +422,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 |---|---|
 | 找不到 `WiFi-Dap-XXXX` 热点 | 是否已首次烧录；板卡 board 选择是否正确（`sdkconfig.defaults.*`）；串口日志是否有 Wi-Fi 初始化错误；STA 已连接时 AP 会在 30 s 后关闭（正常） |
 | 打开 `192.168.1.1` 无响应 | 手机/PC 是否连的是设备 AP；是否被 Smart APSTA 关闭了 AP；改连 STA 网段的设备 IP |
-| `dap.local` 无法解析 | 设备/系统 mDNS 支持；改用 IP 访问（mDNS 主机名以实现/启动日志为准） |
+| `wifi-dap.local` 无法解析 | 设备/客户端 mDNS 支持；改用 IP 访问（主机名见 `wt_mdns_config.h`，默认 `wifi-dap`） |
 | Web UI 提示在线但操作 401/断开 | 是否开启了 `BIRDIEBOT_WEB_AUTH`：输入串口打印的配对码；主机名访问需配置 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
 | `usbip.exe attach_ude` 失败 | usbip-win 版本是否 0.3.0+；设备 IP/网段是否可达；3240 是否被防火墙拦截；busid 固定为 `1-1` |
 | DAP 断连/很慢 | Wi-Fi 环境与距离；2.4 GHz 干扰；调试器时钟过高；同网段广播风暴 |
@@ -430,6 +442,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 
 - **文档索引**：[docs/README.md](docs/README.md)（冻结契约、测试清单、待产出文档与维护规则）。
 - **关键契约**：[protocol.md](docs/protocol.md)（JSON/WS 协议）、[ota-local-upload.md](docs/ota-local-upload.md)、[wifi-credential-memory.md](docs/wifi-credential-memory.md)、[versioning.md](docs/versioning.md)、[board-pins.md](docs/board-pins.md)。
+- **安全**：[docs/security.md](docs/security.md)（部署加固指南）、[docs/security-review-web.md](docs/security-review-web.md)（Web/OTA/WiFi 面安全审查，P0/P1/P2 分级与证据）。
 - **反馈**：Web UI 的 Feedback 页；作者主页 <https://yunsi.studio/>；项目主页 <https://yunsi.studio/wireless-debugger>。
 - **许可证**：
   - 本仓库整体以 **Apache License 2.0** 发布（根目录 [LICENSE](LICENSE)）。

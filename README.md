@@ -188,7 +188,7 @@ cd .. && scripts/gen_web_assets.sh --install   # explicitly updates project_comp
    - Default password: `12345678` (**change it in the Wi-Fi page on first use**, see [§9](#9-security-defaults--hardening))
 3. Open **<http://192.168.1.1/>** in a browser (default AP gateway/device address).
    - If the device has been joined to your LAN via the Wi-Fi page, use the IP assigned by your router instead;
-   - mDNS: the device registers an `_http._tcp` service under hostname `wifi-dap` (`project_components/wt_mdns/`), so `http://dap.local/` may work depending on your resolver — otherwise use the IP.
+   - mDNS: the device registers an `_http._tcp` service under hostname `wifi-dap` (`project_components/wt_mdns/wt_mdns_config.h`), so `http://wifi-dap.local/` should work depending on your resolver — otherwise use the device IP.
 4. In the **Wi-Fi** page, join your LAN (multiple networks are remembered and rotated automatically). Afterwards the Web UI, debugger ports and UART bridge are reachable from that LAN.
 5. Open the **UART** page (115200-8N1 by default) to watch the target's serial output, or start debugging over USBIP/elaphureLink ([§7](#7-debugger-transports)).
 
@@ -288,7 +288,19 @@ The device presents itself as a standard **CMSIS-DAP v2** probe (SWD/JTAG); sele
 
 > Recommendation: use only on a **trusted LAN / isolated VLAN**. Never expose the probe ports to an office network or the Internet.
 
-### 9.2 Enabling Web auth
+### 9.2 Known security limitations (lab mode)
+
+The default firmware is designed for "laboratory mode". The following limitations **remain** until the device is hardened. Full severity breakdown, evidence line numbers and remediation: **[docs/security-review-web.md](docs/security-review-web.md)** (P0 current 0 / conditional P0 1 / P1 4 / P2 10):
+
+- **No authentication by default**: HTTP **80** (`/`, `/ws`, `/api`), TCP **3240** (USBIP / elaphureLink / WS-DAP) and TCP **1346** (UART TCP bridge) are all unauthenticated; anyone on the same network can fully control the device and the target MCU.
+- **Default AP password `12345678`**: physically nearby users can join the device hotspot and gain all of the above; change it on first use.
+- **Limited token strength/transport/storage**: the pairing token is only **32-bit** (8 hex) with no failure rate limiting; it is sent in plaintext over HTTP/WS, stored in plaintext in NVS (NVS encryption off) and browser `localStorage`, and printed to the serial log.
+- **Web auth only covers port 80**: with `BIRDIEBOT_WEB_AUTH` enabled, 3240/1346 remain unprotected by the token — disable them via Kconfig or isolate the network.
+- **OTA is unsigned / no anti-downgrade**: `esp_ota_end()` only validates image format; anti-rollback and Secure Boot are not enabled, so with default no-auth (or a leaked token) any valid image can be written. Once `POST /api/ota/upload` lands, re-review per report §4.3.
+
+> Note: with `auth=n` the server also skips Origin/Host validation, enabling CSWSH / DNS-rebinding from a malicious browser page (report §1.2). Deployment hardening checklist: [docs/security.md](docs/security.md).
+
+### 9.3 Enabling Web auth
 
 `idf.py menuconfig → WiFi Dap web server → Enable Web UI/API token authentication (`BIRDIEBOT_WEB_AUTH`)`:
 
@@ -301,7 +313,7 @@ The device presents itself as a standard **CMSIS-DAP v2** probe (SWD/JTAG); sele
   add it to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (e.g. `http://wifi-dap.local`).
 - Scripts support it: `scripts/ota_upload.py --token <code>`, `scripts/e2e_ws_client.py --token <code>`.
 
-### 9.3 Disabling unused transports
+### 9.4 Disabling unused transports
 
 ```text
 idf.py menuconfig
@@ -311,7 +323,7 @@ idf.py menuconfig
 
 USBIP and elaphureLink have no separate switch (port 3240 remains open); if debugging is not needed, block ports 3240/1346 at the network layer.
 
-### 9.4 Other recommendations
+### 9.5 Other recommendations
 
 - Change the AP password after first use (Wi-Fi page → AP settings).
 - Only join trusted STA networks; avoid public hotspots.
@@ -411,7 +423,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 |---|---|
 | `WiFi-Dap-XXXX` AP not found | first flash done? correct board (`sdkconfig.defaults.*`)? Wi-Fi init errors in the serial log? AP turns off 30 s after STA connects (normal) |
 | `192.168.1.1` does not respond | is the client on the device AP? did Smart APSTA turn the AP off? use the device's STA-network IP |
-| `dap.local` does not resolve | mDNS support on client/network; fall back to the IP (hostname follows implementation/boot log) |
+| `wifi-dap.local` does not resolve | mDNS support on device/client; fall back to the IP (hostname is `wifi-dap` in `wt_mdns_config.h`) |
 | Web UI online but operations return 401/disconnect | `BIRDIEBOT_WEB_AUTH` enabled: enter the pairing code printed on the serial console; hostname access needs `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
 | `usbip.exe attach_ude` fails | usbip-win 0.3.0+? device IP/network reachable? port 3240 blocked by firewall? busid is always `1-1` |
 | DAP disconnects/slow | Wi-Fi environment/distance, 2.4 GHz interference, too-high debug clock, broadcast storms on the LAN |
@@ -431,6 +443,7 @@ More OTA error codes and state mappings: [docs/hardware-test-ota.md §5/§6](doc
 
 - **Documentation index**: [docs/README.md](docs/README.md) (frozen contracts, test checklists, pending docs and maintenance rules).
 - **Key contracts**: [protocol.md](docs/protocol.md) (JSON/WS protocol), [ota-local-upload.md](docs/ota-local-upload.md), [wifi-credential-memory.md](docs/wifi-credential-memory.md), [versioning.md](docs/versioning.md), [board-pins.md](docs/board-pins.md).
+- **Security**: [docs/security.md](docs/security.md) (deployment hardening guide), [docs/security-review-web.md](docs/security-review-web.md) (Web/OTA/WiFi security review with P0/P1/P2 breakdown and evidence).
 - **Feedback**: the Feedback page in the Web UI; author homepage <https://yunsi.studio/>; project homepage <https://yunsi.studio/wireless-debugger>.
 - **License**:
   - This repository as a whole is released under the **Apache License 2.0** (root [LICENSE](LICENSE)).
