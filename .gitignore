@@ -1,11 +1,14 @@
 .vscode/
 build/
+build-*/
 tmp/
 .history/
 sdkconfig.old
 sdkconfig
 .idea/
 dependencies.lock
-package-lock.json
+/package-lock.json
 managed_components/
 /version.txt
+web/node_modules/
+web/dist/
