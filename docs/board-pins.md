@@ -63,7 +63,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | `BIRDIEBOT_UART_BRIDGE_UART_NUM` | UART 实例号（`uart_port_t` 整数；S3/C3=1，ESP32=2） | 新宏，替代 `UART_BRIDGE_TX/RX UART_NUM_x` |
 | `BIRDIEBOT_UART_BRIDGE_PORT` | 1346（项目级默认） | 替代旧 `wifi_configuration.h` 的 `UART_BRIDGE_PORT` |
 | `UART_BRIDGE_BAUDRATE` | 115200（项目级默认） | 原样兼容 |
-| `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ` | 1000000（1MHz，项目级默认） | WP-101 映射到 `DAP_DEFAULT_SWJ_CLOCK` |
+| `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ` | 2000000（2MHz，项目级默认，真机验证） | WP-101 映射到 `DAP_DEFAULT_SWJ_CLOCK` |
 | `BIRDIEBOT_BOARD_ID` / `BIRDIEBOT_BOARD_NAME` | 机器名 / 可读名 | 新增；DAP_Info / 启动日志使用 |
 | `BIRDIEBOT_BOARD_TARGET` | `"esp32s3"` / `"esp32c3"` / `"esp32"` | 新增；文档/日志用字符串 |
 | `BIRDIEBOT_BOARD_TARGET_ID` | 1=esp32, 2=esp32c3, 3=esp32s3 | 新增；`src/birdiebot_board.c` 做 board/target 一致性检查（warning） |
@@ -185,7 +185,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | 默认 board | `BOARD_ZXR_DAP_S3` | 本组件；Kconfig `BIRDIEBOT_BOARD` |
 | mDNS 主机名 | `wifi-dap` | WiFi/mDNS 契约（`docs/wifi-credential-memory.md` 所属 wave）；对外用 `wifi-dap.local` |
 | AP SSID 前缀 | `WiFi-Dap-` | 后缀为 STA MAC 末 2 字节大写 hex（如 `WiFi-Dap-A1B2`），规则见 WiFi 多凭据契约 |
-| SWD 默认时钟 | **1 MHz** | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ=1000000`；WP-101 映射到 `DAP_DEFAULT_SWJ_CLOCK`。**不要沿用旧 fork 的 4MHz 调试值**（`analysis/03-fork-build.md` §2.2） |
+| SWD 默认时钟 | **2 MHz** | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ=2000000`；真机 STM32F407 验证稳定；4MHz/10MHz 无额外吞吐收益（USBIP/WiFi 延迟为瓶颈） |
 | UART 桥端口 | **1346** | `BIRDIEBOT_UART_BRIDGE_PORT`（旧 A 的 1234 已废弃） |
 | UART 桥波特率 | **115200** | `UART_BRIDGE_BAUDRATE`（旧 A 的 74880 已废弃） |
 | 控制台 | UART0（S3：GPIO43/44） | 不被 UART 桥占用 |

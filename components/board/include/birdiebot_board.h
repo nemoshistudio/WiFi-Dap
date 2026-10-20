@@ -20,7 +20,7 @@
  * Project-wide defaults (not per board, no Kconfig needed yet):
  *   BIRDIEBOT_UART_BRIDGE_PORT   1346
  *   UART_BRIDGE_BAUDRATE         115200
- *   BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 1000000 (1MHz, see docs/board-pins.md)
+ *   BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 2000000 (2MHz, see docs/board-pins.md)
  *
  * The header is self-contained: it has no include dependencies besides an
  * optional "sdkconfig.h" (detected with __has_include). Without an IDF build
@@ -154,10 +154,11 @@
 #  define UART_BRIDGE_BAUDRATE 115200
 #endif
 
-/* DAP SWD clock contract: project default is 1MHz (not the fork's 4MHz
- * debug setting). WP-101 must map this to DAP_DEFAULT_SWJ_CLOCK. */
+/* DAP SWD clock contract: project default is 2MHz (hardware-verified stable
+ * on STM32F407; 4MHz/10MHz give no extra throughput because USBIP/WiFi latency
+ * dominates). WP-101 maps this to DAP_DEFAULT_SWJ_CLOCK. */
 #ifndef BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ
-#  define BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 1000000
+#  define BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 2000000
 #endif
 
 /* ------------------------------------------------------------------------- */

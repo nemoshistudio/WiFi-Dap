@@ -153,11 +153,11 @@ This information includes:
 /// Default communication speed on the Debug Access Port for SWD and JTAG mode.
 /// Used to initialize the default SWD/JTAG clock frequency.
 /// The command \ref DAP_SWJ_Clock can be used to overwrite this default setting.
-/* Project contract (docs/board-pins.md §5): 1 MHz default, NOT the fork's
- * 4 MHz debug value. Keep a literal fallback in case an old board header is
- * used without the board contract macro. */
+/* Project contract (docs/board-pins.md §5): 2 MHz default (hardware-verified
+ * stable). Keep a literal fallback in case an old board header is used without
+ * the board contract macro. */
 #ifndef BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ
-  #define BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 1000000U
+  #define BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ 2000000U
 #endif
 #define DAP_DEFAULT_SWJ_CLOCK BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ ///< Default SWD/JTAG clock frequency in Hz.
 
