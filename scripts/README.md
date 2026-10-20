@@ -260,6 +260,41 @@ scripts/check-release-versions.sh                            # 严格发布门�
 tag、`web/package.json.version == X.Y.Z`、镜像内嵌版本 == tag，并调用
 `check-protocol-version.sh`（WP-131 落地后自动启用）。
 
+## WiFi 多凭据验证辅助脚本（Wave3，WP-201/202）
+
+配套清单：`docs/hardware-test-wifi.md`。两者都不需要修改源码。
+
+### 宿主纯逻辑测试（无需硬件 / IDF / Docker）
+
+```bash
+scripts/test_wifi_cred_logic.sh              # TAP-ish 断言，退出码 0=通过
+scripts/test_wifi_cred_logic.sh -v           # 保留临时构建产物 + 打印编译命令
+WERROR=1 scripts/test_wifi_cred_logic.sh     # CI 建议：额外 -Werror
+CC=clang scripts/test_wifi_cred_logic.sh     # 指定宿主编译器
+```
+
+- 编译 `project_components/wifi_manager/wifi_cred_logic.c`（无 ESP-IDF 依赖）+ 测试源
+  `scripts/wifi_cred_logic_test.c`，覆盖 103B NVS blob 布局/pack-unpack、SSID/口令校验、
+  有界拷贝、淘汰策略、轮换排序（含 `last_success=0` 平局、skip mask、last_idx 回退）、
+  `last_success` 归一化、默认 AP SSID（MAC 末 2 字节大写）。
+- 退出码：0 全过；1 断言失败；2 用法/工具链/编译错误。`TEST_BIN=/path` 可指定输出文件。
+
+### 设备只读校验（纯 Python 标准库，带 token 支持）
+
+```bash
+python3 scripts/test_wifi_device_readonly.py --host 192.168.1.1
+python3 scripts/test_wifi_device_readonly.py --host dap.local --token 123456
+BIRDIEBOT_TOKEN=123456 python3 scripts/test_wifi_device_readonly.py --host dap.local --json
+```
+
+- 只连接 `/ws` 并发送 **GET 命令 + 非法请求探针**（cmd 12/13/14 的非法 payload 必须被
+  `code=5` 拒绝），不修改凭据表/auto_save/AP 配置。
+- 校验：SYSTEM/GET_FM_INFO（protocol_version=1）、GET_SYS_INFO（sn）、WIFI/GET_SAVED_LIST
+  （11 的字段/索引/不回传口令）、GET_AP_INFO（5，默认 AP SSID 后缀 = sn 末 4 位；自定义
+  SSID 按契约跳过）、GET_MODE（6）、GET_STA_INFO（1）、cmd 12–14 错误形状。
+- 退出码：0 全过；2 连接/握手/用法错误；3 断言失败。旧固件（cmd 11–14 返回 `code=4`）会给出
+  明确升级提示。
+
 ## 自检 / 验证
 
 ```bash
