@@ -309,7 +309,6 @@ export default {
         required: '必填',
         actions: '操作',
         select: '选择',
-        labWarning: '未启用鉴权，仅限可信局域网',
     },
 
     navbar: {
@@ -362,9 +361,7 @@ export default {
             aborted: '更新已取消',
             sameVersionWarn: '所选固件与当前版本相同，仍要重刷吗？',
             downgradeWarn: '所选固件版本低于当前版本，确认降级？',
-            authRequired: '固件已开启鉴权，请先登录',
             current: '当前运行',
-            labWarning: '默认未启用鉴权：本页仅可在可信局域网使用，任何能访问设备的人都可上传固件。',
             slotSize: 'OTA 槽容量',
             slotFree: 'OTA 槽可用',
         },
@@ -378,17 +375,6 @@ export default {
         },
     },
 
-    auth: {
-        title: '鉴权',
-        description: '固件已开启 Web 鉴权，请输入设备上显示的配对码',
-        tokenLabel: '配对码',
-        tokenPlaceholder: '请输入配对码',
-        login: '登录',
-        logout: '退出登录',
-        invalidToken: '配对码无效',
-        required: '需要登录后才能继续',
-        labMode: '实验室模式：未启用鉴权',
-    },
 
     about: {
         hardwareVersion: '硬件版本',

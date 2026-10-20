@@ -100,10 +100,6 @@ firmware/protocol info. Firmware must implement OTA(5) `GET_INFO/GET_PROGRESS/AB
 `POST /api/ota/upload`; with old firmware the upload section hides gracefully on
 `code=4 Unsupported cmd` (see `docs/ota-local-upload.md`).
 
-Security notes: a `?token=` pairing-token query parameter is removed from the address bar
-(history) after first load and persisted to `localStorage` (`birdiebot.token`, plain text —
-use only on trusted devices); tokens are never echoed in logs or error messages.
-
 ## License
 
 Distributed under the MIT License. See `LICENCE.txt` for more information.

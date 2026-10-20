@@ -1,7 +1,6 @@
 import type {ControlMsg, ServerMsg} from "@/api";
 import {ControlEvent, ControlMsgType} from "@/api";
 import {isDevMode} from "@/composables/buildMode";
-import {buildAuthRequest, buildWebSocketUrl} from "@/composables/websocket/auth";
 
 
 interface IWebsocket {
@@ -30,7 +29,6 @@ class WebsocketDummy implements IWebsocket {
 class OneTimeWebsocket implements IWebsocket {
     private readonly heartBeatTimeout: number = 1;
     private readonly host: string;
-    private readonly token: string;
     private readonly intervalId: number;
     private readonly msgCallback: (ev: ServerMsg) => any;
     private readonly ctrlCallback: (msg: ControlMsg) => any;
@@ -44,11 +42,9 @@ class OneTimeWebsocket implements IWebsocket {
     constructor(host: string,
                 msgCallback: (ev: ServerMsg) => any,
                 ctrlCallback: (msg: ControlMsg) => any,
-                closeCallback: () => void,
-                token: string = ''
+                closeCallback: () => void
     ) {
         this.host = host;
-        this.token = token;
         this.stoped = false;
         this.cleared = false;
         this.hasBeenConnected = false;
@@ -58,7 +54,9 @@ class OneTimeWebsocket implements IWebsocket {
         this.heartBeatTimeCount = 0;
         this.intervalId = 0;
 
-        this.socket = new WebSocket(buildWebSocketUrl(this.host, this.token));
+        // 设备默认以 HTTP 提供页面（ws://）；页面若被反代到 HTTPS 则自动用 wss://
+        const secure = typeof window !== 'undefined' && window.location.protocol === 'https:';
+        this.socket = new WebSocket(`${secure ? 'wss' : 'ws'}://${this.host}/ws`);
         this.setSocketProp();
 
         this.intervalId = setInterval(() => {
@@ -125,11 +123,6 @@ class OneTimeWebsocket implements IWebsocket {
             }
             this.heartBeatTimeCount = 0;
             this.hasBeenConnected = true;
-            // Protocol requires the auth frame before any business request
-            // (docs/protocol.md §1). No token => auth disabled / lab mode.
-            if (this.token) {
-                this.socket.send(buildAuthRequest(this.token));
-            }
             const msg: ControlMsg = {
                 type: ControlMsgType.WS_EVENT,
                 data: ControlEvent.CONNECTED,
@@ -202,7 +195,6 @@ export class WebsocketWrapper {
     private ctrlCallback: (msg: ControlMsg) => any;
     private timeoutId: number;
     private host: string;
-    private token: string;
     private stoped: boolean;
 
     constructor() {
@@ -211,7 +203,6 @@ export class WebsocketWrapper {
         this.ctrlCallback = () => {};
         this.timeoutId = 0;
         this.host = "";
-        this.token = "";
         this.stoped = false;
 
         this.closeCallback = this.closeCallback.bind(this);
@@ -219,26 +210,23 @@ export class WebsocketWrapper {
 
     init(host: string,
          msgCallback: (ev: ServerMsg) => any,
-         ctrlCallback: (msg: ControlMsg) => any,
-         token: string = '')
+         ctrlCallback: (msg: ControlMsg) => any)
     {
-        if (this.host === host && this.token === token) {
+        if (this.host === host) {
             return;
         }
-        this.newConnection(host, msgCallback, ctrlCallback, token);
+        this.newConnection(host, msgCallback, ctrlCallback);
     }
 
     private newConnection(host: string,
               msgCallback: (ev: ServerMsg) => any,
-              ctrlCallback: (msg: ControlMsg) => any,
-              token: string)
+              ctrlCallback: (msg: ControlMsg) => any)
     {
         this.socket.close();
         this.host = host;
-        this.token = token;
         this.msgCallback = msgCallback;
         this.ctrlCallback = ctrlCallback;
-        this.socket = new OneTimeWebsocket(host, this.msgCallback, this.ctrlCallback, this.closeCallback, token);
+        this.socket = new OneTimeWebsocket(host, this.msgCallback, this.ctrlCallback, this.closeCallback);
     }
 
     private closeCallback() {
@@ -246,7 +234,7 @@ export class WebsocketWrapper {
             return;
         }
         this.timeoutId = setTimeout(() =>
-                this.newConnection(this.host, this.msgCallback, this.ctrlCallback, this.token),
+                this.newConnection(this.host, this.msgCallback, this.ctrlCallback),
             1000);
     }
 

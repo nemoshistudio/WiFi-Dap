@@ -97,9 +97,6 @@ Update 页会显示本次构建的实际状态；未启用时仅显示固件/协
 OTA(5) `GET_INFO/GET_PROGRESS/ABORT` 与 `POST /api/ota/upload`；旧固件返回
 `code=4 Unsupported cmd` 时前端自动隐藏上传区块（见 `docs/ota-local-upload.md`）。
 
-安全说明：首次加载后 `?token=` 配对码参数会从地址栏（history）移除并保存到
-`localStorage`（`birdiebot.token`，明文存储，仅限可信设备使用）；日志与错误提示不会回显 token。
-
 ## 许可证
 
 根据MIT许可证分发。更多信息请参见 `LICENCE.txt` 文件。 

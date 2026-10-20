@@ -4,7 +4,6 @@ import {toClient, toClientCtrl, toServer} from "@/composables/broadcastChannelDe
 import type {ControlMsg, ServerMsg} from "@/api";
 import {ControlMsgType} from "@/api";
 import {isDevMode} from "@/composables/buildMode";
-import {resolveAuthToken} from "@/composables/websocket/auth";
 
 export interface IWebsocketService {
     init(host: string,
@@ -68,7 +67,6 @@ class WebsocketShared implements IWebsocketService {
         this.worker.port.postMessage({
             type: ControlMsgType.WS_SET_HOST,
             data: host,
-            token: resolveAuthToken(),
         } as ControlMsg)
     }
 
@@ -133,7 +131,7 @@ class WebsocketClassic implements IWebsocketService{
         if (isDevMode()) {
             console.log("Websocket Service INIT called", WebsocketClassic.count);
         }
-        this.socket.init(host, msgCallback, ctrlCallback, resolveAuthToken());
+        this.socket.init(host, msgCallback, ctrlCallback);
     }
 
     deinit(): void {

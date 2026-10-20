@@ -3,7 +3,6 @@ import {ControlEvent, ControlMsgType} from "@/api";
 import {WebsocketWrapper} from "@/composables/websocket/websocketWrapper";
 import {toClient, toClientCtrl, toServer} from "@/composables/broadcastChannelDef";
 import {isDevMode} from "@/composables/buildMode";
-import {normalizeAuthToken} from "@/composables/websocket/auth";
 
 declare const self: SharedWorkerGlobalScope;
 
@@ -23,17 +22,14 @@ self.onconnect = function(event) {
     const port = event.ports[0];
     port.onmessage = function (e: MessageEvent<ControlMsg>) {
         if (isDevMode()) {
-            // 安全审查 B：控制消息可能携带 pairing token，禁止整体打印（只打印类型）
             console.log('Received control message in SharedWorker:', e.data?.type);
         }
         if (e.data.type === ControlMsgType.WS_SET_HOST) {
             const nextHost = typeof e.data.data === 'string' ? e.data.data : '';
-            const token = normalizeAuthToken(e.data.token);
-            // Keep the first host (multi-tab / multi-device safety) but allow a
-            // later tab to supply/refresh the auth token for the same device.
+            // Keep the first host (multi-tab / multi-device safety)
             if (nextHost !== "" && (host === "" || host === nextHost)) {
                 host = nextHost;
-                websocket.init(host, msgBroadcast, ctrlBroadcast, token);
+                websocket.init(host, msgBroadcast, ctrlBroadcast);
             }
         } else if (e.data.type === ControlMsgType.WS_GET_STATE) {
             websocket.getSocketStatus();

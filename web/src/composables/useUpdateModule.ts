@@ -56,10 +56,6 @@ export function useUpdateModule() {
             updateStore.markUnsupported();
             return;
         }
-        // 鉴权失败（code=7）：msgRouter 已统一提示输入 pairing token，这里不重复报错
-        if (msg.code === 7) {
-            return;
-        }
         switch (msg.cmd as WtOtaCmd) {
             case WtOtaCmd.GET_INFO: {
                 updateStore.applyInfo(msg as IOtaInfo);

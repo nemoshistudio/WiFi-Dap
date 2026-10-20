@@ -10,8 +10,6 @@ export const PROTOCOL_VERSION = 1;
 export interface ApiJsonMsg {
     module: number;
     cmd: number;
-    /** Optional Web auth pairing code (docs/protocol.md §1). */
-    token?: string;
     /** Error message returned by the firmware. */
     err?: string;
     /** Error code returned by the firmware (docs/protocol.md §1.1). */
@@ -35,8 +33,6 @@ export enum ControlEvent {
 export interface ControlMsg {
     type: ControlMsgType,
     data: ControlEvent | string,
-    /** Page-side auth token forwarded to the shared worker on WS_SET_HOST. */
-    token?: string,
 }
 
 export interface ServerMsg {
@@ -51,7 +47,6 @@ export enum WtErrorCode {
     UNSUPPORTED_CMD = 4,
     PROPERTY_ERROR = 5,
     BUSY = 6,
-    UNAUTHORIZED = 7,
 }
 
 /** JSON module ids (docs/protocol.md §2). 3 is reserved by the firmware. */
@@ -66,7 +61,6 @@ export enum WtModuleID {
 
 /** SYSTEM(0) JSON commands (docs/protocol.md §2.1). */
 export enum WtSystemCmd {
-    AUTH = 0,
     GET_FM_INFO = 1,
     REBOOT = 2,
     GET_SYS_INFO = 3,
