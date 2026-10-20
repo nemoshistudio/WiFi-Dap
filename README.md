@@ -59,7 +59,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | Discovery | mDNS / SSDP | ✅ | mDNS `_http._tcp`; SSDP 1900/UDP + `GET /SSDP.xml` |
 | OTA | Browser-local upload (dual slot + rollback) | ✅ S3 8 MB only | `POST /api/ota/upload`, see [contract](docs/ota-local-upload.md) |
 | Diagnostics | coredump to flash | ✅ | 64 KB `coredump` partition (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`) |
-| Security | Optional Web auth | ✅ off by default | `BIRDIEBOT_WEB_AUTH`, see [§9](#9-security-defaults--hardening) |
+| Security | No login/auth (lab mode); Host/Origin guard always on | ✅ | see [§9](#9-security-defaults--hardening) |
 | Versioning | Firmware semver + protocol v1 | ✅ | About page / `SYSTEM/GET_FM_INFO`, see [docs/versioning.md](docs/versioning.md) |
 
 ---
@@ -210,7 +210,7 @@ Entry point: `http://<device-ip>/` (defaults to `/#/uart`). The frontend talks t
 | **Feedback** | `/#/feedback` | Feedback entry points (author/project pages) |
 
 - Languages: Chinese / English (314 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
-- Auth: with `BIRDIEBOT_WEB_AUTH` enabled, the first visit asks for the pairing code (see [§9](#9-security-defaults--hardening)).
+- Security: no login/auth (removed by design); the Web UI is usable from the trusted LAN only (see [§9](#9-security-defaults--hardening)).
 - Screenshots: [Widget panel](web/assets/widgetPannel.png) · [UART terminal](web/assets/uart.png)
 
 ### OTA (ESP32-S3 8 MB only)
@@ -294,26 +294,22 @@ The default firmware is designed for "laboratory mode". The following limitation
 
 - **No authentication by default**: HTTP **80** (`/`, `/ws`, `/api`), TCP **3240** (USBIP / elaphureLink / WS-DAP) and TCP **1346** (UART TCP bridge) are all unauthenticated; anyone on the same network can fully control the device and the target MCU.
 - **Default AP password `12345678`**: physically nearby users can join the device hotspot and gain all of the above; change it on first use.
-- **Limited token transport/storage (P1-4)**: pairing token is now **128-bit (32 hex) with AUTH failure rate limiting** (N5); token is still sent in plaintext over HTTP/WS and stored in plaintext (NVS / browser localStorage) and printed to serial. The token is still sent in plaintext over HTTP/WS, stored in plaintext in NVS (NVS encryption off) and browser `localStorage`, and printed to the serial log — accepted for studio-LAN use.
-- **Web auth only covers port 80**: with `BIRDIEBOT_WEB_AUTH` enabled, 3240/1346 remain unprotected by the token — disable them via Kconfig or isolate the network.
-- **OTA is unsigned / no anti-downgrade**: `esp_ota_end()` only validates image format; anti-rollback and Secure Boot are not enabled, so with default no-auth (or a leaked token) any valid image can be written. Once `POST /api/ota/upload` lands, re-review per report §4.3.
+- **No login/auth at all (by design)**: the pairing-code/token feature was removed; 80/3240/1346 are open on the trusted LAN. Host/Origin validation stays enabled for browser CSWSH/DNS-rebinding protection, but it is not authentication.
+- **OTA is unsigned / no anti-downgrade**: `esp_ota_end()` only validates image format; anti-rollback and Secure Boot are not enabled, so any valid image can be written from the trusted LAN.
 
 > Note: Origin/Host validation is now **always enabled** (decoupled from `auth`, default: IP-literal Host + same-origin only), closing the CSWSH/DNS-rebinding gap reported in review §1.2. Deployment hardening checklist: [docs/security.md](docs/security.md).
 
-**Accepted risks (studio LAN)**: by project decision, the following risks are **accepted and will not be fixed** for deployment on a **trusted studio LAN**: P1-1 default no-auth (80/3240/1346) and default AP password, P1-3 Web auth not covering 3240/1346, P1-4 plaintext token transport/storage, and the conditional P0 (OTA upload endpoint unauthenticated when `auth=n`); N3/N4 share the same root cause as P1-1/P1-3 and are accepted under the same decision. Use constraints and the N1–N9 fix status: [docs/security.md#accepted-risks-studio-lan](docs/security.md#accepted-risks-studio-lan). **Never expose the device to the public Internet or untrusted Wi-Fi.**
+**Accepted risks (studio LAN)**: the device is **open by design** (no login/auth; 80/3240/1346 unauthenticated) and the default AP password stays `12345678` until changed. These are accepted for a **trusted studio LAN**; Host/Origin validation remains enabled for browser-origin attacks. Use constraints and N1–N9 status: [docs/security.md](docs/security.md). **Never expose the device to the public Internet or untrusted Wi-Fi.**
 
-### 9.3 Enabling Web auth
+### 9.3 Host/Origin validation (no login)
 
-`idf.py menuconfig → WiFi Dap web server → Enable Web UI/API token authentication (`BIRDIEBOT_WEB_AUTH`)`:
+Login/pairing-code/token authentication has been **removed**. What remains is an always-on browser-origin guard:
 
-- **Pair code**: a **128-bit (32 hex)** token is generated by default and persisted in `wt_nvs` (legacy 8-hex tokens are rotated automatically; AUTH failures are rate limited); the serial log prints
-  `Web auth ENABLED; pairing token: <code>`. Set `BIRDIEBOT_WEB_TOKEN` to pin a fixed token (URL-safe, ≤256 chars).
-- **How clients send it**:
-  - WebSocket: `ws://<ip>/ws?token=<code>`, or first frame `{"module":0,"cmd":0,"token":"<code>"}`;
-  - HTTP: `Authorization: Bearer <code>` or `?token=<code>`; failures return HTTP 401 with `code=7`.
-- **Host/Origin checks**: only IP-literal access is accepted by default; if you access the device through a hostname (mDNS/reverse proxy),
-  add it to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (e.g. `http://wifi-dap.local`).
-- Scripts support it: `scripts/ota_upload.py --token <code>`, `scripts/e2e_ws_client.py --token <code>`.
+- `Host` must be an IP literal, `CONFIG_LWIP_LOCAL_HOSTNAME`, or listed in `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (DNS-rebinding protection);
+- when a browser sends `Origin`, it must be same-origin or whitelisted (CSWSH protection);
+- non-browser clients (curl, OpenOCD, scripts) send no Origin and are allowed — this is **not authentication**.
+
+If you access the UI through a hostname (mDNS/reverse proxy), add it to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (e.g. `http://wifi-dap.local`). Scripts no longer accept/need `--token`.
 
 ### 9.4 Disabling unused transports
 
@@ -426,7 +422,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 | `WiFi-Dap-XXXX` AP not found | first flash done? correct board (`sdkconfig.defaults.*`)? Wi-Fi init errors in the serial log? AP turns off 30 s after STA connects (normal) |
 | `192.168.1.1` does not respond | is the client on the device AP? did Smart APSTA turn the AP off? use the device's STA-network IP |
 | `wifi-dap.local` does not resolve | mDNS support on device/client; fall back to the IP (hostname is `wifi-dap` in `wt_mdns_config.h`) |
-| Web UI online but operations return 401/disconnect | `BIRDIEBOT_WEB_AUTH` enabled: enter the pairing code printed on the serial console; hostname access needs `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
+| Web UI opens but operations are rejected with HTTP 403 | Host/Origin guard: access via IP or add the hostname to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
 | `usbip.exe attach_ude` fails | usbip-win 0.3.0+? device IP/network reachable? port 3240 blocked by firewall? busid is always `1-1` |
 | DAP disconnects/slow | Wi-Fi environment/distance, 2.4 GHz interference, too-high debug clock, broadcast storms on the LAN |
 | UART page/bridge shows no data | baud rate matches the target? correct board TX/RX pins (see board-pins)? is the target actually transmitting? UART0 console is not bridged |

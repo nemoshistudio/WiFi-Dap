@@ -59,7 +59,7 @@
 | 发现 | mDNS / SSDP | ✅ | mDNS `_http._tcp`；SSDP 1900/UDP + `GET /SSDP.xml` |
 | OTA | 浏览器本地上传（双槽 + 回滚） | ✅ 仅 S3 8 MB | `POST /api/ota/upload`，见 [契约](docs/ota-local-upload.md) |
 | 诊断 | coredump 到 Flash | ✅ | 64 KB `coredump` 分区（`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`） |
-| 安全 | 可选 Web 鉴权 | ✅ 默认关 | `BIRDIEBOT_WEB_AUTH`，见 [§9](#9-安全默认与加固) |
+| 安全 | 无登录/鉴权（实验室模式）；Host/Origin 校验始终启用 | ✅ | 见 [§9](#9-安全默认与加固) |
 | 版本 | 固件 semver + 协议 v1 | ✅ | About 页 / `SYSTEM/GET_FM_INFO`，见 [docs/versioning.md](docs/versioning.md) |
 
 ---
@@ -210,7 +210,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 | **Feedback** | `/#/feedback` | 反馈入口（作者主页/项目主页链接） |
 
 - 语言：中文 / English 可切换（i18n 314 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
-- 鉴权：启用 `BIRDIEBOT_WEB_AUTH` 后，首次打开会弹出配对码输入框（见 [§9](#9-安全默认与加固)）。
+- 安全：按需求**无登录/鉴权**；Web UI 仅可在可信局域网使用（见 [§9](#9-安全默认与加固)）。
 - 图片预览：[Widget 面板](web/assets/widgetPannel.png) · [UART 终端](web/assets/uart.png)
 
 ### OTA（仅 ESP32-S3 8 MB）
@@ -294,25 +294,22 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 - **默认无鉴权**：HTTP **80**（`/`、`/ws`、`/api`）、TCP **3240**（USBIP / elaphureLink / WS-DAP）、TCP **1346**（UART TCP 桥）默认全部无鉴权，同一网络内即可完全控制设备与目标 MCU。
 - **默认 AP 口令 `12345678`**：物理邻近即可加入设备热点，进而获得上述全部能力；首次使用必须修改。
-- **鉴权 token 传输/存储（P1-4）**：pairing token 现为 **128-bit（32 hex）+ AUTH 失败限速**（N5）；仍以明文经 HTTP/WS 传输、明文保存于 NVS（未启用 NVS 加密）与浏览器 `localStorage`，并会打印到串口日志——作为工作室内网可接受风险保留。
-- **Web 鉴权只覆盖 80**：开启 `BIRDIEBOT_WEB_AUTH` 后，3240/1346 仍不受 token 保护，需显式关闭（Kconfig）或通过网络隔离。
-- **OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot；默认无鉴权（或 token 持有者）可写入任意有效镜像；`POST /api/ota/upload` 合入后风险等级提高，需按审查报告 §4.3 复审。
+- **完全无登录/鉴权（按需求移除）**：配对码/token 功能已删除；80/3240/1346 在可信内网开放。Host/Origin 校验保留（浏览器 CSWSH/DNS-rebinding 防护），但它不是身份认证。
+- **OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot；可信内网内可写入任意有效镜像。
 
 > 注：Origin/Host 校验现已**始终启用**（与 `auth` 解耦；默认仅接受 IP-literal Host + 同源 Origin），已关闭审查报告 §1.2 的 CSWSH/DNS-rebinding 风险。部署加固清单见 [docs/security.md](docs/security.md)。
 
-**Accepted risks (studio LAN)**：用户已决定，以下风险在**可信实验室内网**部署下**接受、不修复**：P1-1 默认无鉴权（80/3240/1346）与默认 AP 口令、P1-3 Web 鉴权不覆盖 3240/1346、P1-4 token 明文传输/存储、条件性 P0（`auth=n` 时 OTA 上传端点无鉴权）；N3/N4 与 P1-1/P1-3 同源，按同一决策接受。使用约束与 N1–N9 修复状态见 [docs/security.md#accepted-risks-studio-lan](docs/security.md#accepted-risks-studio-lan)。**勿把设备暴露到公网或不可信 Wi-Fi。**
+**Accepted risks (studio LAN)**：设备按设计**无登录/鉴权**（80/3240/1346 开放）、默认 AP 口令 `12345678` 未改；这些风险在**可信实验室内网**下接受。Host/Origin 校验保留用于防浏览器跨源攻击。使用约束与 N1–N9 状态见 [docs/security.md](docs/security.md)。**勿把设备暴露到公网或不可信 Wi-Fi。**
 
-### 9.3 启用 Web 鉴权
+### 9.3 Host/Origin 校验（无登录）
 
-`idf.py menuconfig → WiFi Dap web server → Enable Web UI/API token authentication (`BIRDIEBOT_WEB_AUTH`)`：
+登录/配对码/token 鉴权已**全部移除**，仅保留始终启用的浏览器来源校验：
 
-- **配对码（pair code）**：默认自动生成 **128-bit（32 hex）** token 并持久化到 `wt_nvs`（旧 8-hex token 会自动轮换；AUTH 失败有限速），启动日志会打印
-  `Web auth ENABLED; pairing token: <code>`；可用 `BIRDIEBOT_WEB_TOKEN` 固定（URL-safe，≤256 字符）。
-- **客户端携带方式**：
-  - WebSocket：`ws://<ip>/ws?token=<code>`，或首帧 `{"module":0,"cmd":0,"token":"<code>"}`；
-  - HTTP：`Authorization: Bearer <code>` 或 `?token=<code>`；未通过返回 HTTP 401 + `code=7`。
-- **Host/Origin 校验**：默认只接受 IP 直连；若通过主机名（mDNS/反向代理）访问，需在 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 加入该来源（如 `http://wifi-dap.local`）。
-- 脚本支持：`scripts/ota_upload.py --token <code>`、`scripts/e2e_ws_client.py --token <code>`。
+- `Host` 必须是 IP literal、`CONFIG_LWIP_LOCAL_HOSTNAME` 或 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 名单（防 DNS rebinding）；
+- 浏览器带 `Origin` 时必须同源或命中名单（防 CSWSH）；
+- 非浏览器客户端（curl/OpenOCD/脚本）不带 Origin，仍可访问——**这不是身份认证**。
+
+若通过主机名（mDNS/反向代理）访问，请在 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 加入该来源（如 `http://wifi-dap.local`）。脚本不再需要/支持 `--token`。
 
 ### 9.4 关闭不需要的传输
 
@@ -425,7 +422,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 | 找不到 `WiFi-Dap-XXXX` 热点 | 是否已首次烧录；板卡 board 选择是否正确（`sdkconfig.defaults.*`）；串口日志是否有 Wi-Fi 初始化错误；STA 已连接时 AP 会在 30 s 后关闭（正常） |
 | 打开 `192.168.1.1` 无响应 | 手机/PC 是否连的是设备 AP；是否被 Smart APSTA 关闭了 AP；改连 STA 网段的设备 IP |
 | `wifi-dap.local` 无法解析 | 设备/客户端 mDNS 支持；改用 IP 访问（主机名见 `wt_mdns_config.h`，默认 `wifi-dap`） |
-| Web UI 提示在线但操作 401/断开 | 是否开启了 `BIRDIEBOT_WEB_AUTH`：输入串口打印的配对码；主机名访问需配置 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
+| Web UI 提示在线但操作被拒（HTTP 403） | Host/Origin 校验：用 IP 访问，或把主机名加入 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
 | `usbip.exe attach_ude` 失败 | usbip-win 版本是否 0.3.0+；设备 IP/网段是否可达；3240 是否被防火墙拦截；busid 固定为 `1-1` |
 | DAP 断连/很慢 | Wi-Fi 环境与距离；2.4 GHz 干扰；调试器时钟过高；同网段广播风暴 |
 | UART 页/桥无数据 | UART 页波特率与目标一致？引脚是否为板级 TX/RX（见 board-pins）？目标是否真的在输出？控制台 UART0 不经过桥 |

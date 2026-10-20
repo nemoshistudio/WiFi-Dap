@@ -11,10 +11,10 @@ Covers the parts that can be tested without a device:
   * the OTA state machine states/transitions documented in the contract;
   * the app-image sanity helper (``parse_app_image``) and frozen size constants.
 
-Contract-consistency regression guard: docs/protocol.md defines
-``code 7 = Unauthorized`` and docs/ota-local-upload.md maps HTTP 401 to it
-(Lead fix 15e8b10); both documents are asserted below so the mapping cannot
-drift again (this was finding F1 in docs/host-test-report.md).
+Contract-consistency regression guard: login/auth was removed by product
+decision; docs/protocol.md no longer advertises an Unauthorized code and the
+OTA contract no longer maps HTTP 401. The table parser below keeps the tests
+in sync with the (now auth-free) contract.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ STATES = ("IDLE", "RECEIVING", "VERIFYING", "READY", "APPLYING", "ERROR")
 # Frozen copy of docs/ota-local-upload.md §3.4 (kept independent of the parser).
 EXPECTED_HTTP_MAP = {
     400: 5,
-    401: 7,
     403: 5,
     409: 6,
     411: 5,
@@ -51,7 +50,6 @@ EXPECTED_HTTP_MAP = {
 }
 EXPECTED_HTTP_ERR_HINTS = {
     400: ("invalid content length", "bad sha256 header", "image too small"),
-    401: ("unauthorized",),
     403: ("forbidden origin",),
     409: ("ota session busy",),
     411: ("content-length required",),
@@ -97,7 +95,7 @@ def parse_http_error_table(doc: str) -> dict[int, int]:
         if not m:
             continue
         status = int(m.group(1))
-        if status in (400, 401, 403, 408, 409, 411, 413, 415, 422, 500, 503):
+        if status in (400, 403, 408, 409, 411, 413, 415, 422, 500, 503):
             mapping[status] = int(m.group(2))
     return mapping
 
@@ -202,46 +200,15 @@ class TestHttpErrorMapping(unittest.TestCase):
 
     def test_json_codes_are_in_the_protocol_domain(self) -> None:
         codes = parse_protocol_error_codes(PROTOCOL_DOC)
-        self.assertEqual(sorted(codes), [2, 3, 4, 5, 6, 7])
+        self.assertEqual(sorted(codes), [2, 3, 4, 5, 6])
         self.assertEqual(codes[2], "Bad json request")
         self.assertEqual(codes[3], "Internal error")
         self.assertEqual(codes[4], "Unsupported cmd")
         self.assertEqual(codes[5], "Property error")
         self.assertEqual(codes[6], "Busy")
-        self.assertEqual(codes[7], "Unauthorized")
         for status, code in EXPECTED_HTTP_MAP.items():
             with self.subTest(http=status):
                 self.assertIn(code, codes, f"HTTP {status} maps to unknown code {code}")
-
-    def test_http_401_maps_to_protocol_unauthorized_code(self) -> None:
-        # Finding F1 was fixed by Lead commit 15e8b10: the OTA contract now
-        # maps HTTP 401 to protocol code 7 instead of the obsolete code 5.
-        codes = parse_protocol_error_codes(PROTOCOL_DOC)
-        self.assertEqual(codes[7], "Unauthorized")
-        self.assertEqual(EXPECTED_HTTP_MAP[401], 7)
-        self.assertEqual(parse_http_error_table(OTA_DOC)[401], 7)
-
-    def test_contract_docs_agree_on_unauthorized_code(self) -> None:
-        """Top-level guard: protocol.md must define code 7 and the OTA upload
-        contract must map HTTP 401 to it, including the 2–7 code-domain note.
-
-        Prevents recurrence of finding F1 (401 was mapped to 5 while protocol
-        already had 7=Unauthorized)."""
-        proto_codes = parse_protocol_error_codes(PROTOCOL_DOC)
-        self.assertIn(7, proto_codes,
-                      "docs/protocol.md §1.1 must define code 7 (Unauthorized)")
-        self.assertEqual(proto_codes[7], "Unauthorized")
-
-        ota_map = parse_http_error_table(OTA_DOC)
-        self.assertEqual(ota_map.get(401), 7,
-                         "docs/ota-local-upload.md §3.4 must map HTTP 401 to code 7")
-
-        section = OTA_DOC.split("### 3.4", 1)[-1].split("## 4.", 1)[0]
-        self.assertIn("2–7", section,
-                      "OTA contract code-domain note must advertise codes 2–7")
-        self.assertNotIn("2–6", section,
-                         "OTA contract must not regress to the 2–6 code-domain note")
-
 
 # ---------------------------------------------------------------------------
 # Upload success/error JSON envelope (contract §3.4)

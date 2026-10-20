@@ -14,7 +14,7 @@
 | 心跳 | 固件每 **1500ms** 向所有 WS 客户端广播一个**空 TEXT 帧**；前端收到任意消息即重置 2s 超时 |
 | 帧大小 | 单帧 payload 上限 = `memory_pool` 可用容量（当前 2048 - 内部头 ≈ 1.8KB）；超限关闭连接（JSON）或回错误帧（二进制） |
 | 并发 | 请求-响应无 ID（沿用 D/C 约定）；同一时刻同 cmd 只允许一个在途；慢命令（WiFi 扫描/连接、OTA 进度）用异步事件/轮询响应 |
-| 鉴权 | 默认 **关闭**（`BIRDIEBOT_WEB_AUTH=n`）；打开后：连接 URL 带 `?token=<pair_code>` 或首帧 `{"module":0,"cmd":0,"token":"..."}`，HTTP 用 `Authorization: Bearer`；`Origin`/`Host` 校验 |
+| 登录/鉴权 | **已移除**（无 token、无首帧 AUTH、无 `Authorization`）；`Host`/`Origin` 校验始终启用（防浏览器 CSWSH/DNS-rebinding）；HTTP/WS 明文 |
 
 ### 1.1 JSON 请求/响应
 
@@ -32,7 +32,6 @@
 | 4 | `Unsupported cmd` |
 | 5 | `Property error`（字段缺失/类型错/取值非法） |
 | 6 | `Busy`（内存池/请求队列满，稍后重试） |
-| 7 | `Unauthorized`（鉴权开启且 token 缺失/错误） |
 
 ---
 
@@ -44,7 +43,6 @@
 
 | cmd | 名称 | 请求 | 响应 | 说明 |
 |---|---|---|---|---|
-| **0** | **AUTH** | `{"module":0,"cmd":0,"token":"<pair_code>"}` | `{"module":0,"cmd":0,"ok":true}`；失败 `{"err":"unauthorized","code":7}` | 仅在 `BIRDIEBOT_WEB_AUTH=y` 时必需；也可用 `?token=` 或 `Authorization: Bearer` 免首帧 |
 | 1 | GET_FM_INFO | – | `{"fm_ver":"v1.0.0","upd_date":"YYYY-MM-DD","protocol_version":1}` | 固件版本 + 协议版本；`upd_date` 由构建注入 |
 | 2 | REBOOT | – | 回显请求 | 2 秒后重启 |
 | 3 | GET_SYS_INFO | – | `{"sn":"XXXXXXXXXXXX","hw_ver":"...","mf_date":"YYYY-MM-DD"}` | SN 默认 = WiFi STA MAC 无分隔大写 12 hex；hw_ver/mf 由构建注入，可留空字符串 |
@@ -150,7 +148,7 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 
 ## 5. 安全默认
 
-- 默认无鉴权（实验室模式）；打开 `BIRDIEBOT_WEB_AUTH` 后：`/ws` 与 `/api` 均需 token；`Origin`/`Host` 校验；OTA 上传和 WiFi 口令读取必须带 token。
+- 无登录/鉴权（实验室模式）；`Host`/`Origin` 校验始终启用（浏览器跨源防护）；OTA 上传和 WiFi 口令读取仅在可信内网使用。
 - WS-DAP(3240) 与 UART TCP 桥(1346) 默认开启，但各自 Kconfig 可关；release 文档必须提示“仅限可信局域网”。
 
 *契约版本：v1，2026-10-20，Lead 维护。*
