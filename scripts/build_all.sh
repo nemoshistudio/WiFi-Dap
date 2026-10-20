@@ -206,6 +206,14 @@ for target in "${TARGETS[@]}"; do
     # next incremental build fails with an IDF_TARGET mismatch.
     sdkconfig_rel="$build_rel/sdkconfig"
 
+    if [ "$need_set_target" -eq 1 ] && [ -d "$build_abs" ] && [ ! -f "$build_abs/CMakeCache.txt" ]; then
+        # Interrupted/failed configure (e.g. a CMake FATAL) can leave a build
+        # dir without CMakeCache.txt; idf.py set-target then refuses to
+        # fullclean it. It is our own build/<target> dir, so recreate it.
+        log "removing incomplete build dir $build_rel (no CMakeCache.txt)"
+        rm -rf "$build_abs"
+    fi
+
     if [ "$need_set_target" -eq 1 ]; then
         log "idf.py set-target $target (SDKCONFIG_DEFAULTS=$(defaults_file "$target"), SDKCONFIG=$sdkconfig_rel)"
         set_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel"
