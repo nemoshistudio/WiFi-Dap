@@ -16,7 +16,7 @@
  * HTTP/WS only, so everything else can be locked down. */
 #define WEB_HTTP_CSP \
 	"default-src 'self'; " \
-	"script-src 'self' 'unsafe-inline'; " \
+	"script-src 'self' 'unsafe-inline' 'unsafe-eval'; " \
 	"style-src 'self' 'unsafe-inline'; " \
 	"img-src 'self' data: blob:; " \
 	"font-src 'self' data:; " \
