@@ -50,15 +50,17 @@
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 
-/* A3: pipeline depth of the two USBIP<->DAP ring buffers.
+/* Pipeline depth of the two USBIP<->DAP ring buffers.
  *
- * 2025 tree used 10 slots when the Wi-Fi/mDNS/OTA stack was enabled.  With
- * DAP_PACKET_SIZE=1024 the host (OpenOCD CMSIS-DAP) can have several URBs in
- * flight while the Wi-Fi round-trip is outstanding, so deepen the pipeline to
- * 20 slots: 2 directions * (4 B + 1024 B) * 20 ~= 41 KB.  That still leaves
- * plenty of internal heap on the 512 KB ESP32-S3 (confirmed on hardware by the
- * A3 benchmark); item size stays DAP_HANDLE_SIZE. */
-#define DAP_BUFFER_NUM 20
+ * A3 used 20 slots with DAP_PACKET_SIZE=1024 (~41 KB).  B1 raises the packet
+ * size on the ESP32-S3 to 1280 B, so 16 slots per direction keep the same RAM
+ * budget: 2 * (4 B + 1280 B) * 16 ~= 41 KB.
+ *
+ * The host (OpenOCD cmsis-dap) keeps at most MAX_PENDING_REQUESTS=3 blocks in
+ * flight and the B1 pipeline parks at most that many OUT commands / responses,
+ * so 16 slots per direction give a comfortable margin.  Item size is
+ * DAP_HANDLE_SIZE (unchanged), so fast_reply()/ring sizing stay consistent. */
+#define DAP_BUFFER_NUM 16
 
 /* Bounded wait used when pushing a response into the OUT ring buffer, so that a
  * reset request (ring buffer ownership change) is always observed. */
