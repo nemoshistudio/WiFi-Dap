@@ -8,6 +8,10 @@ add_compile_options (-fdiagnostics-color=always)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.cmake")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+# Startup version log (docs/versioning.md §2.4) needs esp_app_desc.h from IDF.
+if(EXISTS "${IDF_PATH}/components/esp_app_format/include")
+    include_directories("${IDF_PATH}/components/esp_app_format/include")
+endif()
 set(EXTRA_COMPONENT_DIRS project_components)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

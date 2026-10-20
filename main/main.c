@@ -17,8 +17,8 @@
 #include "uart_tcp_bridge.h"
 #include "global_module.h"
 #include "wt_ota.h"
-#include "wt_protocol_version.h"
-#include "birdiebot_board.h"
+#include "project_components/wt_common/wt_protocol_version.h"
+#include "components/board/include/birdiebot_board.h"
 
 #include <sdkconfig.h>
 
