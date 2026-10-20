@@ -73,7 +73,7 @@ const handleAddItem = () => {
     id: newId,
     componentType: markRaw(UartAtCommand),
     props: {
-      label: 'New Command',
+      label: 'AT+CMD',
       command: 'AT+CMD',
       response: ''
     }
@@ -137,7 +137,8 @@ const runCommands = async () => {
   // Update responses in UI
   commandsToRun.forEach((command, index) => {
     if (index < responses.length) {
-      command.props.response = responses[index] || 'No response'
+      // 无响应时显示语言中立占位符（避免硬编码英文文案）
+      command.props.response = responses[index] || '-'
     }
   })
 }

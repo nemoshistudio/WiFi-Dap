@@ -39,6 +39,16 @@
 
     <el-divider></el-divider>
 
+    <el-alert
+        v-if="!store.otaSupported"
+        class="mt-2"
+        type="warning"
+        :title="translate('common.unsupported')"
+        :closable="false"
+        show-icon
+    />
+
+    <template v-if="store.otaSupported">
     <h2 class="text-lg font-bold">{{ translate('ota.upload.title') }}</h2>
     <p class="text-sm text-gray-600 mt-1">{{ translate('ota.upload.description') }}</p>
 
@@ -176,6 +186,7 @@
         :closable="false"
         show-icon
     />
+    </template>
 
     <el-divider></el-divider>
 
@@ -207,14 +218,13 @@ import {
 import {wt_sys_get_fm_info, wt_sys_get_sys_info, wt_sys_reboot} from "@/api/apiSystem";
 import {translate} from "@/locales";
 import {PROTOCOL_VERSION} from "@/api";
-import {hasAuthToken} from "@/composables/websocket/auth";
+import {hasToken, isHttpAuthFailure, markUnauthorized} from "@/composables/useAuthSession";
 import {globalNotify} from "@/composables/notification";
 
 const sysStore = useSystemStore();
 const store = useUpdateStore();
 const webInfo = window.__BIRDIEBOT_WEB__;
 
-const hasToken = ref(hasAuthToken());
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const speedText = ref('-');
 const etaText = ref('-');
@@ -267,6 +277,7 @@ const canStartUpload = computed(() => {
     return store.hasSelectedFile
         && !store.isBusy
         && !protocolMismatch.value
+        && store.otaSupported
         && store.info.slot_size > 0;
 });
 const showProgress = computed(() => {
@@ -477,6 +488,10 @@ function startRebootWatchdog() {
 function handleUploadFailure(failure: IOtaHttpError) {
     if (failure.err === 'aborted') {
         return;
+    }
+    if (isHttpAuthFailure(failure.httpStatus)) {
+        // 固件已开启鉴权：统一进入 auth session（提示输入 pairing token）
+        markUnauthorized();
     }
     const described = describeHttpError(failure);
     store.failUpload(described.message, described.detail);

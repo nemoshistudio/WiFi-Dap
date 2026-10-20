@@ -32,6 +32,8 @@ export const useSystemStore = defineStore('system', () => {
     const protocolState = ref<ProtocolState>('unknown');
     /** 固件上报的 protocol_version；null = 尚未确认/旧固件 */
     const fwProtocolVersion = ref<number | null>(null);
+    /** 本轮连接握手是否已结算（收到 FM_INFO / 超时 / 失败）；避免 unknown 提前误报 */
+    const handshakeSettled = ref(false);
 
     return {
         curFmInfo,
@@ -40,5 +42,6 @@ export const useSystemStore = defineStore('system', () => {
         rebootInProgress,
         protocolState,
         fwProtocolVersion,
+        handshakeSettled,
     }
 });

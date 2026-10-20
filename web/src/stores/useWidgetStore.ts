@@ -2,6 +2,7 @@ import { computed, markRaw, ref, toRaw, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { WidgetItem } from '@/types/grid'
 import { globalNotify } from '@/composables/notification'
+import {translate} from "@/locales"
 import { ElMessageBox } from 'element-plus'
 import UartAtCommand from '@/views/widgets/uartAtCommand.vue'
 import WidgetLoop from '@/views/widgets/widgetLoop.vue'
@@ -184,7 +185,7 @@ export const useWidgetStore = defineStore('widget', () => {
       w: 10,
       h: 5,
       i: nextId,
-      name: `New Loop Widget`,
+      name: translate('widget.loopWidget'),
       static: false,
       widget: markRaw(WidgetLoop),
       widgetProps: []
@@ -194,7 +195,7 @@ export const useWidgetStore = defineStore('widget', () => {
 
   const addUartViewWidget = () => {
     if (isUartViewAdded.value) {
-      globalNotify('UART View Widget can only be added once.', 'warning')
+      globalNotify(translate('widget.uartViewOnce'), 'warning')
       return
     }
 
@@ -210,7 +211,7 @@ export const useWidgetStore = defineStore('widget', () => {
       w: 10,
       h: 10,
       i: nextId,
-      name: 'UART Data Viewer',
+      name: translate('widget.dataViewer'),
       static: false,
       widget: markRaw(textDataViewer),
       widgetProps: []

@@ -51,8 +51,7 @@
             <p class="text-xs">{{ $t('uart.actual') }} {{ $t('uart.baudrate') }}:{{ store.uartBaudReal }}</p>
 
             <el-form-item :label="translate('uart.dataBits')" class="mb-2">
-              <el-select v-model="store.uartConfig.data_bits" :teleported="false"
-                         placeholder="Select" @change="onUartConfigChange">
+              <el-select v-model="store.uartConfig.data_bits" :teleported="false" @change="onUartConfigChange">
                 <el-option
                     v-for="item in uartDataBitsOptions"
                     :key="item.key"
@@ -63,8 +62,7 @@
             </el-form-item>
 
             <el-form-item :label="translate('uart.parity')" class="mb-2">
-              <el-select v-model="store.uartConfig.parity" :teleported="false"
-                         placeholder="Select" @change="onUartConfigChange">
+              <el-select v-model="store.uartConfig.parity" :teleported="false" @change="onUartConfigChange">
                 <el-option
                     v-for="item in uartParityOptions"
                     :key="item.key"
@@ -75,8 +73,7 @@
             </el-form-item>
 
             <el-form-item :label="translate('uart.stopBits')">
-              <el-select v-model="store.uartConfig.stop_bits" :teleported="false"
-                         placeholder="Select" @change="onUartConfigChange">
+              <el-select v-model="store.uartConfig.stop_bits" :teleported="false" @change="onUartConfigChange">
                 <el-option
                     v-for="item in uartStopBitsOptions"
                     :key="item.key"

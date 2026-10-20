@@ -321,7 +321,7 @@ function dragEnd() {
       w: dragging.value.w,
       h: dragging.value.h,
       i: widgetStore.getNextId(),
-      name: dragging.value.type === 'loop' ? 'New Loop Widget' : 'UART Data Viewer',
+      name: dragging.value.type === 'loop' ? translate('widget.loopWidget') : translate('widget.dataViewer'),
       static: false,
       widget: markRaw(dragging.value.type === 'loop' ? WidgetLoop : textDataViewer),
       widgetProps: []
