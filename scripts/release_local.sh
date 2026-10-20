@@ -171,6 +171,25 @@ else
     warn "--allow-dirty: building a LOCAL/DEV package (no tag/clean-tree/version-equality gate)"
 fi
 
+# --- protocol version gate (docs/versioning.md §3.1/§8.2) -----------------
+# C header == docs/protocol.md == web/src/api/index.ts. Release builds refuse a
+# one-sided protocol bump; --allow-dirty only warns (local/dev package).
+if [ -x "$SCRIPT_DIR/check-protocol-version.sh" ]; then
+    if ! _proto_out="$("$SCRIPT_DIR/check-protocol-version.sh" 2>&1)"; then
+        if [ "$ALLOW_DIRTY" -eq 1 ]; then
+            warn "protocol version gate failed (allowed with --allow-dirty):"
+            printf '%s\n' "$_proto_out" >&2
+        else
+            printf '%s\n' "$_proto_out" >&2
+            die "protocol version gate failed (C header / docs / Web UI); fix before release"
+        fi
+    else
+        log "protocol version gate: ok"
+    fi
+else
+    warn "scripts/check-protocol-version.sh missing; protocol gate skipped"
+fi
+
 # --- build ----------------------------------------------------------------
 if [ "$SKIP_BUILD" -eq 1 ]; then
     log "reusing $BUILD_REL (--skip-build)"
@@ -218,6 +237,18 @@ HTML_ABS="$ROOT/project_components/html"
 if [ "$SKIP_WEB" -eq 1 ]; then
     log "reusing embedded web assets in project_components/html (--skip-web)"
 else
+    # Prerequisite (audit F3): the Web UI must be built before the release
+    # pipeline can verify/package its gzip assets.
+    web_src_eff="${WEB_SRC:-$ROOT/web/dist-gz}"
+    web_dist_eff="${WEB_DIST:-$ROOT/web/dist}"
+    case "$web_src_eff" in /*) ;; *) web_src_eff="$ROOT/$web_src_eff" ;; esac
+    case "$web_dist_eff" in /*) ;; *) web_dist_eff="$ROOT/$web_dist_eff" ;; esac
+    if [ ! -d "$web_src_eff" ] && [ ! -d "$web_dist_eff" ]; then
+        die "Web UI build outputs missing: expected $web_src_eff or $web_dist_eff.
+       Prerequisite: build the Web UI first, e.g.  (cd web && bash build.sh)
+       then run:  scripts/gen_web_assets.sh --install   (explicit install)
+       Or package the committed assets with --skip-web."
+    fi
     # Never silently overwrite the committed html assets: only verify them and
     # tell the user to run gen_web_assets.sh --install explicitly if stale.
     gen_args=(--check)
@@ -232,6 +263,16 @@ fi
 for f in index.html.gz ws.sharedworker.js.gz; do
     [ -f "$HTML_ABS/$f" ] || die "missing embedded web asset: project_components/html/$f"
 done
+# Audit F4: docs/versioning.md §4.4 requires the committed web_version.txt for a
+# release package (source of gz hashes + protocol version). Release mode fails;
+# local/dev mode warns loudly and records the fallback in RELEASE-INFO.
+if [ ! -f "$HTML_ABS/web_version.txt" ]; then
+    if [ "$ALLOW_DIRTY" -eq 1 ]; then
+        warn "project_components/html/web_version.txt is missing: gz-hash verification is limited and RELEASE-INFO uses legacy version.txt metadata (allowed with --allow-dirty)"
+    else
+        die "project_components/html/web_version.txt is missing (docs/versioning.md §4.4); run scripts/gen_web_assets.sh --install on the release commit"
+    fi
+fi
 web_version="unknown"
 if [ -f "$HTML_ABS/web_version.txt" ]; then
     web_version="$(sed -n 's/^web_version=//p' "$HTML_ABS/web_version.txt" | head -n1)"
@@ -254,6 +295,17 @@ PY
     fi
 fi
 [ -n "$web_version" ] || web_version="unknown"
+
+# Web protocol version for RELEASE-INFO: canonical web_version.txt first, then
+# the legacy version.txt JSON blob imported from the WP-122 UI build.
+protocol_printed="$(sed -n 's/^protocol_version=//p' "$HTML_ABS/web_version.txt" 2>/dev/null | head -n1 || true)"
+if [ -z "$protocol_printed" ] && [ -f "$HTML_ABS/version.txt" ]; then
+    protocol_printed="$(grep -oE '"protocol_version"[[:space:]]*:[[:space:]]*[0-9]+' "$HTML_ABS/version.txt" 2>/dev/null | head -n1 | grep -oE '[0-9]+$' || true)"
+fi
+[ -n "$protocol_printed" ] || protocol_printed='?'
+web_metadata="web_version.txt"
+[ -f "$HTML_ABS/web_version.txt" ] || web_metadata="version.txt (legacy fallback; web_version.txt missing)"
+
 if [ "$ALLOW_DIRTY" -eq 0 ] && [ "v$web_version" != "$VERSION" ]; then
     die "web_version.txt web_version='$web_version' != firmware version '$VERSION' (docs/versioning.md §4.1)"
 fi
@@ -361,8 +413,10 @@ full_size="n/a"
     printf 'app_sha256=%s\n' "$app_sha"
     printf 'full_bin_size_bytes=%s\n' "$full_size"
     printf 'web_version=%s\n' "$web_version"
+    printf 'web_protocol_version=%s\n' "$protocol_printed"
+    printf 'web_metadata=%s\n' "$web_metadata"
     if [ -f "$HTML_ABS/web_version.txt" ]; then
-        grep -E '^(protocol_version|git_tag|index_gz_sha256|worker_gz_sha256)=' "$HTML_ABS/web_version.txt" | sed 's/^/web_/' || true
+        grep -E '^(git_tag|git_commit|index_gz_sha256|worker_gz_sha256)=' "$HTML_ABS/web_version.txt" | sed 's/^/web_/' || true
     fi
     printf 'note=local package only; never pushed (INTEGRATION-PLAN v4 §8.4)\n'
 } >"$PKG/RELEASE-INFO.txt"
