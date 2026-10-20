@@ -1,0 +1,21 @@
+menu "WiFi Dap WiFi manager"
+
+    config BIRDIEBOT_WIFI_CRED_MAX
+        int "Maximum number of remembered WiFi credentials"
+        range 1 8
+        default 8
+        help
+            Number of WiFi networks remembered by the firmware
+            (docs/wifi-credential-memory.md §1). The NVS schema and the JSON
+            contract are frozen for values 1..8; values above 8 are not
+            supported.
+
+    config BIRDIEBOT_AP_PASS
+        string "Default SoftAP password (8..63 bytes)"
+        default "12345678"
+        help
+            SoftAP password used when no custom password has been stored with
+            WIFI cmd 8 SET_AP_CRED (docs/wifi-credential-memory.md §6).
+            README/UI must tell users to change it on first use.
+
+endmenu

@@ -1,6 +1,7 @@
 #include "wifi_api.h"
 #include "wifi_manager.h"
 #include "wifi_configuration.h"
+#include "wifi_credential.h"
 #include "wifi_storage.h"
 #include <esp_wifi.h>
 
@@ -9,7 +10,8 @@ void wifi_api_sta_get_ap_info(wifi_api_ap_info_t *ap_info)
 	wifi_ap_record_t ap_record = {0};
 	int err;
 	esp_wifi_sta_get_ap_info(&ap_record);
-	strncpy(ap_info->ssid, (char *)ap_record.ssid, sizeof(ap_info->ssid));
+	strncpy(ap_info->ssid, (char *)ap_record.ssid, sizeof(ap_info->ssid) - 1);
+	ap_info->ssid[sizeof(ap_info->ssid) - 1] = '\0';
 	strncpy(ap_info->mac, (char *)ap_record.bssid, sizeof(ap_info->mac));
 	ap_info->rssi = ap_record.rssi;
 	ap_info->password[0] = '\0';
@@ -41,14 +43,21 @@ void wifi_api_sta_get_ap_info(wifi_api_ap_info_t *ap_info)
 
 void wifi_api_ap_get_info(wifi_api_ap_info_t *ap_info)
 {
-	wifi_credential_t credential;
-	int err = wifi_data_get_ap_credential(&credential);
+	char ssid[BIRDIEBOT_WIFI_SSID_MAX + 1] = {0};
+	char password[BIRDIEBOT_WIFI_PASS_MAX + 1] = {0};
+	int err;
+
+	/* Effective AP credential: user defined NVS value wins over the dynamic
+	 * "WiFi-Dap-XXXX" default (docs/wifi-credential-memory.md §6). */
+	err = wifi_cred_mem_get_ap_cred(ssid, password);
 	if (err) {
-		strncpy(ap_info->ssid, WIFI_DEFAULT_AP_SSID, strlen(WIFI_DEFAULT_AP_SSID)+1);
-		strncpy(ap_info->password, WIFI_DEFAULT_AP_PASS, strlen(WIFI_DEFAULT_AP_PASS)+1);
+		ap_info->ssid[0] = '\0';
+		ap_info->password[0] = '\0';
 	} else {
-		strncpy(ap_info->ssid, credential.ssid, sizeof(ap_info->ssid));
-		strncpy(ap_info->password, credential.password, sizeof(ap_info->password));
+		strncpy(ap_info->ssid, ssid, sizeof(ap_info->ssid) - 1);
+		ap_info->ssid[sizeof(ap_info->ssid) - 1] = '\0';
+		strncpy(ap_info->password, password, sizeof(ap_info->password) - 1);
+		ap_info->password[sizeof(ap_info->password) - 1] = '\0';
 	}
 	esp_wifi_get_mac(WIFI_IF_AP, (uint8_t *) &ap_info->mac);
 	IP4_ADDR_EXPAND(&ap_info->ip, WIFI_DEFAULT_AP_IP);
@@ -115,7 +124,16 @@ int wifi_api_get_scan_list(uint16_t *number, wifi_api_ap_scan_info_t *ap_info)
 
 int wifi_api_connect(const char *ssid, const char *password)
 {
-	return wifi_manager_connect(ssid, password);
+	return wifi_manager_connect(ssid, password, WIFI_API_CONNECT_SAVE_AUTO);
+}
+
+int wifi_api_connect_save(const char *ssid, const char *password, int save)
+{
+	if (save != WIFI_API_CONNECT_SAVE_AUTO && save != WIFI_API_CONNECT_SAVE_NO &&
+	    save != WIFI_API_CONNECT_SAVE_YES) {
+		return 1;
+	}
+	return wifi_manager_connect(ssid, password, save);
 }
 
 int wifi_api_disconnect(void)

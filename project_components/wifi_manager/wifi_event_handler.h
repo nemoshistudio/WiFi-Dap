@@ -15,6 +15,12 @@ typedef void (*wifi_event_scan_done_cb)(uint16_t ap_count, wifi_ap_record_t *aps
 int wifi_event_trigger_scan(uint8_t channel, wifi_event_scan_done_cb cb, uint16_t number, wifi_ap_record_t *aps);
 void wifi_event_set_disco_handler(void (*disconn_handler)(void));
 
+/** Monotonic counter of WIFI_EVENT_STA_DISCONNECTED events. */
+uint32_t wifi_event_get_disconnect_count(void);
+
+/** Last WIFI_EVENT_STA_DISCONNECTED reason (wifi_err_reason_t), -1 if none. */
+int wifi_event_get_last_disconnect_reason(void);
+
 /**
  * @brief
  * @param connect_status 0: SUCCESS, OTHER: ERROR

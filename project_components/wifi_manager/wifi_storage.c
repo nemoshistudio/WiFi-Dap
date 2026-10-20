@@ -7,11 +7,21 @@
 
 #define WIFI_NVS_NAMESPACE "wt_wifi"
 
+/*
+ * Legacy namespace read: last successfully connected STA credential.
+ * Only used to migrate an old (single network) installation into the new
+ * multi-credential namespace; the legacy keys are left untouched so a rollback
+ * to the previous firmware still finds them.
+ */
 int wifi_data_get_sta_last_conn_cred(wifi_credential_t *ap_credential)
 {
 	uint32_t ap_bitmap = 0;
 	nvs_handle_t handle;
 	int err;
+
+	if (ap_credential == NULL) {
+		return WT_NVS_ERR;
+	}
 
 	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
 	if (err) {
@@ -29,54 +39,6 @@ int wifi_data_get_sta_last_conn_cred(wifi_credential_t *ap_credential)
 
 	err = wt_nvs_get(handle, KEY_WIFI_STA_LAST_AP_CRED,
 	                 ap_credential, sizeof(wifi_credential_t));
-	if (err) {
-		goto end;
-	}
-
-end:
-	wt_nvs_close(handle);
-	return err;
-}
-
-/*
- * Called when connect to an AP,
- */
-int wifi_data_save_sta_ap_credential(wifi_credential_t *ap_credential)
-{
-	uint32_t ap_bitmap;
-	int err;
-	nvs_handle_t handle;
-
-	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
-	if (err) {
-		return err;
-	}
-
-	err = wt_nvs_get(handle, KEY_WIFI_STA_AP_BITMAP, &ap_bitmap, sizeof(ap_bitmap));
-	if (err) {
-		if (err != ESP_ERR_NVS_NOT_FOUND) {
-			goto end;
-		}
-		ap_bitmap = 0;
-	}
-	if (ap_bitmap == 0) {
-		ap_bitmap = 1;
-		err = wt_nvs_set(handle, KEY_WIFI_STA_AP_BITMAP, &ap_bitmap, sizeof(ap_bitmap));
-	}
-
-
-	wifi_credential_t credential;
-	err = wt_nvs_get(handle, KEY_WIFI_STA_LAST_AP_CRED, &credential, sizeof(ap_bitmap));
-	if (err) {
-		if (err != ESP_ERR_NVS_NOT_FOUND) {
-			goto end;
-		}
-	}
-
-	err = wt_nvs_set(handle, KEY_WIFI_STA_LAST_AP_CRED, ap_credential, sizeof(wifi_credential_t));
-	if (err) {
-		goto end;
-	}
 
 end:
 	wt_nvs_close(handle);
@@ -106,7 +68,11 @@ int wifi_data_get_wifi_mode(wifi_apsta_mode_e *mode)
 	nvs_handle_t handle;
 	int err;
 
-	uint8_t mode_u8;
+	uint8_t mode_u8 = 0;
+
+	if (mode == NULL) {
+		return WT_NVS_ERR;
+	}
 
 	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
 	if (err) {
@@ -115,23 +81,11 @@ int wifi_data_get_wifi_mode(wifi_apsta_mode_e *mode)
 
 	err = wt_nvs_get(handle, KEY_WIFI_APSTA_MODE, &mode_u8, sizeof(mode_u8));
 
-	*mode = mode_u8;
-	wt_nvs_close(handle);
-	return err;
-}
-
-int wifi_data_save_ap_credential(wifi_credential_t *ap_credential)
-{
-	nvs_handle_t handle;
-	int err;
-
-	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
-	if (err) {
-		return err;
+	/* Only publish the value after a successful read (docs §8.1: the old code
+	 * assigned an uninitialised value before checking err). */
+	if (err == 0) {
+		*mode = (wifi_apsta_mode_e)mode_u8;
 	}
-
-	err = wt_nvs_set(handle, KEY_WIFI_AP_CRED, ap_credential, sizeof(wifi_credential_t));
-
 	wt_nvs_close(handle);
 	return err;
 }
@@ -140,6 +94,10 @@ int wifi_data_get_ap_credential(wifi_credential_t *ap_credential)
 {
 	nvs_handle_t handle;
 	int err;
+
+	if (ap_credential == NULL) {
+		return WT_NVS_ERR;
+	}
 
 	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
 	if (err) {
@@ -156,6 +114,10 @@ int wifi_data_get_static(wifi_api_sta_ap_static_info_t *static_info)
 {
 	nvs_handle_t handle;
 	int err;
+
+	if (static_info == NULL) {
+		return WT_NVS_ERR;
+	}
 
 	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
 	if (err) {
@@ -189,6 +151,10 @@ int wifi_data_save_static(wifi_api_sta_ap_static_info_t *static_info)
 {
 	nvs_handle_t handle;
 	int err;
+
+	if (static_info == NULL) {
+		return WT_NVS_ERR;
+	}
 
 	err = wt_nvs_open(WIFI_NVS_NAMESPACE, &handle);
 	if (err) {
