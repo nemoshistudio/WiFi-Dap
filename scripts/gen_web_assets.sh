@@ -289,6 +289,11 @@ else
 fi
 
 # --- staging directory -----------------------------------------------------
+# Safety: never use the committed install dir as the staging dir without the
+# explicit --install switch (staging clears managed *.gz there).
+if [ "$OUT_ABS" = "$INSTALL_ABS" ] && [ "$INSTALL" -eq 0 ]; then
+    die "--out equals --install-dir ($OUT_ABS); pass --install to modify the committed html assets explicitly"
+fi
 if [ "$CHECK" -eq 1 ] && [ "$INSTALL" -eq 0 ]; then
     STAGE="$(mktemp -d "${TMPDIR:-/tmp}/gen-web-assets.XXXXXX")"
     CLEAN_STAGE=1
