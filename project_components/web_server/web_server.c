@@ -105,6 +105,11 @@ void start_webserver(void)
 	config.close_fn = web_server_on_close;
 	config.keep_alive_enable = 1;
 	config.keep_alive_count = 1;
+	/* docs/ota-local-upload.md §3.2: must be >= the 10 s OTA upload idle
+	 * timeout so a slow/silent upload is detected as a timeout (HTTP 408) and
+	 * not as a generic socket error. Also used as the per-request recv timeout
+	 * by esp_http_server. */
+	config.recv_wait_timeout = 10;
 
 	ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
 	if ((err = httpd_start(&http_server, &config)) != ESP_OK) {

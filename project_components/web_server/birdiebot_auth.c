@@ -284,24 +284,29 @@ void birdiebot_auth_init(void)
 #endif
 }
 
-bool birdiebot_auth_http_ok(httpd_req_t *req)
+int birdiebot_auth_http_check(httpd_req_t *req)
 {
 #if BIRDIEBOT_AUTH_ENABLED
 	if (req == NULL || !s_inited) {
-		return false;
+		return BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED;
 	}
 	if (!auth_headers_ok(req)) {
-		return false;
+		return BIRDIEBOT_AUTH_HTTP_FORBIDDEN;
 	}
 	if (!auth_request_token_ok(req)) {
 		ESP_LOGW(TAG, "HTTP request rejected: missing/invalid token");
-		return false;
+		return BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED;
 	}
-	return true;
+	return BIRDIEBOT_AUTH_HTTP_OK;
 #else
 	(void) req;
-	return true;
+	return BIRDIEBOT_AUTH_HTTP_OK;
 #endif
+}
+
+bool birdiebot_auth_http_ok(httpd_req_t *req)
+{
+	return birdiebot_auth_http_check(req) == BIRDIEBOT_AUTH_HTTP_OK;
 }
 
 bool birdiebot_auth_ws_origin_ok(httpd_req_t *req)

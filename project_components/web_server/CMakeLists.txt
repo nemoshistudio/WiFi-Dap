@@ -3,10 +3,12 @@ file(GLOB SOURCES
         web_uri_module.c
         birdiebot_auth.c
         auth_token_util.c
+        web_error_json.c
         uri_modules/uri_ws.c
         uri_modules/uri_api.c
         uri_modules/uri_html_base.c
         uri_modules/uri_bin_router.c
+        uri_modules/uri_ota.c
         )
 
 idf_component_register(
@@ -17,8 +19,8 @@ idf_component_register(
         # - WP-123 (web): ws_router, wt_common
         # - WP-204 (uart/dataflow): uart_service, dataflow (uri_bin_router.c)
         # - WP-209b (web auth): nvs_flash, esp_hw_support
-        # - WP-206 pending: wt_ota (uri_ota.c) — added when merged
-        PRIV_REQUIRES request_runner api_router json memory_pool utils html SSDP ws_router wt_common uart_service dataflow nvs_flash esp_hw_support
+        # - WP-206 (OTA upload): wt_ota (uri_ota.c)
+        PRIV_REQUIRES request_runner api_router json memory_pool utils html SSDP ws_router wt_common uart_service dataflow nvs_flash esp_hw_support wt_ota
 )
 
 idf_component_set_property(${COMPONENT_NAME} WHOLE_ARCHIVE ON)

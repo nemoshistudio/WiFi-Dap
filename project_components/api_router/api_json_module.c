@@ -54,8 +54,11 @@ int api_json_module_add(api_json_init_func func)
 
 int api_json_module_call(uint8_t id, uint16_t cmd, api_json_req_t *in, api_json_module_async_t *out)
 {
+	/* Unknown module (e.g. a newer front-end talking to an older firmware)
+	 * maps to code=4 Unsupported cmd so the UI can degrade gracefully
+	 * (docs/protocol.md §1.1, F10). */
 	if (unlikely(id >= API_MODULE_MAX || module_arr[id].on_req == NULL)) {
-		return API_JSON_BAD_REQUEST;
+		return API_JSON_UNSUPPORTED_CMD;
 	}
 
 	return module_arr[id].on_req(cmd, in, out);

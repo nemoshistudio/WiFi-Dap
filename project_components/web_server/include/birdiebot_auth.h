@@ -69,8 +69,15 @@ bool birdiebot_auth_enabled(void);
  */
 void birdiebot_auth_init(void);
 
+/** HTTP check result codes (docs/ota-local-upload.md §3.4: 401 vs 403). */
+typedef enum {
+	BIRDIEBOT_AUTH_HTTP_OK = 0,
+	BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED = 401, /* token missing/invalid */
+	BIRDIEBOT_AUTH_HTTP_FORBIDDEN = 403,    /* Host/Origin rejected */
+} birdiebot_auth_http_result_t;
+
 /**
- * @brief Full HTTP request check used by /api handlers (incl. future OTA).
+ * @brief Full HTTP request check used by /api handlers (incl. OTA upload).
  *
  * Verifies Host/Origin headers and the token (Authorization: Bearer or
  * ?token=).
@@ -78,6 +85,15 @@ void birdiebot_auth_init(void);
  * @return true when auth is disabled, or the request passed all checks.
  */
 bool birdiebot_auth_http_ok(httpd_req_t *req);
+
+/**
+ * @brief Same check as birdiebot_auth_http_ok(), but reports the 401/403 split.
+ *
+ * @return BIRDIEBOT_AUTH_HTTP_OK (0), BIRDIEBOT_AUTH_HTTP_UNAUTHORIZED (401)
+ *         or BIRDIEBOT_AUTH_HTTP_FORBIDDEN (403). Returns OK when auth is
+ *         disabled.
+ */
+int birdiebot_auth_http_check(httpd_req_t *req);
 
 /**
  * @brief WS handshake Host/Origin check.
