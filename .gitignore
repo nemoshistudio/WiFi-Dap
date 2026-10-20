@@ -12,3 +12,6 @@ managed_components/
 /version.txt
 web/node_modules/
 web/dist/
+
+# local analysis notes (not part of the release)
+analysis/
