@@ -11,10 +11,10 @@ Covers the parts that can be tested without a device:
   * the OTA state machine states/transitions documented in the contract;
   * the app-image sanity helper (``parse_app_image``) and frozen size constants.
 
-One known contract inconsistency is reported via ``@expectedFailure``:
-docs/protocol.md defines ``code 7 = Unauthorized`` while
-docs/ota-local-upload.md still maps HTTP 401 to ``code 5`` (see
-docs/host-test-report.md "findings").
+Contract-consistency regression guard: docs/protocol.md defines
+``code 7 = Unauthorized`` and docs/ota-local-upload.md maps HTTP 401 to it
+(Lead fix 15e8b10); both documents are asserted below so the mapping cannot
+drift again (this was finding F1 in docs/host-test-report.md).
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ STATES = ("IDLE", "RECEIVING", "VERIFYING", "READY", "APPLYING", "ERROR")
 # Frozen copy of docs/ota-local-upload.md §3.4 (kept independent of the parser).
 EXPECTED_HTTP_MAP = {
     400: 5,
-    401: 5,
+    401: 7,
     403: 5,
     409: 6,
     411: 5,
@@ -213,13 +213,34 @@ class TestHttpErrorMapping(unittest.TestCase):
             with self.subTest(http=status):
                 self.assertIn(code, codes, f"HTTP {status} maps to unknown code {code}")
 
-    @unittest.expectedFailure
-    def test_http_401_matches_protocol_unauthorized_code(self) -> None:
-        # Known inconsistency: docs/protocol.md §1.1 adds code 7=Unauthorized,
-        # but docs/ota-local-upload.md §3.4 still maps HTTP 401 -> code 5 (and
-        # its "JSON code 只使用 2–6" note is stale). Marked expected failure so
-        # the suite stays green while the finding is reported to the Lead.
+    def test_http_401_maps_to_protocol_unauthorized_code(self) -> None:
+        # Finding F1 was fixed by Lead commit 15e8b10: the OTA contract now
+        # maps HTTP 401 to protocol code 7 instead of the obsolete code 5.
+        codes = parse_protocol_error_codes(PROTOCOL_DOC)
+        self.assertEqual(codes[7], "Unauthorized")
         self.assertEqual(EXPECTED_HTTP_MAP[401], 7)
+        self.assertEqual(parse_http_error_table(OTA_DOC)[401], 7)
+
+    def test_contract_docs_agree_on_unauthorized_code(self) -> None:
+        """Top-level guard: protocol.md must define code 7 and the OTA upload
+        contract must map HTTP 401 to it, including the 2–7 code-domain note.
+
+        Prevents recurrence of finding F1 (401 was mapped to 5 while protocol
+        already had 7=Unauthorized)."""
+        proto_codes = parse_protocol_error_codes(PROTOCOL_DOC)
+        self.assertIn(7, proto_codes,
+                      "docs/protocol.md §1.1 must define code 7 (Unauthorized)")
+        self.assertEqual(proto_codes[7], "Unauthorized")
+
+        ota_map = parse_http_error_table(OTA_DOC)
+        self.assertEqual(ota_map.get(401), 7,
+                         "docs/ota-local-upload.md §3.4 must map HTTP 401 to code 7")
+
+        section = OTA_DOC.split("### 3.4", 1)[-1].split("## 4.", 1)[0]
+        self.assertIn("2–7", section,
+                      "OTA contract code-domain note must advertise codes 2–7")
+        self.assertNotIn("2–6", section,
+                         "OTA contract must not regress to the 2–6 code-domain note")
 
 
 # ---------------------------------------------------------------------------
