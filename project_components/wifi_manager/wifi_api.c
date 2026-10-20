@@ -113,22 +113,6 @@ int wifi_api_get_scan_list(uint16_t *number, wifi_api_ap_scan_info_t *ap_info)
 	return 0;
 }
 
-static wifi_api_scan_done_cb scan_done_cb;
-
-static void wifi_manager_scan_done(uint16_t ap_found, wifi_ap_record_t *records, void *arg)
-{
-	wifi_api_ap_scan_info_t *ap_info;
-
-	ap_info = malloc(ap_found * sizeof(wifi_api_ap_scan_info_t));
-	for (int i = 0; i < ap_found; ++i) {
-		strncpy(ap_info[i].ssid, (char *) records[i].ssid, sizeof(ap_info[i].ssid));
-		strncpy(ap_info[i].mac, (char *) records[i].bssid, sizeof(ap_info[i].mac));
-		ap_info[i].rssi = records[i].rssi;
-	}
-	printf("wifi api scan done\n");
-	scan_done_cb(ap_found, ap_info, arg);
-}
-
 int wifi_api_connect(const char *ssid, const char *password)
 {
 	return wifi_manager_connect(ssid, password);

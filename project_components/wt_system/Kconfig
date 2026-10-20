@@ -1,0 +1,13 @@
+menu "WiFi Dap system module (SYSTEM JSON module)"
+
+    config BIRDIEBOT_ENABLE_CRASH_CMD
+        bool "Enable the debug-only SYSTEM/DO_CRASH command (cmd 200)"
+        default n
+        help
+            When enabled, the SYSTEM module accepts {"module":0,"cmd":200} and
+            deliberately crashes the firmware (null-pointer dereference). It is
+            a bring-up/debug helper only and is disabled by default in release
+            builds (docs/protocol.md §2.1: DO_CRASH is only registered in debug
+            builds).
+
+endmenu

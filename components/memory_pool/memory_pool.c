@@ -35,11 +35,21 @@ int memory_pool_init()
 	return 0;
 }
 
+int memory_pool_is_initialized(void)
+{
+	return buf_queue != NULL;
+}
+
 void *memory_pool_get(uint32_t tick_wait)
 {
 	void *ptr = NULL;
-	xQueueReceive(buf_queue, &ptr, tick_wait);
-	assert(ptr);
+
+	if (unlikely(buf_queue == NULL)) {
+		return NULL;
+	}
+	if (xQueueReceive(buf_queue, &ptr, tick_wait) != pdTRUE) {
+		return NULL;
+	}
 	return ptr;
 }
 
@@ -48,6 +58,9 @@ void memory_pool_put(void *ptr)
 #ifdef WT_DEBUG_MODE
 	printf("put buf %d\n", uxQueueMessagesWaiting(buf_queue));
 #endif
+	if (unlikely(buf_queue == NULL || ptr == NULL)) {
+		return;
+	}
 	if (unlikely(xQueueSend(buf_queue, &ptr, 0) != pdTRUE)) {
 		assert(0);
 	}

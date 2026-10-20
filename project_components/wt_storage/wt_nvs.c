@@ -1,6 +1,7 @@
 #include "wt_nvs.h"
 
 #include <nvs_flash.h>
+#include <esp_log.h>
 
 #define WT_PARTITION_NAME "wt_nvs"
 
@@ -18,9 +19,10 @@ void wt_nvs_init()
 
 	err = nvs_flash_init_partition(WT_PARTITION_NAME);
 	if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-		// NVS partition was truncated and needs to be erased
-		// Retry nvs_flash_init
-		ESP_ERROR_CHECK(nvs_flash_erase());
+		/* Erase the *wt_nvs* partition (not the default NVS partition: the
+		 * app keeps WiFi/PHY data in the default one) and retry. */
+		ESP_LOGW("wt_nvs", "erasing %s partition: %s", WT_PARTITION_NAME, esp_err_to_name(err));
+		ESP_ERROR_CHECK(nvs_flash_erase_partition(WT_PARTITION_NAME));
 		err = nvs_flash_init_partition(WT_PARTITION_NAME);
 	}
 	ESP_ERROR_CHECK(err);
@@ -89,6 +91,8 @@ int wt_nvs_get_once(const char* namespace, const uint32_t key, void *data, uint3
 
 	err = wt_nvs_get(handle, key, data, data_size);
 	if (err) {
+		/* Always release the NVS handle, also on the error path. */
+		nvs_close(handle);
 		return err;
 	}
 
@@ -107,6 +111,8 @@ int wt_nvs_set_once(const char* namespace, const uint32_t key, void *data, uint3
 
 	err = wt_nvs_set(handle, key, data, data_size);
 	if (err) {
+		/* Do not leave the NVS handle open when the write fails. */
+		nvs_close(handle);
 		return err;
 	}
 
