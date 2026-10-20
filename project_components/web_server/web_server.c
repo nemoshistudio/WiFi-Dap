@@ -1,6 +1,5 @@
 #include "web_server.h"
 #include "web_uri_module.h"
-#include "birdiebot_auth.h"
 #include "ssdp.h"
 
 #include <esp_http_server.h>
@@ -21,14 +20,14 @@ static httpd_handle_t http_server = NULL;
  *   - 1. "/"        : SPA entry, matches every GET path not matched earlier
  *   - 2. "/entry"   : exact match
  *   - 3. "/dir/"    : prefix match
- * plus the WS endpoint, which must match "/ws" and "/ws?<query>" (the auth
- * token may be passed as /ws?token=<pair_code>; never match /ws.<asset>).
+ * plus the WS endpoint, which must match "/ws" and "/ws?<query>" (a query
+ * string is tolerated; never match /ws.<asset>).
  */
 static bool uri_match(const char *reference_uri, const char *uri_to_match, size_t match_upto)
 {
 	size_t ref_length = strlen(reference_uri);
 
-	/* WS endpoint: "/ws" or "/ws?token=..." (query string is allowed). */
+	/* WS endpoint: "/ws" or "/ws?<query>" (query string is allowed). */
 	if (ref_length == sizeof(WEB_WS_URI) - 1 &&
 	    memcmp(reference_uri, WEB_WS_URI, ref_length) == 0) {
 		if (match_upto < ref_length || memcmp(uri_to_match, WEB_WS_URI, ref_length) != 0) {
@@ -47,8 +46,8 @@ static bool uri_match(const char *reference_uri, const char *uri_to_match, size_
 		return memcmp(reference_uri, uri_to_match, ref_length) == 0;
 	}
 
-	/* exact ref with a query string: "/api?token=..." must reach the "/api"
-	 * handler (docs/protocol.md §1 allows ?token= for HTTP too). */
+	/* exact ref with a query string: "/api?..." must still reach the "/api"
+	 * handler (e.g. cache busters / diagnostics). */
 	if (ref_length < match_upto &&
 	    uri_to_match[ref_length] == '?' &&
 	    memcmp(reference_uri, uri_to_match, ref_length) == 0) {
@@ -82,8 +81,8 @@ static void web_server_on_close(httpd_handle_t hd, int sockfd)
 	opened_socket--;
 	ESP_LOGI(TAG, "%d closed, now: %d", sockfd, opened_socket);
 	/* Abnormal disconnect (TCP RST/timeout): no WS CLOSE frame was processed,
-	 * so drop the client from the WS broadcast list and the auth state table
-	 * (security review P2: stale fd cleanup). */
+	 * so drop the client from the WS broadcast list (security review P2:
+	 * stale fd cleanup). */
 	web_ws_socket_closed(sockfd);
 	close(sockfd);
 }
@@ -92,14 +91,6 @@ void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 	int err;
-
-#if BIRDIEBOT_AUTH_ENABLED
-	/* Initialize the pairing token before the first request can reach a
-	 * handler (loaded from / persisted to wt_nvs, printed on the serial
-	 * console). Compiled out entirely when CONFIG_BIRDIEBOT_WEB_AUTH=n. */
-	birdiebot_auth_init();
-	ESP_LOGW(TAG, "Web auth ENABLED: /ws and /api require the pairing token");
-#endif
 
 	config.enable_so_linger = true;
 	config.linger_timeout = 0;

@@ -14,7 +14,7 @@
  *
  *   httpd task (URI handler)                    OTA task
  *   ------------------------                    --------
- *   auth / Content-Type / Content-Length /          wt_ota_upload_begin()
+ *   Host/Origin / Content-Type / Content-Length /   wt_ota_upload_begin()
  *   size checks (no flash erase on errors)          (erase target slot)
  *   httpd_req_async_handler_begin()  ------>   then, per chunk received from
  *   recv body chunk by chunk (static                the httpd task:
@@ -36,7 +36,7 @@
  * upload progress bar is driven by XHR upload events and is not affected.
  */
 #include "web_uri_module.h"
-#include "birdiebot_auth.h"
+#include "web_host_guard.h"
 
 #include "wt_ota.h"
 
@@ -75,7 +75,6 @@
 #define OTA_ERR_UNSUPPORTED_TYPE   "unsupported content type"
 #define OTA_ERR_BUSY               "ota session busy"
 #define OTA_ERR_UNAVAILABLE        "ota service unavailable"
-#define OTA_ERR_UNAUTHORIZED       "unauthorized"
 #define OTA_ERR_FORBIDDEN          "forbidden origin"
 #define OTA_ERR_TIMEOUT            "upload timeout"
 #define OTA_ERR_DISCONNECTED       "client disconnected"
@@ -83,7 +82,6 @@
 /* JSON code (docs/protocol.md §1.1). */
 #define OTA_JSON_CODE_PROPERTY 5
 #define OTA_JSON_CODE_BUSY     6
-#define OTA_JSON_CODE_AUTH     7
 #define OTA_JSON_CODE_INTERNAL 3
 
 #define OTA_JSON_MODULE 5
@@ -156,7 +154,6 @@ static const char *ota_http_status_str(int status)
 {
 	switch (status) {
 	case 400: return "400 Bad Request";
-	case 401: return "401 Unauthorized";
 	case 403: return "403 Forbidden";
 	case 408: return "408 Request Timeout";
 	case 409: return "409 Conflict";
@@ -287,15 +284,11 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 	char transfer_encoding[32];
 	wt_ota_info_t info;
 
-	/* docs/ota-local-upload.md §8 + security review P1-2: Host/Origin is
-	 * always checked and, with auth enabled, the token too - BEFORE any flash
-	 * erase is triggered (also with auth=n a bad Origin cannot start an upload;
-	 * the request itself is only rejected, no flash touch). */
-	int auth_status = birdiebot_auth_http_check(req);
-	if (auth_status != BIRDIEBOT_AUTH_HTTP_OK) {
-		ota_respond_error(req, auth_status, OTA_JSON_CODE_AUTH,
-		                  auth_status == BIRDIEBOT_AUTH_HTTP_FORBIDDEN
-		                      ? OTA_ERR_FORBIDDEN : OTA_ERR_UNAUTHORIZED);
+	/* Browser Host/Origin guard (CSWSH / DNS rebinding; always active, this is
+	 * not a login check) - checked BEFORE any flash erase is triggered, so a
+	 * cross-origin / DNS-rebinding request can never start an upload. */
+	if (!web_host_guard_http_ok(req)) {
+		ota_respond_error(req, 403, OTA_JSON_CODE_PROPERTY, OTA_ERR_FORBIDDEN);
 		return ESP_OK;
 	}
 
