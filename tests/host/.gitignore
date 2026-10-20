@@ -1,0 +1,4 @@
+# Host-test build artifacts and Python caches (never committed).
+build/
+__pycache__/
+*.pyc
