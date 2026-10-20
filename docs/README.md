@@ -12,7 +12,8 @@
 | 读者/目的 | 文档 | 说明 |
 |---|---|---|
 | 新用户 / 烧录与使用 | [README_CN.md](../README_CN.md) / [README.md](../README.md) | 项目定位、功能矩阵、引脚、构建烧录、Web UI、调试接入、安全默认、故障排查 |
-| 部署加固 / 安全自查 | [security.md](security.md) | 面向部署者的精简安全指南：默认实验室模式、开鉴权/改口令/关传输、端口与发现面清单、OTA 限制 |
+| 部署加固 / 安全自查 | [security.md](security.md) | 面向部署者的精简安全指南：默认实验室模式、开鉴权/改口令/关传输、端口与发现面清单、OTA 限制、Accepted risks 与 N1–N9 修复状态 |
+| 许可证 / 合规署名 | [NOTICE](../NOTICE) / [LICENSES/](../LICENSES/) | 混合许可总览（本项目原创 Apache-2.0 + 第三方 MIT/Apache-2.0 组件）与许可证全文 |
 | 工具链 / 构建发布 | [scripts/README.md](../scripts/README.md) | Docker ESP-IDF 5.2.1 构建、分区/板级校验、Web 资产、发布包、OTA/E2E 测试脚本 |
 | Web UI 前端开发 | [web/README.md](../web/README.md) / [web/README.cn.md](../web/README.cn.md) | Web UI 功能、开发与构建方式（Vue 3 + Vite） |
 | OTA 固件实现 | [components/wt_ota/README.md](../components/wt_ota/README.md) | OTA 核心状态机、C API、模块 5 注册、回滚与线程安全 |
@@ -66,8 +67,9 @@ host 测试报告引用的 `tests/host/**`、`scripts/test_host.sh`、`scripts/d
 
 ## 4. 安全审查
 
-- **安全审查报告**：[security-review-web.md](security-review-web.md)（Web/OTA/WiFi 面，Wave3；P0 现状 0 / 条件性 P0 1 / P1 4 / P2 10）；`security-review-dap.md`（DAP 面，待交付）。
+- **安全审查报告**：[security-review-web.md](security-review-web.md)（Web/OTA/WiFi 面，Wave3；P0 现状 0 / 条件性 P0 1 / P1 4 / P2 10）；[security-review-dap.md](security-review-dap.md)（DAP 传输面，N1–N9；P0×2 / P1×3 / P2×4）。
 - **面向部署者的加固指南**：[security.md](security.md)（默认实验室模式、开鉴权/改 AP 口令/关 3240+1346、OTA 限制、端口与发现面清单）。
+- **风险处置**：用户已决定的安全范围（P1-1/P1-3/P1-4/条件性 P0 按工作室内网接受；N1–N9 修复状态；P3 忽略）见 [security.md](security.md#accepted-risks-studio-lan)。
 - 已入库文档中的安全相关内容可直接引用：
   - [protocol.md §5](protocol.md)（默认无鉴权、鉴权开启后的 token/Origin 要求、3240/1346 开关提示）；
   - [ota-local-upload.md §8](ota-local-upload.md)（OTA 上传端点鉴权要求）；
@@ -117,9 +119,11 @@ W0–W3 的设计与决策材料放在工作区的 `analysis/` 目录，**不进
 
 | 文档 | 负责人/来源 | 状态 |
 |---|---|---|
-| 根 `README.md` / `README_CN.md`（WiFi Dap 完整文档） | 文档（Wave 3） | ✅ 已重写（含 Known security limitations） |
+| 根 `README.md` / `README_CN.md`（WiFi Dap 完整文档） | 文档（Wave 3） | ✅ 已重写（Known security limitations + Accepted risks + 许可证口径修正） |
 | `docs/README.md`（本索引） | 文档（Wave 3） | ✅ 本次更新 |
-| [security.md](security.md)（部署加固指南） | 文档（Wave 3） | ✅ 本次新增 |
+| [security.md](security.md)（部署加固指南） | 文档（Wave 3） | ✅ 本次更新（Accepted risks + N1–N9 状态 + 128-bit token 口径） |
+| [NOTICE](../NOTICE) | 文档/合规（Wave 3） | ✅ 本次新增（版权与第三方来源汇总） |
+| [LICENSES/](../LICENSES/)（`Apache-2.0.txt` / `MIT.txt`） | 文档/合规（Wave 3） | ✅ 本次新增（许可证全文） |
 | 8 份冻结契约（[§2](#2-冻结契约lead-维护)） | Lead | ✅ 冻结 v1（2026-10-20） |
 | [hardware-test-ota.md](hardware-test-ota.md) | OTA/硬件验证（Wave 3） | ✅ 已入库 |
 | [hardware-test-uart-dataflow.md](hardware-test-uart-dataflow.md) | UART/DataFlow（Wave 2/3） | ✅ 已入库 |
@@ -128,7 +132,7 @@ W0–W3 的设计与决策材料放在工作区的 `analysis/` 目录，**不进
 | [host-test-report.md](host-test-report.md) | QA（WP-302） | ✅ 已入库 |
 | [dap-boundary-host-tests.md](dap-boundary-host-tests.md) | Wave 3（只读走查） | ✅ 已入库 |
 | [security-review-web.md](security-review-web.md) | webhost-analyst（WP-304） | ✅ 已入库 |
-| security-review-dap.md | dap-core-analyst | ⏳ 待产出 |
+| [security-review-dap.md](security-review-dap.md) | dap-core-analyst（sec review A） | ✅ 已入库 |
 | [scripts/README.md](../scripts/README.md) | 构建/发布 | ✅ 已入库 |
 | [web/README.md](../web/README.md) / [web/README.cn.md](../web/README.cn.md) | Web UI | ✅ 已入库（上游来源说明） |
 | [components/wt_ota/README.md](../components/wt_ota/README.md) | OTA 固件 | ✅ 已入库 |

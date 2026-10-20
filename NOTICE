@@ -1,0 +1,65 @@
+WiFi Dap
+==================
+
+Copyright and third-party attribution notice.
+
+This file summarises the licensing of the WiFi Dap firmware, Web UI,
+tooling and documentation. The authoritative license texts are kept in the
+LICENSES/ directory; per-directory LICENSE / LICENCE.txt files from upstream
+projects are preserved where provided.
+
+Project
+-------
+
+WiFi Dap — a wireless CMSIS-DAP debug probe for ESP32-S3 with an
+embedded Web management panel (ESP-IDF 5.2.1).
+
+Copyright (c) 2024 kerms (platform components, Web UI upstream)
+Copyright (c) 2020 windowsair (CMSIS-DAP / USBIP / elaphureLink components)
+Copyright (c) 2025-2026 nemoshistudio and WiFi Dap contributors
+(merge, Web UI extensions, integration, tests and documentation)
+
+License
+-------
+
+The project's original code and documentation are licensed under the
+Apache License, Version 2.0 — see the root LICENSE and
+LICENSES/Apache-2.0.txt.
+
+Exception: files whose header carries a different SPDX license identifier keep
+that license. In particular, a number of project-original scripts under
+scripts/ are marked `SPDX-License-Identifier: MIT` in their file headers, and
+platform sources imported from kerms/wireless-esp32-tools carry
+`SPDX-License-Identifier: Apache-2.0`.
+
+Third-party sources
+-------------------
+
+1. windowsair/wireless-esp8266-dap — MIT
+   Upstream of components/DAP, components/USBIP, components/elaphureLink and
+   components/dap_proxy. Per-directory LICENSE files are kept (MIT,
+   Copyright (c) 2020 windowsair). License text: LICENSES/MIT.txt.
+
+2. kerms/wireless-esp32-tools — Apache-2.0
+   ESP-IDF 5.2.1 platform layer (wifi_manager, web_server, api_router, wt_nvs,
+   memory_pool, SSDP, uart_service, dataflow, ws_router, ...). Source files
+   carry `SPDX-License-Identifier: Apache-2.0` headers.
+
+3. kerms/wireless-esp32-tools-web-host — MIT
+   Upstream of the Web UI frontend in web/ (see web/LICENCE.txt, MIT,
+   Copyright (c) 2024 kerms). License text: LICENSES/MIT.txt.
+
+4. ARM CMSIS-DAP (ARM Limited) — Apache-2.0
+   CMSIS-DAP v2.1.0 firmware sources under components/DAP/cmsis-dap/**
+   (headers carry `SPDX-License-Identifier: Apache-2.0`; copyright of
+   ARM Limited, see individual file headers for year ranges). License text:
+   LICENSES/Apache-2.0.txt.
+
+License texts
+-------------
+
+- Apache License, Version 2.0: LICENSES/Apache-2.0.txt (identical to root LICENSE)
+- MIT License: LICENSES/MIT.txt
+
+All product names, logos and trademarks are property of their respective
+owners.
