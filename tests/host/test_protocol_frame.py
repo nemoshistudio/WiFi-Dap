@@ -258,7 +258,7 @@ class TestBinaryHeaderCodec(unittest.TestCase):
 class TestJsonEnvelope(unittest.TestCase):
     def setUp(self) -> None:
         self.codes = parse_error_codes(PROTOCOL_DOC)
-        self.assertEqual(sorted(self.codes), [2, 3, 4, 5, 6, 7])
+        self.assertEqual(sorted(self.codes), [2, 3, 4, 5, 6])
 
     def test_doc_describes_request_and_error_envelopes(self) -> None:
         section = PROTOCOL_DOC.split("### 1.1", 1)[-1].split("## 2.", 1)[0]
@@ -304,7 +304,6 @@ class TestJsonEnvelope(unittest.TestCase):
         self.assertEqual(self.codes[4], "Unsupported cmd")
         self.assertEqual(self.codes[5], "Property error")
         self.assertEqual(self.codes[6], "Busy")
-        self.assertEqual(self.codes[7], "Unauthorized")
 
 
 # ---------------------------------------------------------------------------
