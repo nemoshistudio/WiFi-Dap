@@ -15,6 +15,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `release_local.sh` | 本地发布包（app/bootloader/ptable/合并 bin + gz + SHA256SUMS），**不推送** | WP-143 |
 | `check-version-string.sh` | 版本字符串校验（release 拒绝 `-dirty`/开发后缀） | WP-143 |
 | `check-release-versions.sh` | 固件 tag / Web version / protocol / 镜像内嵌版本交叉校验 | WP-143 |
+| `ota_upload.py` | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库） | WP-205/305 |
 | `README.md` | 本文档 | — |
 
 ## 前置条件
@@ -178,6 +179,40 @@ scripts/gen_web_assets.sh --src web/dist-gz --out build/web-assets --install
 - `web_version.txt` 按 `docs/versioning.md` §4.4 写 `web_version / protocol_version /
   git_tag / git_commit / build_time / index_gz_sha256 / worker_gz_sha256 (+ extras)`；
 - `--check` 忽略可变的 `build_time`，其余字段与 gz sha256 必须完全一致；未管理 gz 只告警不删除。
+
+## OTA 真机上传/查询：ota_upload.py
+
+Wave3 硬件验证工具（纯 Python 标准库，无需 pip）。文档见
+[`docs/hardware-test-ota.md`](../docs/hardware-test-ota.md)。
+
+```bash
+# 上传 app 镜像（默认自动计算 SHA-256 并作为 X-SHA256 发送）
+python3 scripts/ota_upload.py --host 192.168.1.1 --file build/esp32s3/birdiebot_wifi_dap.bin
+
+# 上传后轮询 WS，等设备重启并打印新 running slot/version
+python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --info
+
+# 只查 OTA/GET_INFO（running/running_ver/free/slot_size/status/rollback/sha256）
+python3 scripts/ota_upload.py --host 192.168.1.1 --info
+
+# 鉴权开启（BIRDIEBOT_WEB_AUTH=y）/ 错误注入（错误 X-SHA256 期望 HTTP 422）
+python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --token 12345678
+python3 scripts/ota_upload.py --host 192.168.1.1 --file fw.bin --sha256 00…00
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--host` | 设备地址：`IP` / `host:port` / `http://host[:port]`（WS 用同 host/port） |
+| `--file` | 要上传的 app `.bin`（`build/esp32s3/birdiebot_wifi_dap.bin`，非 merge/zip） |
+| `--sha256` | 可选 `X-SHA256`（64 hex）；默认=文件 hash，传错误值即 422 错误注入 |
+| `--no-sha256` | 不发 `X-SHA256`（设备仍用 `esp_ota_end()` 校验） |
+| `--token` | 鉴权 pair code：HTTP `Authorization: Bearer` / WS `?token=` |
+| `--timeout` | socket/上传超时秒数（默认 300，契约会话上限） |
+| `--info` | 只查 `GET_INFO`；与 `--file` 同用时上传后轮询重连验证新版本 |
+| `--info-wait` | 上传后等待 GET_INFO 的秒数（默认 20，0=不等待） |
+
+退出码：`0` 成功；`2` 参数/本地输入错误；`3` 网络/HTTP/WS 失败或设备返回非 200。
+脚本只与设备通信，不构建、不烧录、不主动重启（设备成功上传后 ~1s 自行重启）。
 
 ## 本地发布包：release_local.sh
 
