@@ -32,6 +32,8 @@ static uint32_t s_resp_len;
 
 uint8_t tf_dap_last_status;
 uint8_t tf_dap_last_count;
+uint8_t tf_dap_last_resp[TF_DAP_LAST_RESP_MAX];
+uint8_t tf_dap_last_resp_len;
 
 /** Run the staged request through DAP_ExecuteCommand and validate the echo. */
 static esp_err_t tf_dap_exec(uint32_t req_len)
@@ -43,9 +45,7 @@ static esp_err_t tf_dap_exec(uint32_t req_len)
     }
 
     memset(s_resp, 0, sizeof(s_resp));
-    TF_STAGE(70U);
     ret = DAP_ExecuteCommand(s_req, s_resp);
-    TF_STAGE(71U);
     s_resp_len = ret & 0xFFFFU;
 
     if (s_resp_len < 2U || s_resp_len > TF_DAP_PACKET_SIZE) {

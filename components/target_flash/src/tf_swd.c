@@ -353,7 +353,14 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     if (tf_dap_connect_swd(NULL) != ESP_OK) {
         return ESP_FAIL;
     }
-    tf_delay_ms(1U);
+    /* Pulse nRESET before the SWD switch sequence.  The target can be left in
+     * a held-reset/low-power state by a previous probe session (DP reads still
+     * answer but DP/AP writes return FAULT); a real reset pulse brings the
+     * SWJ-DP back to a clean, writable state (verified on the STM32F407). */
+    (void)tf_dap_swj_pins(0x00U, 0x80U, 0U);
+    tf_delay_ms(20U);
+    (void)tf_dap_swj_pins(0x80U, 0x80U, 0U);
+    tf_delay_ms(20U);
     TF_STAGE(2U);
     /* Line reset, JTAG-to-SWD switch sequence, line reset, idle cycles. */
     if (tf_dap_swj_sequence(51U, line_reset) != ESP_OK ||
@@ -389,22 +396,30 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         return ESP_FAIL;
     }
     TF_STAGE(61U);
+    tf_delay_ms(2U); /* let the DP settle after the first read before writes */
     if (idcode == 0U || idcode == 0xFFFFFFFFU) {
         ESP_LOGE(TF_TAG, "SWD: invalid DPIDR 0x%08X", (unsigned)idcode);
         return ESP_FAIL;
     }
 
-    /* Power up the debug/system domains first: on SW-DP the very first write a
-     * probe normally issues is DP CTRL/STAT (with the sticky-error clear bits
-     * set), not DP ABORT (OpenOCD dap_dp_init does the same).  The ABORT clear
-     * is only a best-effort follow-up: some SW-DP implementations reject it
-     * before power-up and it is not required for SWD operation. */
+    /* Clear stale sticky errors over the ABORT register before the first
+     * CTRL/STAT write.  On the STM32F407 bring-up the DP occasionally answers
+     * FAULT to a CTRL/STAT write while a sticky error/overrun is pending, and
+     * an ABORT write (0x1E) first makes the following power-up write succeed.
+     * Wire-verified sequence: DPIDR read -> ABORT clear -> CTRL/STAT power. */
+    (void)tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR);
     TF_STAGE(8U);
     if (tf_swd_write_dp(TF_DP_CTRL_STAT,
                         TF_CTRL_STAT_PWR_REQ | 0x00000020U /* SSTICKYERR */ |
                         0x00000002U /* SSTICKYORUN */) != ESP_OK) {
-        ESP_LOGE(TF_TAG, "SWD: DP CTRL/STAT power-up request failed");
-        return ESP_FAIL;
+        (void)tf_swd_write_dp(TF_DP_ABORT, TF_DP_ABORT_CLEAR);
+        tf_delay_ms(2U);
+        if (tf_swd_write_dp(TF_DP_CTRL_STAT,
+                            TF_CTRL_STAT_PWR_REQ | 0x00000020U /* SSTICKYERR */ |
+                            0x00000002U /* SSTICKYORUN */) != ESP_OK) {
+            ESP_LOGE(TF_TAG, "SWD: DP CTRL/STAT power-up request failed");
+            return ESP_FAIL;
+        }
     }
     (void)tf_swd_read_dp(TF_DP_CTRL_STAT, &dp_ctrl); /* drain reader pipeline */
     if (tf_swd_write_dp(TF_DP_CTRL_STAT, TF_CTRL_STAT_PWR_REQ) != ESP_OK) {
@@ -499,6 +514,12 @@ esp_err_t tf_swd_link_diag(char *out, size_t out_len)
     pos = tf_diag_add(out, out_len, pos, "dap_connect=%s port=0x%02X\n",
                       esp_err_to_name(err), port);
 
+    err = tf_dap_swj_pins(0x00U, 0x80U, 0U);
+    tf_delay_ms(20U);
+    err = tf_dap_swj_pins(0x80U, 0x80U, 0U);
+    tf_delay_ms(20U);
+    pos = tf_diag_add(out, out_len, pos, "reset_pulse=%s\n", esp_err_to_name(err));
+
     err = tf_dap_swj_sequence(51U, line_reset);
     pos = tf_diag_add(out, out_len, pos, "swj_line_reset=%s\n", esp_err_to_name(err));
     err = tf_dap_swj_sequence(16U, jtag_to_swd);
@@ -519,14 +540,25 @@ esp_err_t tf_swd_link_diag(char *out, size_t out_len)
     pos = tf_diag_add(out, out_len, pos, "swj_pins_reset_release=%s\n", esp_err_to_name(err));
 
     err = tf_swd_read_dp(0x00U, &v);
-    pos = tf_diag_add(out, out_len, pos, "dp_read_dpidr=%s val=0x%08X\n",
-                      esp_err_to_name(err), (unsigned)v);
+    pos = tf_diag_add(out, out_len, pos,
+                      "dp_read_dpidr=%s val=0x%08X resp_len=%u resp=",
+                      esp_err_to_name(err), (unsigned)v,
+                      (unsigned)tf_dap_last_resp_len);
+    for (uint8_t ri = 0U; ri < tf_dap_last_resp_len; ri++) {
+        pos = tf_diag_add(out, out_len, pos, "%02X", tf_dap_last_resp[ri]);
+    }
+    pos = tf_diag_add(out, out_len, pos, "\n");
 
     err = tf_swd_write_dp(TF_DP_CTRL_STAT,
                           TF_CTRL_STAT_PWR_REQ | 0x20U | 0x02U);
     pos = tf_diag_add(out, out_len, pos,
-                      "dp_write_ctrl_stat_pwrup=%s (dap_status=0x%02X count=%u)\n",
-                      esp_err_to_name(err), tf_dap_last_status, tf_dap_last_count);
+                      "dp_write_ctrl_stat_pwrup=%s (dap_status=0x%02X count=%u resp_len=%u resp=",
+                      esp_err_to_name(err), tf_dap_last_status, tf_dap_last_count,
+                      (unsigned)tf_dap_last_resp_len);
+    for (uint8_t ri = 0U; ri < tf_dap_last_resp_len; ri++) {
+        pos = tf_diag_add(out, out_len, pos, "%02X", tf_dap_last_resp[ri]);
+    }
+    pos = tf_diag_add(out, out_len, pos, ")\n");
     err = tf_swd_read_dp(TF_DP_CTRL_STAT, &v);
     pos = tf_diag_add(out, out_len, pos, "dp_read_ctrl_stat_after=%s val=0x%08X\n",
                       esp_err_to_name(err), (unsigned)v);

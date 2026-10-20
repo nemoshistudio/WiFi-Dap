@@ -124,9 +124,13 @@ static esp_err_t tf_worker_start(void)
     if (s_job_mutex == NULL || s_job_done == NULL) {
         return ESP_FAIL;
     }
+    /* The SWD bit-bang uses the CORE1 dedicated-GPIO signals
+     * (CORE1_GPIO_OUT0/1_IDX + ee.set_bit_gpio_out), so the DAP command path
+     * must run on core 1 - the same reason the DAP task and tcp_server (the
+     * working elaphureLink/OpenOCD data path) are pinned there. */
     created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", 8192, NULL,
                                       6 /* above httpd (5), below tcp_server/DAP */,
-                                      &s_worker, 0 /* DAP core */);
+                                      &s_worker, 1 /* core1: dedicated GPIO */);
     if (created != pdPASS) {
         s_worker = NULL;
         return ESP_FAIL;
@@ -147,7 +151,7 @@ esp_err_t wt_tf_init(void)
         return ESP_FAIL;
     }
     s_inited = true;
-    ESP_LOGI(TF_TAG, "target flash engine initialized (worker task, core 0, 8 KiB)");
+    ESP_LOGI(TF_TAG, "target flash engine initialized (worker task, core 1, 8 KiB)");
     return ESP_OK;
 }
 
