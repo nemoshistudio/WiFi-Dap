@@ -8,6 +8,12 @@
   >
     <p class="text-sm text-gray-600 mb-3">{{ translate('auth.description') }}</p>
 
+    <!-- 安全审查 B：提示配对码的本地存储位置（技术标识；不显示 token 值本身） -->
+    <div class="mb-3 text-xs text-gray-500">
+      <el-tag size="small" type="warning">{{ translate('common.warning') }}</el-tag>
+      <span class="ml-1 font-mono">localStorage: birdiebot.token</span>
+    </div>
+
     <el-alert
         v-if="authState.unauthorized"
         class="mb-3"

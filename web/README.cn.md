@@ -80,6 +80,26 @@
 3.  **部署到ESP32：**
     将压缩后的 `.gz` 文件复制到您的 `wireless-esp32-tools` ESP-IDF项目中的相应目录（例如 `project_components/html/`），然后将固件刷入您的设备。
 
+### OTA 固件更新构建开关（`VITE_ENABLE_OTA`）
+
+OTA 本地上传 UI（Update 页 + OTA(5) WS 模块）代码已内置，但**默认关闭**；
+构建开关由 `scripts/gen-env.mjs` 在构建时注入（无需修改 `.env`）：
+
+```sh
+# 默认（实验室安全构建）：无 Update 页面/导航项，不注册 OTA WS 模块
+bash build.sh
+
+# 启用 OTA 的构建：Update 页可用，上传走 POST /api/ota/upload
+VITE_ENABLE_OTA=true bash build.sh
+```
+
+Update 页会显示本次构建的实际状态；未启用时仅显示固件/协议只读信息。固件需实现
+OTA(5) `GET_INFO/GET_PROGRESS/ABORT` 与 `POST /api/ota/upload`；旧固件返回
+`code=4 Unsupported cmd` 时前端自动隐藏上传区块（见 `docs/ota-local-upload.md`）。
+
+安全说明：首次加载后 `?token=` 配对码参数会从地址栏（history）移除并保存到
+`localStorage`（`birdiebot.token`，明文存储，仅限可信设备使用）；日志与错误提示不会回显 token。
+
 ## 许可证
 
 根据MIT许可证分发。更多信息请参见 `LICENCE.txt` 文件。 

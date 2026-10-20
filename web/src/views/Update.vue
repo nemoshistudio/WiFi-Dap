@@ -17,6 +17,11 @@
       <el-descriptions-item :label="translate('protocol.firmwareVersion')">
         {{ currentRunningVersion }}
       </el-descriptions-item>
+      <el-descriptions-item :label="translate('ota.upload.title')">
+        <el-tag :type="otaEnabled ? 'success' : 'info'" size="small">
+          {{ otaEnabled ? translate('common.yes') : translate('common.no') }}
+        </el-tag>
+      </el-descriptions-item>
       <el-descriptions-item :label="translate('ota.upload.current')">
         {{ store.info.running }}
       </el-descriptions-item>
@@ -41,7 +46,7 @@
     <el-divider></el-divider>
 
     <el-alert
-        v-if="!store.otaSupported"
+        v-if="!otaEnabled || !store.otaSupported"
         class="mt-2"
         type="warning"
         :title="translate('common.unsupported')"
@@ -49,7 +54,7 @@
         show-icon
     />
 
-    <template v-if="store.otaSupported">
+    <template v-if="otaEnabled && store.otaSupported">
     <h2 class="text-lg font-bold">{{ translate('ota.upload.title') }}</h2>
     <p class="text-sm text-gray-600 mt-1">{{ translate('ota.upload.description') }}</p>
 
@@ -219,11 +224,14 @@ import {
 import {wt_sys_get_fm_info, wt_sys_get_sys_info, wt_sys_reboot} from "@/api/apiSystem";
 import {translate} from "@/locales";
 import {PROTOCOL_VERSION} from "@/api";
+import {isOTAEnabled} from "@/composables/buildMode";
 import {hasToken, isHttpAuthFailure, markUnauthorized} from "@/composables/useAuthSession";
 import {globalNotify} from "@/composables/notification";
 
 const sysStore = useSystemStore();
 const store = useUpdateStore();
+/** Wave2 构建开关：OTA 上传 UI 是否随本次构建启用（默认 false，联调时 VITE_ENABLE_OTA=true） */
+const otaEnabled = isOTAEnabled();
 const webInfo = window.__BIRDIEBOT_WEB__;
 
 const fileInputRef = ref<HTMLInputElement | null>(null);

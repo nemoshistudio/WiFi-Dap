@@ -8,7 +8,11 @@
 #   web/dist-gz/  every dist file gzip -9 compressed, same relative path + .gz
 #
 # Optional environment:
-#   SKIP_NPM_CI=1  reuse an existing node_modules (local iteration only)
+#   SKIP_NPM_CI=1         reuse an existing node_modules (local iteration only)
+#   VITE_ENABLE_OTA=true  enable the OTA local-upload UI for this build (default: off).
+#                         scripts/gen-env.mjs passes VITE_* process env to Vite, so the
+#                         Update page / nav entry / OTA WS module follow this flag at
+#                         build time. Firmware must implement OTA(5) + POST /api/ota/upload.
 
 set -euo pipefail
 

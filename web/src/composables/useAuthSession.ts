@@ -9,7 +9,7 @@
  *   或收到 401/403/JSON code=7 时提示。
  */
 import {computed, reactive} from 'vue'
-import {AUTH_TOKEN_STORAGE_KEY, normalizeAuthToken, resolveAuthToken} from '@/composables/websocket/auth'
+import {AUTH_TOKEN_STORAGE_KEY, consumeUrlAuthToken, normalizeAuthToken, resolveAuthToken} from '@/composables/websocket/auth'
 import {globalNotify} from '@/composables/notification'
 import {translate} from '@/locales'
 
@@ -23,14 +23,20 @@ interface AuthSessionState {
     dialogVisible: boolean
     /** 弹窗输入草稿 */
     draftToken: string
+    /** URL 曾携带 ?token= 且已被清除（App.vue 挂载后提示“token 已保存”一次） */
+    urlTokenConsumed: boolean
 }
 
+/** 启动时消费 URL token：清理地址栏并持久化（安全审查 B，见 consumeUrlAuthToken） */
+const urlToken = consumeUrlAuthToken()
+
 export const authState = reactive<AuthSessionState>({
-    token: resolveAuthToken(),
+    token: urlToken || resolveAuthToken(),
     epoch: 0,
     unauthorized: false,
     dialogVisible: false,
     draftToken: '',
+    urlTokenConsumed: urlToken.length > 0,
 })
 
 /** 是否已配置 pairing token（响应式，供 NavBar/Update/Wifi 使用）。 */

@@ -82,6 +82,28 @@ Follow these steps to set up the project for local development or to build it fo
 3.  **Deploy to ESP32:**
     Copy the compressed `.gz` files to the appropriate directory in your `wireless-esp32-tools` ESP-IDF project (e.g., `project_components/html/`) and flash the firmware to your device.
 
+### OTA Firmware Update Build Flag (`VITE_ENABLE_OTA`)
+
+The OTA local-upload UI (Update page + OTA(5) WS module) is compiled in but **disabled by
+default**. The flag is injected at build time by `scripts/gen-env.mjs` (no `.env` edit needed):
+
+```sh
+# Default (safe lab build): no Update page/nav entry, OTA WS module not registered
+bash build.sh
+
+# OTA enabled build: Update page available, uploads POST /api/ota/upload
+VITE_ENABLE_OTA=true bash build.sh
+```
+
+The Update page shows the effective build state and, when disabled, only exposes
+firmware/protocol info. Firmware must implement OTA(5) `GET_INFO/GET_PROGRESS/ABORT` and
+`POST /api/ota/upload`; with old firmware the upload section hides gracefully on
+`code=4 Unsupported cmd` (see `docs/ota-local-upload.md`).
+
+Security notes: a `?token=` pairing-token query parameter is removed from the address bar
+(history) after first load and persisted to `localStorage` (`birdiebot.token`, plain text —
+use only on trusted devices); tokens are never echoed in logs or error messages.
+
 ## License
 
 Distributed under the MIT License. See `LICENCE.txt` for more information.

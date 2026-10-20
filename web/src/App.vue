@@ -94,6 +94,11 @@ onMounted(() => {
   registerModules()
   initWebsocket()
   changeFavicon()
+  // 安全审查 B：?token= 已从地址栏清除并保存到 localStorage，提示一次（不回显 token）
+  if (authState.urlTokenConsumed) {
+    authState.urlTokenConsumed = false
+    globalNotify(`${translate('auth.tokenLabel')}: ${translate('common.success')}`, 'success')
+  }
 })
 
 // token 保存/清除后重连 WS（URL ?token= / 首帧 SYSTEM cmd0 AUTH 由 wrapper 处理）

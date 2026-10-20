@@ -49,6 +49,46 @@ export function resolveAuthToken(): string {
 }
 
 /**
+ * 读取并“消费”URL 中的 `?token=`（安全审查 B：避免地址栏/历史/截图泄漏）：
+ * 1) trim/校验后写入 localStorage（与 resolveAuthToken 相同 storage key）；
+ * 2) 用 history.replaceState 删除 query 中的 token（保留其它参数与 hash，hash 路由不被破坏）；
+ * 3) 返回读到的 token（空串 = URL 未提供）。
+ *
+ * ⚠️ 本函数不得在任何日志/错误提示中回显 token 值。
+ */
+export function consumeUrlAuthToken(): string {
+    if (typeof window === 'undefined') {
+        return '';
+    }
+    let token = '';
+    try {
+        const params = new URLSearchParams(window.location.search);
+        token = normalizeAuthToken(params.get('token'));
+    } catch {
+        token = '';
+    }
+    try {
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('token')) {
+            url.searchParams.delete('token');
+            const search = url.searchParams.toString();
+            const next = `${url.pathname}${search ? `?${search}` : ''}${url.hash}`;
+            window.history.replaceState(window.history.state, '', next);
+        }
+    } catch {
+        // history API 不可用（极旧浏览器）时忽略：至少已持久化到 localStorage
+    }
+    if (token) {
+        try {
+            localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+        } catch {
+            // localStorage 不可用：token 仅本次页面会话内存有效
+        }
+    }
+    return token;
+}
+
+/**
  * Build the `/ws` URL, appending `?token=` only when a token exists.
  * 设备默认以 HTTP 提供页面（ws://）；页面若被反代到 HTTPS 则自动用 wss://。
  */
