@@ -53,6 +53,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 
 #include "esp_log.h"
@@ -61,6 +62,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include "lwip/netbuf.h"
 #include "lwip/api.h"
 #include "lwip/tcp.h"
+#include "lwip/ip.h"
 
 #include "birdiebot_board.h"
 #include "uart_service.h"
@@ -98,6 +100,21 @@ static int uart_rx_sub_slot = -1;
 static struct netconn *uart_netconn = NULL;
 static bool is_conn_valid = false; // lock free
 static bool is_first_time_recv = false;
+
+/* A2: pause/resume control (wireless-serial island).  The bridge task is the
+ * only owner of s_listen_netconn; the control objects are created by the task
+ * at startup, so pause()/resume() called before the task exists simply record
+ * the requested state (nothing is listening yet). */
+#define BRIDGE_CTL_TIMEOUT_MS 2000
+
+static TaskHandle_t s_task_handle = NULL;
+static struct netconn *s_listen_netconn = NULL; /* TCP 1346 listening netconn */
+static SemaphoreHandle_t s_ctl_mux = NULL;      /* serializes pause()/resume() */
+static SemaphoreHandle_t s_pause_ack = NULL;    /* task -> pause(): bridge idle  */
+static SemaphoreHandle_t s_resume_req = NULL;   /* resume() -> task: wake up      */
+static SemaphoreHandle_t s_resume_ack = NULL;   /* task -> resume(): listening   */
+static volatile bool s_paused = false;
+static volatile bool s_resume_listen_ok = false;
 
 void uart_bridge_init(void)
 {
@@ -218,6 +235,13 @@ static void set_tcp_server_netconn(struct netconn **nc, uint16_t port, netconn_c
         ESP_LOGE(UART_TAG, "Status monitor: Failed to allocate netconn.\n");
         return;
     }
+    /* A2: allow an immediate re-bind of TCP 1346 after pause/resume.  Closing
+     * the session puts the previous client connection into TIME_WAIT; without
+     * SO_REUSEADDR the lwIP bind would fail with ERR_USE for the whole MSL
+     * window and the bridge would stay offline after resume. */
+    if ((*nc)->pcb.tcp != NULL) {
+        ip_set_option((*nc)->pcb.tcp, SOF_REUSEADDR);
+    }
     netconn_set_nonblocking(*nc, NETCONN_FLAG_NON_BLOCKING);
     // netconn_set_recvtimeout(*nc, 10);
     netconn_bind(*nc, IP_ADDR_ANY, port);
@@ -231,6 +255,25 @@ static void close_tcp_netconn(struct netconn *nc) {
     nc->pending_err = ERR_CLSD; // It is hacky way to be sure than callback will don't do treatment on a netconn closed and deleted
     netconn_close(nc);
     netconn_delete(nc);
+}
+
+/**
+ * Open (or re-open after resume) the TCP 1346 listening netconn.
+ * Returns true on success.  Bounded retries with vTaskDelay(): after a
+ * pause/resume cycle the lwIP socket memory may still be reclaimed, so a
+ * failing first attempt is retried instead of giving up.
+ */
+static bool uart_bridge_open_listen(void)
+{
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        set_tcp_server_netconn(&s_listen_netconn, BIRDIEBOT_UART_BRIDGE_PORT, netCallback);
+        if (s_listen_netconn != NULL) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGE(UART_TAG, "cannot open TCP %d listener", BIRDIEBOT_UART_BRIDGE_PORT);
+    return false;
 }
 
 /**
@@ -317,8 +360,113 @@ static bool uart_bridge_maybe_set_baud(const char *buffer, uint16_t len) {
     return false;
 }
 
+/* ------------------------------------------------------------------------ */
+/* A2: pause / resume of the wireless-serial (TCP 1346) island               */
+/* ------------------------------------------------------------------------ */
+
+/* Release the listening socket and the current client connection, and drop
+ * stale bridge events.  Runs in the bridge task only. */
+static void uart_bridge_release_session(void)
+{
+    if (is_conn_valid) {
+        close_tcp_netconn(uart_netconn);
+        uart_bridge_reset();
+    }
+
+    if (s_listen_netconn != NULL) {
+        close_tcp_netconn(s_listen_netconn);
+        s_listen_netconn = NULL;
+    }
+
+    if (uart_server_events != NULL) {
+        xQueueReset(uart_server_events);
+    }
+}
+
+/**
+ * Body of the paused state: close the bridge sockets, acknowledge pause(), then
+ * block on a semaphore (no busy-wait) until resume() and re-create the TCP 1346
+ * listener.  Everything outside this component (Wi-Fi, lwIP, HTTP/WebSocket,
+ * OTA, USBIP) keeps running.
+ */
+static void uart_bridge_park_until_resume(void)
+{
+    uart_bridge_release_session();
+
+    /* Drain a possibly stale token from an earlier request, then report idle. */
+    (void)xSemaphoreTake(s_pause_ack, 0);
+    ESP_LOGI(UART_TAG, "paused: TCP %d closed, UART forwarding parked",
+             BIRDIEBOT_UART_BRIDGE_PORT);
+    xSemaphoreGive(s_pause_ack);
+
+    xSemaphoreTake(s_resume_req, portMAX_DELAY);
+
+    s_resume_listen_ok = uart_bridge_open_listen();
+    (void)xSemaphoreTake(s_resume_ack, 0);
+    if (s_resume_listen_ok) {
+        ESP_LOGI(UART_TAG, "resumed: listening on TCP %d", BIRDIEBOT_UART_BRIDGE_PORT);
+    }
+    xSemaphoreGive(s_resume_ack);
+}
+
+esp_err_t wt_uart_bridge_pause(void)
+{
+    esp_err_t err = ESP_OK;
+
+    /* Bridge task not started yet: nothing is listening or forwarding. */
+    if (s_ctl_mux == NULL || s_task_handle == NULL) {
+        s_paused = true;
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_ctl_mux, portMAX_DELAY);
+    if (!s_paused) {
+        (void)xSemaphoreTake(s_pause_ack, 0); /* stale token from an early race */
+        s_paused = true;
+        if (xSemaphoreTake(s_pause_ack, pdMS_TO_TICKS(BRIDGE_CTL_TIMEOUT_MS)) != pdTRUE) {
+            ESP_LOGE(UART_TAG, "pause: bridge task did not acknowledge in %d ms",
+                     BRIDGE_CTL_TIMEOUT_MS);
+            err = ESP_ERR_TIMEOUT;
+        }
+    }
+    xSemaphoreGive(s_ctl_mux);
+
+    return err;
+}
+
+esp_err_t wt_uart_bridge_resume(void)
+{
+    esp_err_t err = ESP_OK;
+
+    if (s_ctl_mux == NULL || s_task_handle == NULL) {
+        s_paused = false;
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_ctl_mux, portMAX_DELAY);
+    if (s_paused) {
+        (void)xSemaphoreTake(s_resume_ack, 0);
+        s_paused = false;
+        xSemaphoreGive(s_resume_req);
+        if (xSemaphoreTake(s_resume_ack, pdMS_TO_TICKS(BRIDGE_CTL_TIMEOUT_MS)) != pdTRUE) {
+            ESP_LOGE(UART_TAG, "resume: bridge task did not acknowledge in %d ms",
+                     BRIDGE_CTL_TIMEOUT_MS);
+            err = ESP_ERR_TIMEOUT;
+        } else if (!s_resume_listen_ok) {
+            err = ESP_FAIL;
+        }
+    }
+    xSemaphoreGive(s_ctl_mux);
+
+    return err;
+}
+
+bool wt_uart_bridge_is_paused(void)
+{
+    return s_paused;
+}
+
 void uart_bridge_task(void) {
-    struct netconn *nc = NULL;     // To create servers
     struct netbuf *netbuf = NULL;  // To store incoming Data
     struct netconn *nc_in = NULL;  // To accept incoming netconn
     char *buffer;
@@ -336,16 +484,42 @@ void uart_bridge_task(void) {
         return;
     }
 
-    set_tcp_server_netconn(&nc, BIRDIEBOT_UART_BRIDGE_PORT, netCallback);
-    if (nc == NULL) {
+    /* A2: pause/resume control objects (one-time; owned by this task). */
+    s_ctl_mux = xSemaphoreCreateMutex();
+    s_pause_ack = xSemaphoreCreateBinary();
+    s_resume_req = xSemaphoreCreateBinary();
+    s_resume_ack = xSemaphoreCreateBinary();
+    s_task_handle = xTaskGetCurrentTaskHandle();
+    if (s_ctl_mux == NULL || s_pause_ack == NULL || s_resume_req == NULL ||
+        s_resume_ack == NULL) {
+        ESP_LOGE(UART_TAG, "failed to create pause/resume control objects");
+    }
+
+    if (!uart_bridge_open_listen()) {
         ESP_LOGE(UART_TAG, "failed to create the bridge server socket");
-        uart_service_unsubscribe_rx(uart_rx_sub_slot);
-        uart_rx_sub_slot = -1;
+        if (uart_rx_sub_slot >= 0) {
+            uart_service_unsubscribe_rx(uart_rx_sub_slot);
+            uart_rx_sub_slot = -1;
+        }
         vTaskDelete(NULL);
         return;
     }
 
     while (1) {
+        /* A2: paused -> park the task on a semaphore (never busy-wait). */
+        if (s_paused) {
+            uart_bridge_park_until_resume();
+            continue;
+        }
+
+        /* A2: a previous resume may have failed to re-open the listener. */
+        if (s_listen_netconn == NULL) {
+            if (!uart_bridge_open_listen()) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+            continue;
+        }
+
         netconn_events events;
         int ret = xQueueReceive(uart_server_events, &events, pdMS_TO_TICKS(100));
 
@@ -428,9 +602,25 @@ void uart_bridge_task(void) {
  * task creation and any API caller still link.  The UART service is NOT
  * touched, so the Web UART (JSON module 4 + WS binary router) works normally.
  */
+static bool s_paused_disabled = false;
+
 void uart_bridge_init(void) {}
 
 void uart_bridge_close(void) {}
+
+esp_err_t wt_uart_bridge_pause(void) {
+    s_paused_disabled = true;
+    return ESP_OK;
+}
+
+esp_err_t wt_uart_bridge_resume(void) {
+    s_paused_disabled = false;
+    return ESP_OK;
+}
+
+bool wt_uart_bridge_is_paused(void) {
+    return s_paused_disabled;
+}
 
 void uart_bridge_task(void) {
     ESP_LOGW("UART", "UART TCP bridge disabled (CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE=n)");
