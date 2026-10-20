@@ -353,6 +353,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
     if (tf_dap_connect_swd(NULL) != ESP_OK) {
         return ESP_FAIL;
     }
+    tf_delay_ms(1U);
     TF_STAGE(2U);
     /* Line reset, JTAG-to-SWD switch sequence, line reset, idle cycles. */
     if (tf_dap_swj_sequence(51U, line_reset) != ESP_OK ||
@@ -362,6 +363,7 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         return ESP_FAIL;
     }
     TF_STAGE(3U);
+    tf_delay_ms(2U);
     if (tf_dap_swj_clock(TF_SWD_CLOCK_HZ) != ESP_OK) {
         return ESP_FAIL;
     }
@@ -374,8 +376,10 @@ esp_err_t tf_swd_link_init(uint32_t *dpidr)
         return ESP_FAIL;
     }
     TF_STAGE(6U);
+    tf_delay_ms(1U);
     /* Release nRESET before touching the target. */
     (void)tf_dap_swj_pins(0x80U, 0x80U, 0U);
+    tf_delay_ms(2U);
     TF_STAGE(7U);
 
     /* The SW-DP must answer DPIDR before any write is attempted. */
