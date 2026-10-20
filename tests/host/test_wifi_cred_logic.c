@@ -444,23 +444,57 @@ static void test_rotation_basic(void)
 	          "rotate: max 0 -> 0 entries");
 	CHECK_INT(wifi_cred_rotate_order(table, 0, BIRDIEBOT_WIFI_CRED_NONE, NULL, order, 8), 0,
 	          "rotate: count 0 -> 0 entries");
+}
 
-	/* max smaller than count: pinned last success still counts first.
-	 * Known edge case: current logic applies the "others" insertion sort while
-	 * scanning by raw index, so when max is reached the returned tail is not
-	 * necessarily the top-(max) priority order (expected [2,1], observed [2,0]).
-	 * Not reachable with the default max=BIRDIEBOT_WIFI_CRED_MAX (== count), but
-	 * flagged as a TODO until the contract/implementation agree. */
+/* Explicit top-N contract cases (Lead finding F2 / wifi-dev fix pending).
+ *
+ * When max < count, rotate_order must return the first max candidates in
+ * contract order (last success -> priority asc / ts desc / idx asc), not an
+ * arbitrary scan-order prefix. wifi-dev is fixing this; until the fix is
+ * merged the two checks below are reported as TAP "# TODO" (expected
+ * failures) and automatically turn green once the fix lands. The exact
+ * expectations are kept on purpose so the fix is locked in by the suite; the
+ * randomized reference-model test afterwards also covers this dimension.
+ */
+static void test_rotation_topn_explicit(void)
+{
+	birdiebot_wifi_cred_t table[BIRDIEBOT_WIFI_CRED_MAX];
+	uint8_t order[BIRDIEBOT_WIFI_CRED_MAX];
+	char detail[192];
+	int n;
+
+	/* Case A: three candidates, no last success; priorities 30 / 10 / 20.
+	 * Contract top-2: idx1 (pri 10), idx2 (pri 20). */
+	memset(table, 0, sizeof(table));
+	fill_cred(&table[0], "n0", PASS_A, 100, 30);
+	fill_cred(&table[1], "n1", PASS_A, 100, 10);
+	fill_cred(&table[2], "n2", PASS_A, 100, 20);
+	memset(order, 0, sizeof(order));
+	n = wifi_cred_rotate_order(table, 3, BIRDIEBOT_WIFI_CRED_NONE, NULL, order, 2);
+	if (n == 2 && order[0] == 1 && order[1] == 2) {
+		tap_result(true, "rotate: max=2 of 3 returns top-2 (A: priority order)", NULL);
+	} else {
+		snprintf(detail, sizeof(detail),
+		         "got [%u,%u] (len %d); contract top-2 is [1,2]",
+		         (unsigned) order[0], (unsigned) order[1], n);
+		tap_xfail("rotate: max=2 of 3 returns top-2 (A: priority order)", detail);
+	}
+
+	/* Case B: last success pinned at idx2; priorities n0=50 / n1=10 / n2=100.
+	 * Contract top-2: [2,1]. */
+	memset(table, 0, sizeof(table));
+	fill_cred(&table[0], "n0", PASS_A, 100, 50);
+	fill_cred(&table[1], "n1", PASS_A, 100, 10);
+	fill_cred(&table[2], "n2", PASS_A, 100, 100);
 	memset(order, 0, sizeof(order));
 	n = wifi_cred_rotate_order(table, 3, 2, NULL, order, 2);
 	if (n == 2 && order[0] == 2 && order[1] == 1) {
-		tap_result(true, "rotate: max limit applies after pinned entry", NULL);
+		tap_result(true, "rotate: max=2 of 3 returns top-2 (B: pinned last success)", NULL);
 	} else {
-		char _d[160];
-		snprintf(_d, sizeof(_d),
-		         "got [%u,%u] (len %d), contract-consistent top-2 is [2,1]",
+		snprintf(detail, sizeof(detail),
+		         "got [%u,%u] (len %d); contract top-2 is [2,1]",
 		         (unsigned) order[0], (unsigned) order[1], n);
-		tap_xfail("rotate: max<count truncation should keep top-N order", _d);
+		tap_xfail("rotate: max=2 of 3 returns top-2 (B: pinned last success)", detail);
 	}
 }
 
@@ -708,6 +742,7 @@ int main(void)
 	test_eviction();
 	test_rotation_basic();
 	test_rotation_skip_mask();
+	test_rotation_topn_explicit();
 	test_rotation_sentinel_and_clamp();
 	test_rotation_randomized();
 	test_normalize_ts();
