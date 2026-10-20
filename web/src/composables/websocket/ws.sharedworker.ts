@@ -23,7 +23,8 @@ self.onconnect = function(event) {
     const port = event.ports[0];
     port.onmessage = function (e: MessageEvent<ControlMsg>) {
         if (isDevMode()) {
-            console.log('Received message in SharedWorker:', e.data);
+            // 安全审查 B：控制消息可能携带 pairing token，禁止整体打印（只打印类型）
+            console.log('Received control message in SharedWorker:', e.data?.type);
         }
         if (e.data.type === ControlMsgType.WS_SET_HOST) {
             const nextHost = typeof e.data.data === 'string' ? e.data.data : '';
