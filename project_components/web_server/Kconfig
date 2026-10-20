@@ -1,0 +1,58 @@
+menu "WiFi Dap web server (HTTP / WebSocket)"
+
+    config BIRDIEBOT_WEB_AUTH
+        bool "Enable Web UI/API token authentication"
+        default n
+        help
+            When enabled, the WebSocket endpoint (/ws) and the JSON HTTP API
+            (/api, and future /api/ota/upload) require the pairing token
+            (docs/protocol.md §1/§5):
+
+              - WS: ?token=<token> in the connect URL and/or the first frame
+                {"module":0,"cmd":0,"token":"<token>"} (SYSTEM cmd 0 AUTH);
+              - HTTP: Authorization: Bearer <token> (or ?token=);
+              - Host/Origin headers are validated to block DNS-rebinding.
+
+            When disabled (default) behaviour is unchanged: laboratory mode,
+            log in only from a trusted LAN.
+
+    config BIRDIEBOT_WEB_TOKEN
+        string "Fixed pairing token (empty = generate a random one at boot)"
+        depends on BIRDIEBOT_WEB_AUTH
+        default ""
+        help
+            Fixed pairing token (the "pair code" shown to the user).  It must
+            be URL-safe: no spaces, '&', '%', '?', '#' or '/'.  Max 256 chars.
+
+            When empty, a random 8-hex-digit token is generated on the first
+            boot and persisted in the wt_nvs partition (namespace "web_auth",
+            key "token"), so it stays stable across reboots.  The token is
+            printed on the serial console at start-up:
+                W (xxx) web_auth: Web auth ENABLED; pairing token: 3f9c1a7e (...)
+            Erase the wt_nvs partition (or the "web_auth" namespace) to rotate
+            the generated token.
+
+    config BIRDIEBOT_WEB_ALLOWED_ORIGIN
+        string "Extra allowed Origin/Host entries (comma separated)"
+        depends on BIRDIEBOT_WEB_AUTH
+        default ""
+        help
+            Comma-separated allow-list used when BIRDIEBOT_WEB_AUTH=y, e.g.
+                "http://192.168.1.1:8080,https://dap.local"
+            Each entry is either a full origin (scheme://host[:port]) or a
+            bare hostname.
+
+            - Host header check: the request must carry a Host that is an IP
+              literal, an entry from this list, or CONFIG_LWIP_LOCAL_HOSTNAME.
+              This blocks DNS-rebinding hostnames (an attacker-controlled DNS
+              name resolving to the device IP is rejected).
+            - Origin header check: when a browser sends Origin it must be
+              same-origin with Host, or match an entry from this list.
+
+            Accessing the device through its IP (the documented way,
+            docs/protocol.md §1) needs no entry.  Accessing it through a
+            hostname (e.g. the mDNS name "dap.local", or a reverse-proxy
+            name) requires adding that name here, e.g.
+                CONFIG_BIRDIEBOT_WEB_ALLOWED_ORIGIN="http://dap.local"
+
+endmenu

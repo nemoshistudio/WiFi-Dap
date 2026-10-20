@@ -1,5 +1,6 @@
 #include "web_uri_module.h"
 #include "api_json_router.h"
+#include "birdiebot_auth.h"
 #include "request_runner.h"
 #include "memory_pool.h"
 
@@ -32,6 +33,17 @@ static esp_err_t api_post_handler(httpd_req_t *req)
 	char *buf;
 	uint32_t remaining = req->content_len;
 
+#if BIRDIEBOT_AUTH_ENABLED
+	/* Web auth (docs/protocol.md §1/§5): /api requires Authorization: Bearer
+	 * <pair_code> (or ?token=) plus a valid Host/Origin when enabled. */
+	if (!birdiebot_auth_http_ok(req)) {
+		static const char unauthorized[] = "{\"err\":\"unauthorized\",\"code\":7}";
+		httpd_resp_set_status(req, "401 Unauthorized");
+		httpd_resp_set_type(req, "application/json");
+		return httpd_resp_send(req, unauthorized, strlen(unauthorized));
+	}
+#endif
+
 	buf_len = memory_pool_get_buf_size() - sizeof(post_request_t);
 	if (unlikely(buf_len < remaining)) {
 		ESP_LOGE(TAG, "req size %lu > buf_len %lu", remaining, buf_len);
@@ -52,9 +64,9 @@ static esp_err_t api_post_handler(httpd_req_t *req)
 		goto put_buf;
 	}
 
-	ESP_LOGI(TAG, "=========== RECEIVED DATA ========== %d", httpd_req_to_sockfd(req));
-	ESP_LOGI(TAG, "%.*s", data_len, buf);
-	ESP_LOGI(TAG, "====================================");
+	/* Do not log the raw JSON body at INFO level: it may contain WiFi
+	 * passwords or other secrets. */
+	ESP_LOGI(TAG, "api post: fd %d, %d bytes", httpd_req_to_sockfd(req), data_len);
 	ESP_LOGI(TAG, "heap min: %lu, cur: %lu", esp_get_minimum_free_heap_size(), esp_get_free_heap_size());
 
 	/* Decode */
