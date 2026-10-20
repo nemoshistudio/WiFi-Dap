@@ -86,6 +86,14 @@ static uint8_t  DAP_SequenceRequestIsValid(const uint8_t *request,
 static uint8_t  DAP_TransferRequestIsValid(const uint8_t *request);
 static uint32_t DAP_ResponseMaxSize(const uint8_t *request);
 
+/* N1 (security review): depth-aware command dispatch. Only a top-level command
+ * may enter DAP_ExecuteCommands; sub-commands run with depth >= 1 and must not
+ * nest another 0x7E/0x7F (before this guard, DAP_ProcessCommand(0x7E) called
+ * DAP_ExecuteCommand which fell back to DAP_ProcessCommand: unbounded mutual
+ * recursion from a single remote packet). */
+static uint32_t DAP_ProcessCommandDepth(const uint8_t *request, uint8_t *response, uint8_t depth);
+static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *response, uint8_t depth);
+
 
 static const char DAP_FW_Ver [] = DAP_FW_VER;
 
@@ -351,7 +359,7 @@ static uint32_t DAP_SWJ_Pins(const uint8_t *request, uint8_t *response) {
   wait   = (uint32_t)(*(request+2) <<  0) |
            (uint32_t)(*(request+3) <<  8) |
            (uint32_t)(*(request+4) << 16) |
-           (uint32_t)(*(request+5) << 24);
+           ((uint32_t)*(request+5) << 24);
 
   if ((select & (1U << DAP_SWJ_SWCLK_TCK)) != 0U) {
     if ((value & (1U << DAP_SWJ_SWCLK_TCK)) != 0U) {
@@ -379,14 +387,21 @@ static uint32_t DAP_SWJ_Pins(const uint8_t *request, uint8_t *response) {
 
   if (wait != 0U) {
 #if (TIMESTAMP_CLOCK != 0U)
+    /* Security review N6: the CMSIS-DAP "Pin Wait" field is a timeout in
+     * MICROSECONDS (0 = no wait, max 3,000,000 us = 3 s), not milliseconds:
+     * https://arm-software.github.io/CMSIS-DAP/latest/group__DAP__SWJ__Pins.html
+     * TIMESTAMP_GET() returns microseconds with TIMESTAMP_CLOCK = 1 MHz, so the
+     * old `wait *= TIMESTAMP_CLOCK / 1000000` (= *1) was already correct for
+     * this configuration. Use an exact 64-bit us->tick conversion anyway so
+     * the value stays correct for any future TIMESTAMP_CLOCK (e.g. a 32768 Hz
+     * RTC where the old integer division would have produced 0). */
     if (wait > 3000000U) {
       wait = 3000000U;
     }
-#if (TIMESTAMP_CLOCK >= 1000000U)
-    wait *= TIMESTAMP_CLOCK / 1000000U;
-#else
-    wait /= 1000000U / TIMESTAMP_CLOCK;
-#endif
+    wait = (uint32_t)(((uint64_t) wait * (uint64_t) TIMESTAMP_CLOCK) / 1000000U);
+    if (wait == 0U) {
+      wait = 1U;
+    }
 #else
     wait  = 1U;
 #endif
@@ -454,7 +469,7 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
   clock = (uint32_t)(*(request+0) <<  0) |
           (uint32_t)(*(request+1) <<  8) |
           (uint32_t)(*(request+2) << 16) |
-          (uint32_t)(*(request+3) << 24);
+          ((uint32_t)*(request+3) << 24);
 
   if (clock == 0U) {
     *response = DAP_ERROR;
@@ -862,7 +877,7 @@ static uint32_t DAP_SWD_Transfer(const uint8_t *request, uint8_t *response) {
         match_value = (uint32_t)(*(request+0) <<  0) |
                       (uint32_t)(*(request+1) <<  8) |
                       (uint32_t)(*(request+2) << 16) |
-                      (uint32_t)(*(request+3) << 24);
+                      ((uint32_t)*(request+3) << 24);
         request += 4;
         match_retry = DAP_Data.transfer.match_retry;
         if ((request_value & DAP_TRANSFER_APnDP) != 0U) {
@@ -964,7 +979,7 @@ static uint32_t DAP_SWD_Transfer(const uint8_t *request, uint8_t *response) {
       data = (uint32_t)(*(request+0) <<  0) |
              (uint32_t)(*(request+1) <<  8) |
              (uint32_t)(*(request+2) << 16) |
-             (uint32_t)(*(request+3) << 24);
+             ((uint32_t)*(request+3) << 24);
       request += 4;
       if ((request_value & DAP_TRANSFER_MATCH_MASK) != 0U) {
         // Write match mask
@@ -1142,7 +1157,7 @@ static uint32_t DAP_JTAG_Transfer(const uint8_t *request, uint8_t *response) {
         match_value = (uint32_t)(*(request+0) <<  0) |
                       (uint32_t)(*(request+1) <<  8) |
                       (uint32_t)(*(request+2) << 16) |
-                      (uint32_t)(*(request+3) << 24);
+                      ((uint32_t)*(request+3) << 24);
         request += 4;
         match_retry  = DAP_Data.transfer.match_retry;
         // Select JTAG chain
@@ -1230,7 +1245,7 @@ static uint32_t DAP_JTAG_Transfer(const uint8_t *request, uint8_t *response) {
       data = (uint32_t)(*(request+0) <<  0) |
              (uint32_t)(*(request+1) <<  8) |
              (uint32_t)(*(request+2) << 16) |
-             (uint32_t)(*(request+3) << 24);
+             ((uint32_t)*(request+3) << 24);
       request += 4;
       if ((request_value & DAP_TRANSFER_MATCH_MASK) != 0U) {
         // Write match mask
@@ -1467,7 +1482,7 @@ static uint32_t DAP_SWD_TransferBlock(const uint8_t *request, uint8_t *response)
       data = (uint32_t)(*(request+0) <<  0) |
              (uint32_t)(*(request+1) <<  8) |
              (uint32_t)(*(request+2) << 16) |
-             (uint32_t)(*(request+3) << 24);
+             ((uint32_t)*(request+3) << 24);
       request += 4;
       // Write DP/AP register
       retry = DAP_Data.transfer.retry_count;
@@ -1577,7 +1592,7 @@ static uint32_t DAP_JTAG_TransferBlock(const uint8_t *request, uint8_t *response
       data = (uint32_t)(*(request+0) <<  0) |
              (uint32_t)(*(request+1) <<  8) |
              (uint32_t)(*(request+2) << 16) |
-             (uint32_t)(*(request+3) << 24);
+             ((uint32_t)*(request+3) << 24);
       request += 4;
       // Write DP/AP register
       retry = DAP_Data.transfer.retry_count;
@@ -1617,14 +1632,21 @@ end:
 static uint32_t DAP_TransferBlock(const uint8_t *request, uint8_t *response) {
   uint32_t num;
   uint32_t request_count;
+  uint32_t max_count;
 
   request_count = (uint32_t)(*(request + 1)) | ((uint32_t)(*(request + 2)) << 8);
 
-  /* WP-105: cap request_count so that both the response (read: 3+4*count) and
-   * the request (write: 4+4*count) fit into one DAP packet. The limit is 127
-   * for both directions with DAP_PACKET_SIZE=512; the old code accepted
-   * 0..65535 and could write ~256 KB into a 512-byte response buffer. */
-  if (request_count > ((DAP_PACKET_SIZE - 4U) / 4U)) {
+  /* WP-105 + security review N9: the cap must be direction dependent because
+   * the request/response sizes differ:
+   *   read  : response = echo(1) + count(2) + value(1) + 4*count
+   *           -> count <= (DAP_PACKET_SIZE-4)/4 = 127
+   *   write : request  = cmd(1) + index(1) + count(2) + value(1) + 4*count
+   *           -> count <= (DAP_PACKET_SIZE-5)/4 = 126
+   * The previous single 127 cap let the write direction read 1 byte past the
+   * 512-byte request packet (count=127 => 513 bytes) - N9. */
+  max_count = ((*(request + 3) & DAP_TRANSFER_RnW) != 0U) ?
+              ((DAP_PACKET_SIZE - 4U) / 4U) : ((DAP_PACKET_SIZE - 5U) / 4U);
+  if (request_count > max_count) {
     *(response + 0) = 0U;        // response count [7:0]
     *(response + 1) = 0U;        // response count [15:8]
     *(response + 2) = DAP_ERROR; // response value
@@ -1674,7 +1696,7 @@ static uint32_t DAP_SWD_WriteAbort(const uint8_t *request, uint8_t *response) {
   data = (uint32_t)(*(request+1) <<  0) |
          (uint32_t)(*(request+2) <<  8) |
          (uint32_t)(*(request+3) << 16) |
-         (uint32_t)(*(request+4) << 24);
+         ((uint32_t)*(request+4) << 24);
 
   // Write Abort register
   SWD_Transfer(DP_ABORT, &data);
@@ -1707,7 +1729,7 @@ static uint32_t DAP_JTAG_WriteAbort(const uint8_t *request, uint8_t *response) {
   data = (uint32_t)(*(request+1) <<  0) |
          (uint32_t)(*(request+2) <<  8) |
          (uint32_t)(*(request+3) << 16) |
-         (uint32_t)(*(request+4) << 24);
+         ((uint32_t)*(request+4) << 24);
 
   // Write Abort register
   JTAG_WriteAbort(data);
@@ -1890,9 +1912,10 @@ static uint32_t DAP_ResponseMaxSize(const uint8_t *request)
       return 6U;
     case ID_DAP_QueueCommands:
     case ID_DAP_ExecuteCommands:
-      /* Nested batch commands are handled recursively; the size of their
-       * response is bounded by DAP_PACKET_SIZE (handled one at a time). */
-      return DAP_PACKET_SIZE;
+      /* N1: a nested batch is rejected by the depth guard below and produces
+       * just the echo + ID_DAP_Invalid status (2 bytes). Estimate accordingly
+       * so a legitimate batch is not truncated by the accumulate guard. */
+      return 2U;
     case ID_DAP_ResetTarget:
       return 3U;
     case ID_DAP_HostStatus:
@@ -1913,12 +1936,13 @@ static uint32_t DAP_ResponseMaxSize(const uint8_t *request)
   }
 }
 
-// Process DAP command request and prepare response
+// Process DAP command request and prepare response (depth-aware internal)
+//   depth: 0 = top-level transport command, >=1 = sub-command of a batch
 //   request:  pointer to request data
 //   response: pointer to response data
 //   return:   number of bytes in response (lower 16 bits)
 //             number of bytes in request (upper 16 bits)
-uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
+static uint32_t DAP_ProcessCommandDepth(const uint8_t *request, uint8_t *response, uint8_t depth) {
   uint32_t num;
 
   if ((*request >= ID_DAP_Vendor0) && (*request <= ID_DAP_Vendor31)) {
@@ -2005,11 +2029,24 @@ uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
     case ID_DAP_QueueCommands:
     case ID_DAP_ExecuteCommands:
       /* WP-105: the USBIP transport rewrites 0x7E to 0x7F and calls
-       * DAP_ProcessCommand directly, so both must be handled here or the
-       * advertised "Atomic Commands" capability is a lie. DAP_ExecuteCommand()
+       * DAP_ProcessCommand directly, so 0x7E/0x7F must be handled here for the
+       * advertised "Atomic Commands" capability to be real. DAP_ExecuteCommand()
        * writes the command/count header itself: pass the un-advanced pointers
-       * (request/response were already incremented by the echo). */
-      return DAP_ExecuteCommand(request - 1U, response - 1U);
+       * (request/response were already incremented by the echo).
+       *
+       * N1 (security review): a Queue/Execute command nested inside a batch
+       * must be rejected, not dispatched again. Otherwise
+       * DAP_ProcessCommand(0x7E) -> DAP_ExecuteCommand(0x7E) ->
+       * DAP_ProcessCommand(0x7E) ... recurses until the task stack dies
+       * (reachable unauthenticated via the DAP proxy port). The reference
+       * implementation also answers ID_DAP_Invalid for a nested batch. */
+      if (depth != 0U) {
+        /* Reject, but consume the command byte + count byte so the enclosing
+         * batch continues at the next sub-command. */
+        *response = ID_DAP_Invalid;
+        return ((2U << 16) | 2U);
+      }
+      return DAP_ExecuteCommandDepth(request - 1U, response - 1U, depth);
 
 #if ((SWO_UART != 0) || (SWO_MANCHESTER != 0))
     case ID_DAP_SWO_Transport:
@@ -2061,17 +2098,28 @@ uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
   return ((1U << 16) + 1U + num);
 }
 
+// Process DAP command request and prepare response (public transport entry)
+uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
+  return DAP_ProcessCommandDepth(request, response, 0U);
+}
 
-// Execute DAP command (process request and prepare response)
+
+// Execute DAP command (process request and prepare response, depth-aware)
 //   request:  pointer to request data
 //   response: pointer to response data
+//   depth:    batch nesting depth (0 = top-level)
 //   return:   number of bytes in response (lower 16 bits)
 //             number of bytes in request (upper 16 bits)
-uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response) {
+static uint32_t DAP_ExecuteCommandDepth(const uint8_t *request, uint8_t *response, uint8_t depth) {
   uint32_t cnt, num, n, processed, used;
   uint8_t *response_count;
+  uint8_t command;
 
-  if (*request == ID_DAP_ExecuteCommands) {
+  command = *request;
+  if ((command == ID_DAP_QueueCommands) || (command == ID_DAP_ExecuteCommands)) {
+    /* N1: 0x7E (QueueCommands) is an alias of 0x7F here - this firmware has no
+     * queue storage and the USBIP transport already rewrites 0x7E to 0x7F.
+     * Echo the byte the host actually sent so both hosts keep working. */
     *response++ = *request++;
     response_count = response;  /* count byte written before parsing */
     cnt = *request++;
@@ -2090,7 +2138,9 @@ uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response) {
         break;
       }
 
-      n = DAP_ProcessCommand(request, response);
+      /* N1: sub-commands run with depth >= 1, so a nested 0x7E/0x7F returns
+       * ID_DAP_Invalid instead of recursing into another batch. */
+      n = DAP_ProcessCommandDepth(request, response, (uint8_t)(depth + 1U));
       num += n;
       used += (uint16_t) n;
       processed++;
@@ -2102,7 +2152,12 @@ uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response) {
     return (num);
   }
 
-  return DAP_ProcessCommand(request, response);
+  return DAP_ProcessCommandDepth(request, response, depth);
+}
+
+// Execute DAP command (public transport entry)
+uint32_t DAP_ExecuteCommand(const uint8_t *request, uint8_t *response) {
+  return DAP_ExecuteCommandDepth(request, response, 0U);
 }
 
 
