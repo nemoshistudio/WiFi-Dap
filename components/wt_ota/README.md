@@ -87,20 +87,24 @@ if (err == ESP_OK) {
 |---|---|---|
 | 1 | GET_INFO | `running, running_ver, free, slot_size, status` + 可选 `idle, rollback, sha256, last_error` |
 | 3 | GET_PROGRESS | `offset, total, status, err` + 可选 `slot, sha256` |
-| 4 | ABORT | 成功回显 `{module,cmd}`；非 RECEIVING 返回 JSON code 5；WS 上 cmd 2 → code 4 |
+| 4 | ABORT | 成功回显 `{module,cmd}`；非 RECEIVING 返回失败体 `{"module":5,"cmd":4,"err":"invalid state","code":5}`；WS 上 cmd 2 → code 4 |
 
 契约允许的增量可选字段（`docs/ota-local-upload.md` §4.1/§4.2）已使用，字段名不变。
+模块 5 的失败响应统一为 `docs/protocol.md` §1.1 的失败体
+`{"module":5,"cmd":<cmd>,"err":"<msg>","code":<int>}`（HTTP/WS 同一 JSON，前端按 `err` 解析），
+不再经过 ws 路由层的旧 `{"error":...}` 模板；ABORT 非法状态即 code 5。
 `BIRDIEBOT_OTA_ENABLE=n` 时只关闭模块 5 注册，C API 仍可用。
 
 ## 回滚（docs/ota-local-upload.md §2.3）
 
 - `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`（三目标默认已开启）时，OTA 新镜像首启为
   `ESP_OTA_IMG_PENDING_VERIFY`，必须由应用确认，否则下次复位回滚到旧槽。
-- **集成点（main/app_main，WP-209）**：WiFi、`start_webserver()`、DAP/UART 任务都启动后，
-  启动一个 **10s 单次定时器**，到期调用 `wt_ota_mark_app_valid()`；函数只在
-  `ESP_OTA_IMG_PENDING_VERIFY` 时确认，否则安全返回。本组件**不修改 main.c**。
+- **集成点（已落地，`main/main.c`）**：`app_main()` 在 WiFi、`start_webserver()`、DAP/UART
+  任务都启动后注册一个 **10s 单次 `esp_timer`**，回调调用 `wt_ota_mark_app_valid()`；函数只在
+  `ESP_OTA_IMG_PENDING_VERIFY` 时确认，否则安全返回并记日志。该钩子由
+  `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` 编译开关保护，未确认的 OTA 镜像会在下次复位时回滚。
 - 过渡方案：`CONFIG_BIRDIEBOT_OTA_AUTO_MARK_VALID=y` 让组件自己在启动 10s 后确认
-  （默认 n，等 main/ 钩子落地后建议关闭）。
+  （默认 n；启用时 `main/main.c` 的钩子编译排除，避免重复确认）。
 - 回滚关闭（`=n`）时同上 API 为安全 no-op，`GET_INFO.rollback=false`。
 - 回滚后 `GET_INFO`/`GET_PROGRESS` 反映实际运行的槽与版本；`last_error` 仅 RAM 级
   （重启后清空），符合契约 §2.3 第 5 条。
@@ -124,4 +128,6 @@ python3 scripts/check_partitions.py          # 8MB ota_0/ota_1 3M 等大，app �
 - 模块 5 的 WS 冒烟（真机，Wave3）：`{"module":5,"cmd":1}` 应返回
   `running=ota_0|ota_1`、`running_ver == SYSTEM/GET_FM_INFO.fm_ver`、`status=IDLE`。
 - 真机 OTA 流程验证属 Wave3（WP-305 硬件验证清单）：上传合法 app.bin → 进度递增 →
-  `GET_INFO.running_ver` 变化；rollback=y 时新镜像 10s 内复位会回滚。
+  `GET_INFO.running_ver` 变化；rollback=y 时新镜像 10s 内复位会回滚，10s 后由
+  `main/main.c` 钩子确认（`wt_ota_mark_app_valid()`），串口日志出现
+  `OTA running image confirmed (rollback cancelled)`。
