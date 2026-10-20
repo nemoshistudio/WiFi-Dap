@@ -13,6 +13,10 @@
 export interface TargetInfo {
     detected: boolean
     family?: string
+    series?: string
+    device?: string
+    supported?: boolean
+    swd_clock_hz?: number
     cpuid?: number | string
     idcode?: number | string
     uid?: string
@@ -94,6 +98,8 @@ export async function getTargetInfo(): Promise<TargetInfo> {
         return {detected: false, err: failure.err, code: failure.code, httpStatus: response.status}
     }
     const family = typeof body?.family === 'string' ? body.family as string : undefined
+    const series = typeof body?.series === 'string' ? body.series as string : undefined
+    const device = typeof body?.device === 'string' ? body.device as string : undefined
     const idcode = body?.idcode !== undefined && body?.idcode !== null ? body.idcode as number | string : undefined
     // Prefer explicit `detected`; otherwise infer from family/idcode for tolerant backends.
     const detected = typeof body?.detected === 'boolean'
@@ -102,6 +108,10 @@ export async function getTargetInfo(): Promise<TargetInfo> {
     return {
         detected,
         family,
+        series,
+        device,
+        supported: typeof body?.supported === 'boolean' ? body.supported as boolean : undefined,
+        swd_clock_hz: toNumber(body?.swd_clock_hz),
         cpuid: body?.cpuid as number | string | undefined,
         idcode,
         uid: typeof body?.uid === 'string' ? body.uid as string : undefined,

@@ -385,6 +385,8 @@ export default {
         notDetected: '未检测到目标芯片，请检查接线与供电',
         notSupported: '当前固件不支持目标烧录',
         family: '芯片系列',
+        model: '芯片型号',
+        unsupportedFamily: '该芯片系列可识别，但暂不支持烧录',
         cpuid: 'CPUID',
         idcode: 'DBGMCU IDCODE',
         uid: 'UID',

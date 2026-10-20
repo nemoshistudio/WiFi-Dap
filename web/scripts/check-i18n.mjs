@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 333
+const EXPECTED_TOTAL = 335
 const EXPECTED_BASELINE = 167
-const EXPECTED_ADDED = 166
+const EXPECTED_ADDED = 168
 
 const errors = []
 const warnings = []
@@ -129,7 +129,7 @@ const ADDED_KEYS = [
     ]),
     ...keys('target', [
         'title', 'description', 'detect', 'detecting', 'detectFailed', 'notDetected',
-        'notSupported', 'family', 'cpuid', 'idcode', 'uid', 'flashBase', 'flashSize',
+        'notSupported', 'family', 'model', 'unsupportedFamily', 'cpuid', 'idcode', 'uid', 'flashBase', 'flashSize',
         'running', 'securityHint', 'selectFile', 'fileName', 'fileSize', 'sha256',
         'hashComputing', 'invalidFile', 'emptyFile', 'fileTooLarge', 'start',
         'confirmFlashTitle', 'confirmFlash', 'noTargetHint', 'selectFirst', 'flashing',

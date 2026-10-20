@@ -30,7 +30,8 @@
     />
 
     <el-descriptions v-if="targetInfo?.detected" class="mt-3" border :column="1">
-      <el-descriptions-item :label="translate('target.family')">{{ targetInfo.family || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.family')">{{ targetInfo.series || targetInfo.family || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.model')">{{ targetInfo.device || '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.cpuid')">{{ formatRegister(targetInfo.cpuid) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.idcode')">{{ formatRegister(targetInfo.idcode) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.uid')">{{ targetInfo.uid || '-' }}</el-descriptions-item>
@@ -38,6 +39,14 @@
       <el-descriptions-item :label="translate('target.flashSize')">{{ formatFlashSize(targetInfo.flash_size) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.running')">{{ formatBoolean(targetInfo.running) }}</el-descriptions-item>
     </el-descriptions>
+    <el-alert
+        v-if="targetInfo?.detected && targetInfo.supported === false"
+        class="mt-2"
+        type="warning"
+        :title="translate('target.unsupportedFamily')"
+        :closable="false"
+        show-icon
+    />
     <el-alert
         v-else-if="!detectError"
         class="mt-2"
@@ -112,7 +121,8 @@
         border
         :column="1"
     >
-      <el-descriptions-item :label="translate('target.family')">{{ result.family || targetInfo?.family || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.family')">{{ result.series || targetInfo?.series || result.family || targetInfo?.family || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.model')">{{ targetInfo?.device || '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.idcode')">
         {{ formatRegister(result.idcode ?? targetInfo?.idcode) }}
       </el-descriptions-item>
@@ -183,6 +193,7 @@ let flashHandle: { abort(): void } | null = null;
 const flashing = computed(() => phase.value === 'flashing');
 const canFlash = computed(() => {
   return targetInfo.value?.detected === true
+      && targetInfo.value?.supported !== false
       && selectedFile.value !== null
       && fileSha256.value.length > 0
       && !hashing.value
@@ -367,6 +378,10 @@ async function onStartFlash() {
   }
   if (targetInfo.value?.detected !== true) {
     globalNotify(translate('target.noTargetHint'), 'warning');
+    return;
+  }
+  if (targetInfo.value?.supported === false) {
+    globalNotify(translate('target.unsupportedFamily'), 'warning');
     return;
   }
   if (!selectedFile.value) {

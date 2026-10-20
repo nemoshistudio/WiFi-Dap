@@ -381,6 +381,8 @@ export default {
         notDetected: 'No target chip detected; check wiring and power',
         notSupported: 'Target flashing is not supported by the current firmware',
         family: 'Family',
+        model: 'Chip model',
+        unsupportedFamily: 'This chip series is recognized but flashing is not supported',
         cpuid: 'CPUID',
         idcode: 'DBGMCU IDCODE',
         uid: 'UID',
