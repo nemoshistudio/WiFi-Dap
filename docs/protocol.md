@@ -53,7 +53,7 @@
 | cmd | 名称 | 关键请求字段 | 响应字段 | 说明 |
 |---|---|---|---|---|
 | 1 | GET_STA_INFO | – | `ssid,password,ip,gateway,netmask,dns_main,dns_backup,rssi,mac` | 沿用 C/D 现有 |
-| 2 | CONNECT | `ssid,password[,save=1]` | 成功时复用 GET_STA_INFO 字段 | `save` 默认 1（写入多凭据记忆，见 wifi-credential-memory.md） |
+| 2 | CONNECT | `ssid,password[,save]` | 成功时复用 GET_STA_INFO 字段 | `save` 缺省跟随 `auto_save` 配置（默认 true）；`auto_save=false` 时缺省不保存；显式 `save=1` 仍强制保存（见 wifi-credential-memory.md） |
 | 3 | SCAN | – | `scan_list:[{rssi,ssid,mac}]` | 异步；结果回一条 JSON |
 | 4 | DISCONNECT | – | 回显 | 停止 STA 连接（AP 保持） |
 | 5 | GET_AP_INFO | – | `ssid,password,ip,gateway,netmask` | ⚠️ 含 AP 口令（默认无鉴权下仅在可信 LAN 使用） |
@@ -63,7 +63,7 @@
 | 9 | GET_STATIC_IP | – | `{"enable":bool,"ip":"","gateway":"","netmask":"","dns_main":"","dns_backup":""}` | – |
 | 10 | SET_STATIC_IP | `enable` + 上述字段 | 回显 | 默认 enable=false（DHCP） |
 | **11** | **GET_SAVED_LIST** | – | `{"auto_save":bool,"list":[{"idx":0,"ssid":"...","last_success":<unix>,"priority":0}]}` | 多 WiFi 记忆 |
-| **12** | **ADD_SAVED** | `ssid,password[,priority]` | 回显 + `idx` | 已存在则更新口令/时间 |
+| **12** | **ADD_SAVED** | `ssid,password[,priority]` | `{"idx":<int>}`（**不回显 password**，安全例外） | 已存在则更新口令/时间；前端据此只更新列表不展示口令 |
 | **13** | **DEL_SAVED** | `idx` | 回显 | – |
 | **14** | **SET_AUTO_SAVE** | `enable` | 回显 | 默认 true |
 
@@ -111,6 +111,9 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 | 4 | ABORT | – | 回显；收尾 `esp_ota_abort` 并回到 IDLE |
 
 上传端点：`POST /api/ota/upload`（见 OTA 契约文档）。
+
+> ⚠️ 校验说明：设备通过 **HTTP 明文** 提供页面，浏览器处于非 secure context，`crypto.subtle`（SubtleCrypto）不可用 → 前端**不能**依赖浏览器计算 SHA-256。`X-SHA256` 头为**可选**（仅当客户端环境支持时）；设备在 `GET_INFO`/`GET_PROGRESS` 响应中回传已写入镜像的 sha256，供用户人工比对。镜像完整性以 `esp_ota_end()` 校验为准。
+
 
 ---
 
