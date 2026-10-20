@@ -52,8 +52,15 @@
      * 1024 to limit static RAM usage.
      */
     #include "sdkconfig.h"
-    #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        #define DAP_PACKET_SIZE 1280U /* (1280-4)/5 = 255: max u8 DAP_Transfer count */
+    #if defined(CONFIG_IDF_TARGET_ESP32S3) && defined(CONFIG_BIRDIEBOT_DAP_PACKET_SIZE)
+        /* Kconfig (components/dap_proxy/Kconfig): 1280 is the maximum that is
+         * safe for OpenOCD 0.12 (u8 DAP_Transfer count); a DAP_TransferBlock
+         * host can use up to the USBIP payload capacity (4048). */
+        /* No cast: DAP_PACKET_SIZE is also used in preprocessor expressions
+         * (DAP.c compile-time range checks). */
+        #define DAP_PACKET_SIZE CONFIG_BIRDIEBOT_DAP_PACKET_SIZE
+    #elif defined(CONFIG_IDF_TARGET_ESP32S3)
+        #define DAP_PACKET_SIZE 1280U
     #else
         #define DAP_PACKET_SIZE 1024U
     #endif

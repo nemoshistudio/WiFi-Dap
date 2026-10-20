@@ -52,15 +52,22 @@
 
 /* Pipeline depth of the two USBIP<->DAP ring buffers.
  *
- * A3 used 20 slots with DAP_PACKET_SIZE=1024 (~41 KB).  B1 raises the packet
- * size on the ESP32-S3 to 1280 B, so 16 slots per direction keep the same RAM
- * budget: 2 * (4 B + 1280 B) * 16 ~= 41 KB.
- *
+ * The RAM budget is kept at ~41 KB (the A3 value: 20 slots * 1028 B) whatever
+ * packet size B1 selects:
+ *   DAP_PACKET_SIZE  1024 -> 20 slots  (2 * 1028 * 20 = 41 KB)
+ *                    1280 -> 16 slots  (2 * 1284 * 16 = 41 KB)
+ *                    4048 ->  5 slots  (2 * 4052 *  5 = 40 KB)
  * The host (OpenOCD cmsis-dap) keeps at most MAX_PENDING_REQUESTS=3 blocks in
  * flight and the B1 pipeline parks at most that many OUT commands / responses,
- * so 16 slots per direction give a comfortable margin.  Item size is
- * DAP_HANDLE_SIZE (unchanged), so fast_reply()/ring sizing stay consistent. */
+ * so 5 slots are the minimum with some slack.  Item size is DAP_HANDLE_SIZE
+ * (unchanged), so fast_reply()/ring sizing stay consistent. */
+#if DAP_PACKET_SIZE > 2048U
+#define DAP_BUFFER_NUM 5
+#elif DAP_PACKET_SIZE > 1024U
 #define DAP_BUFFER_NUM 16
+#else
+#define DAP_BUFFER_NUM 20
+#endif
 
 /* Bounded wait used when pushing a response into the OUT ring buffer, so that a
  * reset request (ring buffer ownership change) is always observed. */

@@ -56,4 +56,22 @@ menu "WiFi Dap proxy (USBIP / WebSocket-DAP)"
         range 5 24
         default 16
 
+    config BIRDIEBOT_DAP_PACKET_SIZE
+        int "DAP packet size reported to the debugger (bytes, ESP32-S3)"
+        range 256 4048
+        default 1280
+        help
+            CMSIS-DAP packet size returned by DAP_Info and used for the USBIP
+            stage2 payload buffer.  The USBIP transport is latency-bound, so a
+            larger packet means more SWD data per OUT+IN URB round-trip.
+
+            OpenOCD 0.12 (cmsis-dap DAP_Transfer, u8 transfer count) derives its
+            block size as (packet-4)/5 and is only correct up to 1280
+            ((1280-4)/5 = 255 transfers).  OpenOCD master uses DAP_TransferBlock
+            (u16 count) and can use a much larger packet (e.g. 4000-4048);
+            this is A/B measured in the B1 hardware window and the release
+            default is chosen from that data.
+
+            Other targets are fixed at 1024 by main/dap_configuration.h.
+
 endmenu
