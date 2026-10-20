@@ -9,7 +9,7 @@
 #include "memory_pool.h"
 #include "wt_ws_router.h"
 #include "wt_data_def.h"
-#include "birdiebot_auth.h"
+#include "web_host_guard.h"
 #include "web_error_json.h"
 
 #include <esp_http_server.h>
@@ -35,11 +35,6 @@
  * request context could not be parsed. */
 #define MSG_BINARY_ERROR       "{\"err\":\"Bad binary frame\",\"code\":2}"
 #define MSG_INTERNAL_FALLBACK  "{\"err\":\"Internal error\",\"code\":3}"
-
-/* SYSTEM(0)/AUTH(0): pairing-token frame (docs/protocol.md §2.1). */
-#define WS_SYSTEM_MODULE_ID    0
-#define WS_SYS_CMD_AUTH        0
-#define MSG_AUTH_OK            "{\"module\":0,\"cmd\":0,\"ok\":true}"
 
 #define GET_FD_IDX(fd) ((fd) - LWIP_SOCKET_OFFSET)
 
@@ -102,12 +97,8 @@ static void ws_send_error_req(httpd_req_t *req, int module, int cmd,
 
 /* Binary data path (docs/ws-binary-router.md / docs/protocol.md §3). */
 static int ws_bin_tx_port(const uint8_t *frame, size_t len);
-static void ws_broadcast_frame(httpd_ws_frame_t *pkt, bool authed_only);
+static void ws_broadcast_frame(httpd_ws_frame_t *pkt);
 static void ws_send_binary_error(httpd_req_t *req);
-#if BIRDIEBOT_AUTH_ENABLED
-static void ws_send_text_literal(httpd_req_t *req, const char *text);
-static void ws_send_unauthorized(httpd_req_t *req, int module, int cmd);
-#endif
 
 /* Heartbeat related */
 static inline int8_t ws_add_fd(httpd_handle_t hd, int fd);
@@ -227,7 +218,7 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 
 	ws_pkt = &ws_msg->ws_pkt;
 	/* Never log the raw JSON payload at INFO level: it may contain WiFi
-	 * passwords (WIFI/CONNECT) or the web-auth pairing token (SYSTEM/0/AUTH). */
+	 * passwords (WIFI/CONNECT) or other secrets. */
 	ESP_LOGI(TAG, "ws text frame: len %u", (unsigned) ws_pkt->len);
 #ifdef WT_DEBUG_MODE
 	ESP_LOGI(TAG, "%.*s", ws_pkt->len, ws_pkt->payload);
@@ -246,45 +237,6 @@ int ws_on_text_data(httpd_req_t *req, ws_msg_t *ws_msg)
 		goto put_buf;
 	}
 	(void)ws_json_get_context(ws_msg->json.in, &module, &cmd);
-
-#if BIRDIEBOT_AUTH_ENABLED
-	/* Web auth gate (docs/protocol.md §1/§2.1): while the connection is not
-	 * authorized only SYSTEM/0/AUTH is processed; every other command gets
-	 * {"err":"unauthorized","code":7} and is not routed to a module. */
-	{
-		int fd = httpd_req_to_sockfd(req);
-
-		if (module == WS_SYSTEM_MODULE_ID && cmd == WS_SYS_CMD_AUTH) {
-			const char *token = cJSON_GetStringValue(
-				cJSON_GetObjectItem(ws_msg->json.in, "token"));
-			if (birdiebot_auth_ws_token_ok(token, fd)) {
-				ESP_LOGI(TAG, "ws fd %d authorized by SYSTEM/0/AUTH", fd);
-				ws_send_text_literal(req, MSG_AUTH_OK);
-			} else {
-				/* P1-4: rate limit token guessing (5 failures/minute/fd);
-				 * a rate-limited attempt is answered after a short delay. */
-				bool limited = birdiebot_auth_ws_note_auth_failure(fd);
-				ESP_LOGW(TAG, "ws fd %d AUTH failed (missing/invalid token)%s",
-				         fd, limited ? " - rate limited" : "");
-				if (limited) {
-					vTaskDelay(pdMS_TO_TICKS(250));
-				}
-				ws_send_unauthorized(req, WS_SYSTEM_MODULE_ID, WS_SYS_CMD_AUTH);
-			}
-			cJSON_Delete(ws_msg->json.in);
-			memory_pool_put(ws_msg);
-			return ESP_OK;
-		}
-
-		if (!birdiebot_auth_ws_fd_ok(fd)) {
-			ESP_LOGW(TAG, "ws fd %d not authorized (module %d cmd %d)", fd, module, cmd);
-			ws_send_unauthorized(req, module, cmd);
-			cJSON_Delete(ws_msg->json.in);
-			memory_pool_put(ws_msg);
-			return ESP_OK;
-		}
-	}
-#endif /* BIRDIEBOT_AUTH_ENABLED */
 
 	ws_msg->json.out = NULL;
 	ws_msg->json.out_flag = 0;
@@ -374,10 +326,6 @@ static void ws_set_err_frame(httpd_ws_frame_t *p_frame, uint8_t *buf, size_t buf
 		err_text = "Resource busy";
 		code = 6;
 		break;
-	case API_JSON_UNAUTHORIZED:
-		err_text = "unauthorized";
-		code = 7;
-		break;
 	case API_JSON_OK:
 	case API_JSON_ASYNC:
 	case API_JSON_INTERNAL_ERR:
@@ -428,31 +376,6 @@ static void ws_send_binary_error(httpd_req_t *req)
 	ws_send_error_req(req, -1, -1, "Bad binary frame", 2);
 }
 
-#if BIRDIEBOT_AUTH_ENABLED
-/** Send a static JSON text frame (FIN=1) to the requesting client. */
-static void ws_send_text_literal(httpd_req_t *req, const char *text)
-{
-	httpd_ws_frame_t pkt = {
-		.type = HTTPD_WS_TYPE_TEXT,
-		.final = 1,
-		.payload = (uint8_t *) text,
-		.len = strlen(text),
-	};
-	ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), &pkt);
-}
-
-/**
- * @brief Reply docs/protocol.md §1.1 unauthorized error (code 7) to this fd.
- *
- * Echoes the request module/cmd so the front-end can route the error; -1
- * values (unparseable request) are reported as module 0 / cmd 0.
- */
-static void ws_send_unauthorized(httpd_req_t *req, int module, int cmd)
-{
-	ws_send_error_req(req, module, cmd, "unauthorized", 7);
-}
-#endif /* BIRDIEBOT_AUTH_ENABLED */
-
 /**
  * @brief Inbound WS binary frame: validate, split the 4-byte header, dispatch.
  *
@@ -487,16 +410,6 @@ int ws_on_binary_data(httpd_req_t *req, ws_msg_t *ws_msg)
 		return ESP_OK;
 	}
 
-#if BIRDIEBOT_AUTH_ENABLED
-	if (!birdiebot_auth_ws_fd_ok(httpd_req_to_sockfd(req))) {
-		ESP_LOGW(TAG, "binary frame from unauthenticated fd %d",
-		         (int) httpd_req_to_sockfd(req));
-		ws_send_unauthorized(req, ws_pkt->payload[1], -1);
-		memory_pool_put(ws_msg);
-		return ESP_OK;
-	}
-#endif
-
 	const uint8_t *frame = ws_pkt->payload;
 	int ret = wt_ws_router_rx(frame[0], frame[1], frame[2],
 	                          frame + hdr_len, ws_pkt->len - hdr_len);
@@ -528,8 +441,8 @@ static int ws_bin_tx_port(const uint8_t *frame, size_t len)
 		.len = len,
 	};
 
-	/* Data broadcasts go to authorized WS clients only when auth is enabled. */
-	ws_broadcast_frame(&pkt, BIRDIEBOT_AUTH_ENABLED ? true : false);
+	/* Data broadcasts go to every connected WS client. */
+	ws_broadcast_frame(&pkt);
 	return 0;
 }
 
@@ -538,32 +451,14 @@ int ws_on_socket_open(httpd_req_t *req)
 	int sock_fd = httpd_req_to_sockfd(req);
 	ESP_LOGI(TAG, "ws open: %d", sock_fd);
 
-	birdiebot_auth_ws_open(sock_fd);
-
-	/* Security review P1-2: Host/Origin is checked even with auth disabled
-	 * (CSWSH / DNS rebinding). The HTTP 101 handshake was already sent by the
-	 * httpd, so close the session instead of serving. */
-	if (!birdiebot_auth_ws_origin_ok(req)) {
+	/* Host/Origin guard (CSWSH / DNS rebinding, browser security - always
+	 * active, not a login check). The HTTP 101 handshake was already sent by the
+	 * httpd, so close the session instead of serving on rejection. */
+	if (!web_host_guard_ws_ok(req)) {
 		ESP_LOGW(TAG, "ws handshake rejected (Host/Origin), fd %d", sock_fd);
 		httpd_sess_trigger_close(req->handle, sock_fd);
 		return 1;
 	}
-
-#if BIRDIEBOT_AUTH_ENABLED
-	switch (birdiebot_auth_ws_query_ok(req, sock_fd)) {
-	case 0:
-		ESP_LOGI(TAG, "ws fd %d authorized by ?token=", sock_fd);
-		break;
-	case -1:
-		/* Keep the connection open: the client may still authenticate with the
-		 * first-frame SYSTEM/0/AUTH and business requests get code=7 until then. */
-		ESP_LOGW(TAG, "ws fd %d presented an invalid ?token=, awaiting AUTH frame", sock_fd);
-		(void)birdiebot_auth_ws_note_auth_failure(sock_fd);
-		break;
-	default:
-		break; /* no token: pending first-frame AUTH */
-	}
-#endif /* BIRDIEBOT_AUTH_ENABLED */
 
 	return ws_add_fd(req->handle, sock_fd);
 }
@@ -580,9 +475,6 @@ static int ws_on_close(httpd_req_t *req, httpd_ws_frame_t *ws_pkt, void *msg)
 	ws_pkt->type = HTTPD_WS_TYPE_CLOSE;
 	ESP_LOGI(TAG, "ws %d closed", httpd_req_to_sockfd(req));
 	ws_rm_fd(httpd_req_to_sockfd(req));
-#if BIRDIEBOT_AUTH_ENABLED
-	birdiebot_auth_ws_close(httpd_req_to_sockfd(req));
-#endif
 	/* Use the per-fd send lock: broadcast (heartbeat / ws_router tx task) may
 	 * be sending on the same socket from another task right now. */
 	int err = ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), ws_pkt);
@@ -730,7 +622,7 @@ static inline int ws_send_frame_safe(httpd_handle_t hd, int fd, httpd_ws_frame_t
  * list and their sockets closed, mirroring the previous heartbeat behaviour.
  * Any task (heartbeat / ws_router tx task) may call this.
  */
-static void ws_broadcast_frame(httpd_ws_frame_t *pkt, bool authed_only)
+static void ws_broadcast_frame(httpd_ws_frame_t *pkt)
 {
 	uint8_t fds[CONFIG_LWIP_MAX_SOCKETS];
 	httpd_handle_t hds[CONFIG_LWIP_MAX_SOCKETS];
@@ -745,18 +637,10 @@ static void ws_broadcast_frame(httpd_ws_frame_t *pkt, bool authed_only)
 	xSemaphoreGive(ws_ctx.list_lock.mutex);
 
 	for (int i = 0; i < count; ++i) {
-		/* Auth is enabled: do not leak data broadcasts (e.g. UART RX) to
-		 * sockets that did not present the pairing token. */
-		if (authed_only && !birdiebot_auth_ws_fd_ok(fds[i])) {
-			continue;
-		}
 		int err = ws_send_frame_safe(hds[i], fds[i], pkt);
 		if (unlikely(err)) {
 			ESP_LOGE(TAG, "broadcast send err (fd %d): %s", fds[i], esp_err_to_name(err));
 			ws_rm_fd(fds[i]);
-#if BIRDIEBOT_AUTH_ENABLED
-			birdiebot_auth_ws_close(fds[i]);
-#endif
 			httpd_sess_trigger_close(hds[i], fds[i]);
 		}
 	}
@@ -771,11 +655,11 @@ static inline void ws_broadcast_heartbeat()
 		.final = 1,
 	};
 
-	ws_broadcast_frame(&ws_pkt, false);
+	ws_broadcast_frame(&ws_pkt);
 }
 
 /**
- * @brief Clean up per-socket WS/auth state after an abnormal disconnect (P2).
+ * @brief Clean up per-socket WS state after an abnormal disconnect (P2).
  *
  * Called from web_server.c close_fn (TCP RST/timeout path, where no WS CLOSE
  * frame is received) so stale client entries cannot leak into broadcasts or be
@@ -784,7 +668,6 @@ static inline void ws_broadcast_heartbeat()
 void web_ws_socket_closed(int fd)
 {
 	ws_rm_fd(fd);
-	birdiebot_auth_ws_close(fd);
 }
 
 _Noreturn

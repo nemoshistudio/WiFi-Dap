@@ -13,7 +13,7 @@ void start_webserver(void);
 int server_is_running();
 
 /**
- * @brief Clean up per-socket WS/auth state after an abnormal disconnect.
+ * @brief Clean up per-socket WS state after an abnormal disconnect.
  *
  * Implemented in uri_modules/uri_ws.c and called from the httpd close_fn
  * (TCP RST / timeout path, where no WebSocket CLOSE frame is received).

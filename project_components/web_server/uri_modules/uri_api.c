@@ -1,6 +1,6 @@
 #include "web_uri_module.h"
 #include "api_json_router.h"
-#include "birdiebot_auth.h"
+#include "web_host_guard.h"
 #include "web_error_json.h"
 #include "request_runner.h"
 #include "memory_pool.h"
@@ -65,11 +65,6 @@ static void api_err_status(api_json_req_status_e ret, const char **status,
 		*text = "Resource busy";
 		*code = 6;
 		break;
-	case API_JSON_UNAUTHORIZED:
-		*status = "401 Unauthorized";
-		*text = "unauthorized";
-		*code = 7;
-		break;
 	case API_JSON_INTERNAL_ERR:
 	case API_JSON_OK:
 	case API_JSON_ASYNC:
@@ -117,20 +112,15 @@ static esp_err_t api_post_handler(httpd_req_t *req)
 	char *buf;
 	uint32_t remaining = req->content_len;
 
-	/* Host/Origin are always checked (P1-2, CSWSH/DNS rebinding); when token
-	 * auth is enabled (docs/protocol.md §1/§5) an Authorization: Bearer
-	 * <pair_code> / ?token= is required as well. Reject before reading the
-	 * body: no module/command runs on an unauthorized request. */
-	/* TODO(security review P2): per-fd token-bucket rate limiting for /api
+	/* Browser Host/Origin guard (CSWSH / DNS rebinding; always active, this is
+	 * not a login check). Reject before reading the body so no module/command
+	 * runs for a cross-origin or DNS-rebinding request. */
+	/* TODO(security review P2): per-fd request rate limiting for /api
 	 * (e.g. 20 req/5 s) is not implemented yet; the shared 7 x 2 KiB
 	 * memory_pool already bounds the damage and the request queue returns
 	 * code=6 when exhausted. Tracked as a Wave3 hardening leftover. */
-	int auth_status = birdiebot_auth_http_check(req);
-	if (auth_status != BIRDIEBOT_AUTH_HTTP_OK) {
-		if (auth_status == BIRDIEBOT_AUTH_HTTP_FORBIDDEN) {
-			return api_send_error(req, "403 Forbidden", -1, -1, "forbidden origin", 7);
-		}
-		return api_send_error(req, "401 Unauthorized", -1, -1, "unauthorized", 7);
+	if (!web_host_guard_http_ok(req)) {
+		return api_send_error(req, "403 Forbidden", -1, -1, "forbidden origin", 5);
 	}
 
 	buf_len = memory_pool_get_buf_size() - sizeof(post_request_t);
