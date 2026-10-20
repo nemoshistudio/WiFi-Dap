@@ -30,4 +30,30 @@ menu "WiFi Dap proxy (USBIP / WebSocket-DAP)"
 
             Default: y (same transport, lower latency on a real Wi-Fi link).
 
+    config BIRDIEBOT_USBIP_TCP_CORE
+        int "Core affinity of the USBIP tcp_server task"
+        range 0 1
+        default 1
+        help
+            The DAP task must run on core 1 (dedicated-GPIO SWD bit-banging).
+            Keeping the USBIP tcp_server task on core 1 (default) minimizes the
+            hand-off latency to the DAP task; core 0 decouples the Wi-Fi/lwIP
+            handling from the DAP bit-banging CPU time.  Both placements are
+            measured in the B1 hardware window.
+
+    config BIRDIEBOT_USBIP_TCP_PRIORITY
+        int "Priority of the USBIP tcp_server task"
+        range 5 24
+        default 14
+        help
+            FreeRTOS priority of the USBIP/EL/WS-DAP TCP task.  The DAP command
+            task priority is BIRDIEBOT_DAP_TASK_PRIORITY (default 16); raising
+            this above the DAP task lets network ACKs preempt SWD bit-banging,
+            lowering the per-URB latency at some SWD throughput cost.
+
+    config BIRDIEBOT_DAP_TASK_PRIORITY
+        int "Priority of the DAP command task"
+        range 5 24
+        default 16
+
 endmenu
