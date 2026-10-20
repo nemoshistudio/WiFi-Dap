@@ -22,6 +22,18 @@
 
 #include <sdkconfig.h>
 
+#if defined(CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3)
+#define BIRDIEBOT_BOARD_STR "BOARD_ZXR_DAP_S3"
+#elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_S3)
+#define BIRDIEBOT_BOARD_STR "BOARD_GENERIC_S3"
+#elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_C3)
+#define BIRDIEBOT_BOARD_STR "BOARD_GENERIC_C3"
+#elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_ESP32)
+#define BIRDIEBOT_BOARD_STR "BOARD_GENERIC_ESP32"
+#else
+#define BIRDIEBOT_BOARD_STR "BOARD_UNKNOWN"
+#endif
+
 #include <assert.h>
 #include <esp_err.h>
 #include <esp_log.h>
@@ -84,6 +96,16 @@ static void ota_confirm_schedule(void)
 
 void app_main()
 {
+	/* docs/versioning.md §2.4: first log line, before WiFi/mDNS can flood it. */
+	{
+		const esp_app_desc_t *app = esp_app_get_description();
+		ESP_LOGI("BIRDIEBOT", "WiFi Dap fw=%s proto=%d board=%s idf=%s",
+		         app ? app->version : "unknown",
+		         BIRDIEBOT_PROTOCOL_VERSION,
+		         BIRDIEBOT_BOARD_STR,
+		         esp_get_idf_version());
+	}
+
 	assert(memory_pool_init() == 0); // static buffer
 	assert(request_runner_init() == 0);
 	wt_storage_init();
@@ -95,16 +117,6 @@ void app_main()
     DAP_Setup();
 
 	global_module_init();
-
-	/* docs/versioning.md §2.4: single startup line for support/log triage. */
-	{
-		const esp_app_desc_t *app = esp_app_get_description();
-		ESP_LOGI("APP", "fw=%s proto=%d board=%s idf=%s",
-		         app ? app->version : "unknown",
-		         BIRDIEBOT_PROTOCOL_VERSION,
-		         birdiebot_board_id,
-		         esp_get_idf_version());
-	}
 
 	start_webserver();
 

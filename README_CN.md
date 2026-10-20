@@ -294,11 +294,11 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 - **默认无鉴权**：HTTP **80**（`/`、`/ws`、`/api`）、TCP **3240**（USBIP / elaphureLink / WS-DAP）、TCP **1346**（UART TCP 桥）默认全部无鉴权，同一网络内即可完全控制设备与目标 MCU。
 - **默认 AP 口令 `12345678`**：物理邻近即可加入设备热点，进而获得上述全部能力；首次使用必须修改。
-- **鉴权 token 强度/传输/存储（P1-4）**：早期 pairing token 仅 **32-bit** 且无失败限速；Web 侧已加强为 **128-bit token + AUTH 失败限速**（web-dev；N5）。token 仍以明文经 HTTP/WS 传输，明文保存于 NVS（未启用 NVS 加密）与浏览器 `localStorage`，并会打印到串口日志——作为工作室内网可接受风险保留。
+- **鉴权 token 传输/存储（P1-4）**：pairing token 现为 **128-bit（32 hex）+ AUTH 失败限速**（N5）；仍以明文经 HTTP/WS 传输、明文保存于 NVS（未启用 NVS 加密）与浏览器 `localStorage`，并会打印到串口日志——作为工作室内网可接受风险保留。
 - **Web 鉴权只覆盖 80**：开启 `BIRDIEBOT_WEB_AUTH` 后，3240/1346 仍不受 token 保护，需显式关闭（Kconfig）或通过网络隔离。
 - **OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot；默认无鉴权（或 token 持有者）可写入任意有效镜像；`POST /api/ota/upload` 合入后风险等级提高，需按审查报告 §4.3 复审。
 
-> 另：默认 `auth=n` 时服务端不校验 Origin/Host，浏览器恶意页面可发起 CSWSH / DNS-rebinding（见审查报告 §1.2）。部署加固清单见 [docs/security.md](docs/security.md)。
+> 注：Origin/Host 校验现已**始终启用**（与 `auth` 解耦；默认仅接受 IP-literal Host + 同源 Origin），已关闭审查报告 §1.2 的 CSWSH/DNS-rebinding 风险。部署加固清单见 [docs/security.md](docs/security.md)。
 
 **Accepted risks (studio LAN)**：用户已决定，以下风险在**可信实验室内网**部署下**接受、不修复**：P1-1 默认无鉴权（80/3240/1346）与默认 AP 口令、P1-3 Web 鉴权不覆盖 3240/1346、P1-4 token 明文传输/存储、条件性 P0（`auth=n` 时 OTA 上传端点无鉴权）；N3/N4 与 P1-1/P1-3 同源，按同一决策接受。使用约束与 N1–N9 修复状态见 [docs/security.md#accepted-risks-studio-lan](docs/security.md#accepted-risks-studio-lan)。**勿把设备暴露到公网或不可信 Wi-Fi。**
 
