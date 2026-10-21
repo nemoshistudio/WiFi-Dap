@@ -376,6 +376,10 @@ interface Ctx {
     sections: DwarfSections
     units: Unit[]
     dies: Map<number, Die>
+    /** 聚合类型定义索引（qualified/short name -> DIEs，用于补全跨 CU 的前向声明）。 */
+    aggregateDefs?: Map<string, Die[]>
+    /** 正在补全的声明 DIE offset，防止 A<->B 互相补全导致栈溢出。 */
+    completing?: Set<number>
     warning: (message: string) => void
     /** Itanium C++ 反混淆（由 elfSymbols 注入，避免循环依赖）。 */
     demangle?: (mangled: string) => string | null
@@ -1354,6 +1358,54 @@ function resolveTypeDie(ctx: Ctx, die: Die, depth: number, visited: Set<number>)
                     })
                 }
             }
+            const completing = ctx.completing ?? (ctx.completing = new Set<number>())
+            const bareName = attrString(ctx, die.unit, die.attrs.get(AT_NAME))
+            const declared = numericAttr(die, AT_DECLARATION) === 1
+            if (
+                members.length === 0 &&
+                declared &&
+                bareName &&
+                ctx.aggregateDefs &&
+                !completing.has(die.offset)
+            ) {
+                // 只补全“命名的前向声明”（跨 CU 常见）；匿名空结构不做补全，
+                // 否则会在大 ELF 上触发组合爆炸。
+                const candidateSet = new Set<Die>()
+                for (const key of [name || '', bareName]) {
+                    for (const candidate of (ctx.aggregateDefs.get(key) ?? []).slice(0, 8)) {
+                        candidateSet.add(candidate)
+                    }
+                }
+                // 同名 DIE 可能包含前向声明/局部特化/嵌套定义；优先选成员最多、
+                // 字节大小最大的完整定义，避免补全成同名的小声明（例如只含 rot_mat
+                // 的 Rotation 片段）。
+                const ordered = [...candidateSet]
+                    .filter((candidate) => candidate.offset !== die.offset)
+                    .sort((left, right) => {
+                        const byMembers = right.children.length - left.children.length
+                        if (byMembers !== 0) return byMembers
+                        const leftSize = numericAttr(left, AT_BYTE_SIZE) ?? 0
+                        const rightSize = numericAttr(right, AT_BYTE_SIZE) ?? 0
+                        return rightSize - leftSize
+                    })
+                completing.add(die.offset)
+                try {
+                    for (const candidate of ordered) {
+                        const completed = resolveTypeDie(ctx, candidate, depth + 1, visited)
+                        if (completed.kind === 'struct' || completed.kind === 'union') {
+                            if ((completed.members?.length ?? 0) > 0) {
+                                return {
+                                    ...completed,
+                                    display: name || completed.display,
+                                    size: size || completed.size,
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    completing.delete(die.offset)
+                }
+            }
             return {
                 display: name || (die.tag === TAG_UNION_TYPE ? '(anonymous union)' : '(anonymous struct)'),
                 size,
@@ -1945,6 +1997,30 @@ export function extractDwarfVariables(
         offset = header.end
     }
     ctx.units = units
+
+    // 跨 CU 引用经常先命中前向声明（DW_AT_declaration，无成员）；按名字/index 建
+    // 聚合类型定义表，解析声明时补全为完整定义（否则 target_debug_handle->bmi088_
+    // 这类对象只能展开到成员本身，无法继续展开 accel/gyro）。
+    const aggregateDefs = new Map<string, Die[]>()
+    for (const unit of units) {
+        for (const die of unit.dies) {
+            if (
+                die.tag !== TAG_STRUCTURE_TYPE &&
+                die.tag !== TAG_CLASS_TYPE &&
+                die.tag !== TAG_UNION_TYPE
+            ) continue
+            if (die.children.length === 0) continue
+            const qualified = qualifiedDieName(ctx, die)
+            const bare = attrString(ctx, die.unit, die.attrs.get(AT_NAME))
+            for (const key of new Set([qualified, bare])) {
+                if (!key) continue
+                const list = aggregateDefs.get(key)
+                if (list) list.push(die)
+                else aggregateDefs.set(key, [die])
+            }
+        }
+    }
+    ctx.aggregateDefs = aggregateDefs
 
     const variables: VariableNode[] = []
     let dwarfVariables = 0
