@@ -12,7 +12,7 @@
  *   - 上述页面级报告项一并转为失败，供页面整改完成后接入构建。
  *
  * 可选：`--baseline=path/to/i18n-baseline.json`
- *   - 默认读取 web/scripts/i18n-baseline.json（不存在则使用脚本内嵌的 180 key 基线）。
+ *   - 默认读取 web/scripts/i18n-baseline.json（不存在则使用脚本内嵌的 148 key 基线）。
  *
  * 退出码：0 = 通过；1 = 契约检查失败；2 = 无法解析 locale 文件。
  */
@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 335
-const EXPECTED_BASELINE = 167
-const EXPECTED_ADDED = 168
+const EXPECTED_TOTAL = 312
+const EXPECTED_BASELINE = 148
+const EXPECTED_ADDED = 164
 
 const errors = []
 const warnings = []
@@ -58,7 +58,7 @@ const BASELINE_KEYS = [
     ]),
     ...keys('common', ['debuggerConnected', 'ok']),
     ...keys('ws', ['disconnected', 'connected', 'connecting']),
-    ...keys('page', ['home', 'wifi', 'about', 'uart', 'widget', 'close', 'update', 'fullscreen', 'windowed']),
+    ...keys('page', ['home', 'wifi', 'about', 'uart', 'close', 'update', 'fullscreen', 'windowed']),
     ...keys('wifi', [
         'settings', 'setFailed', 'setSuccess', 'connection', 'scanning', 'scan', 'scanDone',
         'warnWifiName', 'password', 'connectInfoHTML', 'connect', 'mode', 'save', 'station',
@@ -83,11 +83,6 @@ const BASELINE_KEYS = [
         'layout', 'landscape', 'portrait', 'responsive', 'configPannel', 'displayPannel',
         'macroPannel', 'autoScrollToBottom', 'clearScreen', 'autoUpdate',
         'tempDisplayTooltip', 'loopSend', 'loopSendTooltip', 'sendFormat', 'cachedFrame', 'format',
-    ]),
-    ...keys('widget', [
-        'editGrid', 'editCell', 'loopWidget', 'loopWidgetDesc', 'addGrid', 'dataViewer',
-        'dataViewerDesc', 'exportSettings', 'importSettings', 'resetToDefault', 'gridItemName',
-        'dropHere', 'run', 'loop', 'delay', 'addCommand', 'loopInterval', 'uartViewOnce',
     ]),
     ...keys('navbar', ['navigationSidebar', 'getSomeFries']),
 ]
@@ -121,7 +116,6 @@ const ADDED_KEYS = [
     ...keys('ota.status', ['idle', 'receiving', 'verifying', 'ready', 'applying', 'error']),
     ...keys('about', ['hardwareVersion', 'manufactureDate', 'board', 'copyInfo']),
     ...keys('system', ['reboot', 'rebooting']),
-    ...keys('widget', ['commandLabel', 'commandValue', 'responsePrefix', 'resetConfirm']),
     ...keys('uart', [
         'instance', 'connectFailed', 'overflowWarning', 'binaryError', 'remoteUnsupported',
         'invalidHex', 'hexMode', 'hexdumpMode', 'highlightRx', 'highlightTx',
@@ -390,7 +384,7 @@ if (fs.existsSync(baselineFile)) {
 } else if (baselineArg) {
     errors.push(`--baseline 指定的文件不存在: ${baselineFile}`)
 } else {
-    notes.push('未提供 web/scripts/i18n-baseline.json，使用 check-i18n.mjs 内嵌的 180 key 基线')
+    notes.push('未提供 web/scripts/i18n-baseline.json，使用 check-i18n.mjs 内嵌的 148 key 基线')
 }
 
 // ---------------------------------------------------------------------------

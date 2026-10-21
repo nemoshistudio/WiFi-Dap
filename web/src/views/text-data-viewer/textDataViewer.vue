@@ -218,7 +218,6 @@ import TextDataConfig from "@/views/text-data-viewer/textDataConfig.vue";
 import {debouncedWatch} from "@vueuse/core";
 import {globalNotify} from "@/composables/notification";
 import {translate} from "@/locales";
-import type { DraggableComponent } from '@/types/grid'
 
 defineOptions({
   name: 'TextDataViewer',
@@ -233,7 +232,6 @@ withDefaults(defineProps<{
   showDataConfig: true,
 })
 
-const modelValue = defineModel<DraggableComponent>({ required: false })
 
 
 const count = ref(0);

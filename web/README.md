@@ -4,24 +4,22 @@ This is the web user interface for the [wireless-esp32-tools](https://github.com
 
 The `wireless-esp32-tools` project provides CMSIS-DAP compatible wireless debugging tools for various ESP chips, turning them into powerful wireless debug probes.
 
+> The former Widget / network-editor dashboard page was removed on 2026-10-21; the UART page (terminal, data viewer, macros, loop send) remains and is the primary data-path UI.
+
 ## About This Web Interface
 
 This web application provides a user-friendly dashboard to manage and interact with your `wireless-esp32-tools` device. It is built with Vue.js 3, Vite, and Element Plus, and is designed to be hosted directly on the ESP32.
 
-From this interface, you can build a customized dashboard to monitor and interact with your target device.
+From this interface you can monitor and interact with your target device.
 
 ### Key Features
 
 *   **Wi-Fi Configuration**: Easily configure Wi-Fi settings including station mode (STA) and access point mode (AP), with support for static/dynamic IP addressing and DNS settings.
-*   **Dynamic Widget Dashboard**: A fully flexible grid-based panel.
 *   **Real-time Data Visualization**: Includes a UART data viewer for monitoring serial communication from your target device.
 *   **Embedded-First Design**: Deploy in single .html file to reduce the number of http connection.
 *   **Designed to be usable on small screen**: Responsive layout that adapts to mobile devices and tablets, with touch-friendly controls and optimized UI elements for small displays.
 
 ## Screenshots
-
-**Widget Panel**
-![Widget Panel](assets/widgetPannel.png)
 
 **UART Data Viewer**
 ![UART Data Viewer](assets/uart.png)

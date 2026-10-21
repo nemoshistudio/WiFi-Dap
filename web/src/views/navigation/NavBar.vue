@@ -219,9 +219,6 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
       name: translate("page.uart"),
       href: "/uart",
     }, {
-      name: translate("page.widget"),
-      href: "/widget",
-    }, {
       name: translate("page.about"),
       href: "/about",
     },

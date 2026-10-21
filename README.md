@@ -34,7 +34,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 
 - **What it is**: an ESP32-S3 (8 MB flash) turned into a wireless CMSIS-DAP probe plus a self-hosted Web dashboard.
 - **Debug transports**: USBIP/WinUSB (CMSIS-DAP v2), elaphureLink (driver-free Keil), and WebSocket-DAP (browser tools) — all on **TCP 3240**.
-- **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**, covering Wi-Fi setup, UART terminal, widget dashboard, OTA upload, **Web-side STM32 target flashing**, version info and credits.
+- **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**, covering Wi-Fi setup, UART terminal, OTA upload, **Web-side STM32 target flashing**, version info and credits.
 - **Release target**: **ESP32-S3 8 MB** (default board `BOARD_ZXR_DAP_S3`, dual OTA slots). ESP32-C3 / ESP32 (4 MB) are **compile-only**: no OTA, not hardware-validated.
 - **Removed**: ESP8266 support, experimental KCP transport, corsacOTA (port 3241).
 
@@ -53,7 +53,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | Toolchains | OpenOCD / pyOCD / Keil | ✅ | Via CMSIS-DAP v2; **use OpenOCD master for 2.4× faster reads** (see [docs/openocd-master.md](docs/openocd-master.md)) |
 | Driver-free | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil plugin or OpenOCD, TCP **3240**, no USBIP driver required |
 | Browser transport | WebSocket-DAP (legacy) | ✅ (can disable) | TCP **3240**, binary frames = CMSIS-DAP command packets; `CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
-| Web UI | Embedded dashboard (zh/en) | ✅ | HTTP **80**, single SharedWorker WS connection; Wi-Fi / UART / Widget / Update / About / Feedback |
+| Web UI | Embedded dashboard (zh/en) | ✅ | HTTP **80**, single SharedWorker WS connection; Wi-Fi / UART / Update / About / Feedback |
 | Wi-Fi | AP + STA (Smart APSTA) | ✅ | Default AP `WiFi-Dap-XXXX` / `12345678`; AP off 30 s after STA connects, on 10 s after disconnect |
 | Wi-Fi | Multi-credential memory | ✅ | Up to 8 networks, auto-save + rotation on boot/disconnect ([contract](docs/wifi-credential-memory.md)) |
 | Serial | Web UART terminal + WS binary | ✅ | 115200-8N1 default; data bits / parity / stop bits / flow control configurable |
@@ -206,14 +206,14 @@ Entry point: `http://<device-ip>/` (defaults to `/#/uart`). The frontend talks t
 |---|---|---|
 | **UART** | `/#/uart` | Serial terminal (TX/RX) and baud/data-bits/parity/stop-bits/flow control; traffic uses WS binary `RAW`/`RAW_BROADCAST` frames |
 | **Wi-Fi** | `/#/wifi` | STA scan/connect, saved networks (up to 8, add/delete, auto-save), AP name/password, static IP/DNS, AP/STA mode and Smart APSTA delays |
-| **Widget** | `/#/widget` | Draggable/resizable grid dashboard with widgets (UART/AT command, etc.); layout stored in the browser |
 | **Update** | `/#/update` | Browser-local OTA: pick an app `.bin`, live progress, verification and rollback (S3 8 MB only; 4 MB targets show "unsupported") |
 | **About** | `/#/about` | Firmware / protocol / Web UI / hardware versions, serial number, IDF version |
 | **Feedback** | `/#/feedback` | Feedback entry points (author/project pages) |
 
-- Languages: Chinese / English (314 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
+- Languages: Chinese / English (312 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
 - Security: no login/auth (removed by design); the Web UI is usable from the trusted LAN only (see [§9](#9-security-defaults--hardening)).
-- Screenshots: [Widget panel](web/assets/widgetPannel.png) · [UART terminal](web/assets/uart.png)
+- Screenshots: [UART terminal](web/assets/uart.png)
+- Note: the former Widget / `#/widget` dashboard was removed on 2026-10-21 (the UART page keeps the data viewer, macros and its full feature set).
 
 ### OTA (ESP32-S3 8 MB only)
 
@@ -358,7 +358,7 @@ Three sources (details and per-file mapping: [docs/merge-map.md](docs/merge-map.
 What this repository (WiFi Dap) changes:
 
 - Upgraded to **ESP-IDF 5.2.1** and componentized (`components/` + `project_components/`); board pins abstracted into `components/board` (`BOARD_*` + Kconfig, no per-target pin branches elsewhere).
-- Added the **Web UI + JSON/WS protocol v1** ([docs/protocol.md](docs/protocol.md)), multi-credential Wi-Fi memory, browser-local OTA (8 MB dual slot + rollback), optional Web auth, SSDP/mDNS, coredump, and the UART service/DataFlow/Widget data plane.
+- Added the **Web UI + JSON/WS protocol v1** ([docs/protocol.md](docs/protocol.md)), multi-credential Wi-Fi memory, browser-local OTA (8 MB dual slot + rollback), optional Web auth, SSDP/mDNS, coredump, and the UART service/DataFlow data plane.
 - Kept and hardened the upstream DAP proxy layer (USBIP / elaphureLink / legacy WebSocket-DAP): ring-buffer lifecycle owned by the DAP task, socket fd leak fixes, error-path handling, etc.
 - Changed defaults: SWD clock 1 MHz, UART bridge 1346/115200, AP SSID `WiFi-Dap-XXXX`; removed ESP8266/KCP/corsacOTA (3241).
 - Default board `BOARD_ZXR_DAP_S3`; C3/ESP32 compile-only.

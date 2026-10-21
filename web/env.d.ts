@@ -22,7 +22,6 @@ interface ImportMetaEnv {
     readonly VITE_ENABLE_OTA?: string
     /** 构建期功能裁剪开关，缺省启用 */
     readonly VITE_ENABLE_UART?: string
-    readonly VITE_ENABLE_WIDGET?: string
     readonly VITE_ENABLE_DATA_FLOW?: string
 }
 

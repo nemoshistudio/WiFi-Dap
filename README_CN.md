@@ -34,7 +34,7 @@
 
 - **定位**：把一块 ESP32-S3（8 MB Flash）变成无线 CMSIS-DAP 调试探针 + 自带 Web UI 的调试小盒子。
 - **调试链路**：USBIP/WinUSB（CMSIS-DAP v2）、elaphureLink（Keil 免驱）、WebSocket-DAP（浏览器工具）三种传输，均走 **TCP 3240**。
-- **管理链路**：内嵌单页 Web UI（Vue 3 + Vite 构建，gzip 后嵌入固件），通过 **HTTP 80** 提供 Wi-Fi 配置、UART 终端、Widget 面板、OTA 上传、版本信息与反馈页。
+- **管理链路**：内嵌单页 Web UI（Vue 3 + Vite 构建，gzip 后嵌入固件），通过 **HTTP 80** 提供 Wi-Fi 配置、UART 终端、OTA 上传、版本信息与反馈页。
 - **发布目标**：**ESP32-S3 8 MB**（默认板 `BOARD_ZXR_DAP_S3`，双 OTA 槽）。ESP32-C3 / ESP32（4 MB）仅做**编译验收**，不支持 OTA、未做硬件验证。
 - **已移除**：ESP8266 支持、KCP 实验传输、corsacOTA（3241 端口）。
 
@@ -51,7 +51,7 @@
 | 工具链 | OpenOCD / pyOCD / Keil | ✅ | 通过 CMSIS-DAP v2 使用（上游能力，DAP 核心未改协议） |
 | 免驱传输 | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil 插件或 OpenOCD 直连，TCP **3240**，无需 USBIP 驱动 |
 | 浏览器传输 | WebSocket-DAP（legacy） | ✅（可关） | TCP **3240**，二进制帧 = CMSIS-DAP 命令包；`CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
-| Web UI | 内嵌管理面板（zh/en） | ✅ | HTTP **80**，SharedWorker 单 WS 连接；Wi-Fi / UART / Widget / Update / About / Feedback |
+| Web UI | 内嵌管理面板（zh/en） | ✅ | HTTP **80**，SharedWorker 单 WS 连接；Wi-Fi / UART / Update / About / Feedback |
 | Wi-Fi | AP + STA（Smart APSTA） | ✅ | 默认 AP `WiFi-Dap-XXXX` / `12345678`；STA 连上 30 s 后关 AP、断开 10 s 后重开 |
 | Wi-Fi | 多凭据记忆 | ✅ | 最多 8 个网络，自动记忆 + 上电/断线轮换（[契约](docs/wifi-credential-memory.md)） |
 | 串口 | Web UART 终端 + WS 二进制 | ✅ | 默认 115200-8N1，可配数据位/校验/停止位/流控 |
@@ -204,14 +204,14 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 |---|---|---|
 | **UART** | `/#/uart` | 串口终端（TX/RX）、波特率/数据位/校验/停止位/流控配置；数据走 WS 二进制 `RAW`/`RAW_BROADCAST` 帧 |
 | **Wi-Fi** | `/#/wifi` | STA 扫描/连接、已保存网络（最多 8 个，可增删/自动保存）、AP 名称与口令、静态 IP/DNS、AP/STA 模式与 Smart APSTA 延迟 |
-| **Widget** | `/#/widget` | 可拖拽/缩放的网格仪表盘，内置 UART/AT 命令等小组件；布局保存在浏览器本地 |
 | **Update** | `/#/update` | 浏览器本地 OTA：选择 app `.bin` 上传、实时进度、校验与回滚（仅 S3 8 MB；4 MB 目标显示不支持） |
 | **About** | `/#/about` | 固件版本 / 协议版本 / Web UI 版本 / 硬件版本 / SN / IDF 版本等信息 |
 | **Feedback** | `/#/feedback` | 反馈入口（作者主页/项目主页链接） |
 
-- 语言：中文 / English 可切换（i18n 314 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
+- 语言：中文 / English 可切换（i18n 312 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
 - 安全：按需求**无登录/鉴权**；Web UI 仅可在可信局域网使用（见 [§9](#9-安全默认与加固)）。
-- 图片预览：[Widget 面板](web/assets/widgetPannel.png) · [UART 终端](web/assets/uart.png)
+- 图片预览：[UART 终端](web/assets/uart.png)
+- 说明：原 Widget / `#/widget` 仪表盘页面已于 2026-10-21 移除；UART 页面保留数据显示器、宏命令等全部功能。
 
 ### OTA（仅 ESP32-S3 8 MB）
 
@@ -356,7 +356,7 @@ USBIP 与 elaphureLink 没有单独开关（3240 端口保持监听）；如不�
 本仓库（WiFi Dap）的主要变更：
 
 - 升级到 **ESP-IDF 5.2.1**，按组件拆分（`components/` + `project_components/`），板级引脚抽象为 `components/board`（`BOARD_*` + Kconfig，去掉按 target 写死的引脚分支）。
-- 新增 **Web UI + JSON/WS 协议 v1**（[docs/protocol.md](docs/protocol.md)）、Wi-Fi 多凭据记忆、浏览器本地 OTA（8 MB 双槽 + 回滚）、可选 Web 鉴权、SSDP/mDNS、coredump、UART service/DataFlow/Widget 数据面。
+- 新增 **Web UI + JSON/WS 协议 v1**（[docs/protocol.md](docs/protocol.md)）、Wi-Fi 多凭据记忆、浏览器本地 OTA（8 MB 双槽 + 回滚）、可选 Web 鉴权、SSDP/mDNS、coredump、UART service/DataFlow 数据面。
 - 保留并修复上游 DAP 代理层（USBIP / elaphureLink / legacy WebSocket-DAP）：DAP ring buffer 生命周期归 DAP 任务、socket fd 泄漏修复、错误路径处理等。
 - 默认值调整：SWD 默认时钟 1 MHz、UART 桥 1346/115200、AP SSID `WiFi-Dap-XXXX`、移除 ESP8266/KCP/corsacOTA(3241)。
 - 默认板 `BOARD_ZXR_DAP_S3`；C3/ESP32 仅编译验收。

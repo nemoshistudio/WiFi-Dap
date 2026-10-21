@@ -24,7 +24,3 @@ export function isDataFlowEnabled() {
 export function isUartEnabled() {
     return import.meta.env.VITE_ENABLE_UART !== 'false';
 }
-
-export function isWidgetEnabled() {
-    return import.meta.env.VITE_ENABLE_WIDGET !== 'false';
-}

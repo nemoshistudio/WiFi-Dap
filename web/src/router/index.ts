@@ -5,9 +5,8 @@ import About from '@/views/About.vue'
 import Uart from '@/views/Uart.vue'
 import Page404 from '@/views/404.vue'
 import Update from '@/views/Update.vue'
-import WidgetPannel from '@/views/WidgetPannel.vue'
 import {translate} from "@/locales";
-import {isOTAEnabled, isWidgetEnabled} from "@/composables/buildMode";
+import {isOTAEnabled} from "@/composables/buildMode";
 import {reactive, watch} from "vue";
 import {getLang} from "@/i18n";
 import {BRAND_NAME} from "@/constants/brand";
@@ -35,8 +34,6 @@ function translateRouteTitle(name: unknown): string {
             return translate('page.wifi');
         case 'uart':
             return translate('page.uart');
-        case 'widget':
-            return translate('page.widget');
         case 'about':
             return translate('page.about');
         case 'targetFlash':
@@ -92,12 +89,6 @@ const router = createRouter({
             meta: { titleKey: 'target.title' },
             name: 'targetFlash',
             component: TargetFlash,
-        }, {
-            path: '/widget:ext(.*)',
-            meta: { titleKey: 'page.widget' },
-            name: 'widget',
-            // Widget 是纯 UI 功能，构建期可用 VITE_ENABLE_WIDGET=false 裁剪。
-            component: isWidgetEnabled() ? WidgetPannel : Page404,
         }, {
             path: '/about:ext(.*)',
             meta: { titleKey: 'page.about' },

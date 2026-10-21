@@ -15,8 +15,7 @@ import {
   isDataFlowEnabled,
   isDevMode,
   isOTAEnabled,
-  isUartEnabled,
-  isWidgetEnabled
+  isUartEnabled
 } from '@/composables/buildMode'
 import { useSystemModule } from '@/composables/useSystemModule'
 import { useDataFlowModule } from '@/composables/useDataFlowModule'
@@ -57,8 +56,7 @@ function registerModules() {
   if (isDataFlowEnabled()) {
     useDataFlowModule()
   }
-  // The widget panel has no JSON module of its own; it consumes UART data.
-  if (isUartEnabled() || isWidgetEnabled()) {
+  if (isUartEnabled()) {
     useUartModule()
   }
   if (isOTAEnabled()) {
