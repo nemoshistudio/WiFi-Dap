@@ -1,0 +1,291 @@
+diff --git a/src/jtag/drivers/cmsis_dap.c b/src/jtag/drivers/cmsis_dap.c
+index 07726b6..f3588c3 100644
+--- a/src/jtag/drivers/cmsis_dap.c
++++ b/src/jtag/drivers/cmsis_dap.c
+@@ -261,6 +261,13 @@ static uint8_t output_pins = SWJ_PIN_SRST | SWJ_PIN_TRST;
+ 
+ static struct cmsis_dap *cmsis_dap_handle;
+ 
++/* Runtime-tunable pipeline parameters. They can be set from the config stage
++ * (before OpenOCD init) via the 'cmsis-dap pending_requests' and
++ * 'cmsis-dap eager_reads' commands, which makes A/B testing on the same binary
++ * possible. Defaults implement the optimized wireless-DAP behavior. */
++static unsigned int pending_requests_override = MAX_PENDING_REQUESTS;
++static bool eager_reads_override = true;
++
+ 
+ static int cmsis_dap_quit(void);
+ 
+@@ -274,6 +281,9 @@ static int cmsis_dap_open(void)
+ 		return ERROR_FAIL;
+ 	}
+ 
++	dap->max_pending_requests = pending_requests_override;
++	dap->eager_reads = eager_reads_override;
++
+ 	int retval = ERROR_FAIL;
+ 	if (cmsis_dap_backend >= 0) {
+ 		/* Use forced backend */
+@@ -1454,7 +1464,7 @@ static int cmsis_dap_init(void)
+ 	if (data[0] == 1) { /* byte */
+ 		unsigned int pkt_cnt = data[1];
+ 		if (pkt_cnt > 1)
+-			cmsis_dap_handle->packet_count = MIN(MAX_PENDING_REQUESTS, pkt_cnt);
++			cmsis_dap_handle->packet_count = MIN(cmsis_dap_handle->max_pending_requests, pkt_cnt);
+ 
+ 		LOG_DEBUG("CMSIS-DAP: Packet Count = %u", pkt_cnt);
+ 	}
+@@ -2359,6 +2369,42 @@ COMMAND_HANDLER(cmsis_dap_handle_quirk_command)
+ 	return ERROR_OK;
+ }
+ 
++COMMAND_HANDLER(cmsis_dap_handle_pending_requests_command)
++{
++	if (CMD_ARGC > 1)
++		return ERROR_COMMAND_SYNTAX_ERROR;
++
++	if (CMD_ARGC == 1) {
++		unsigned int depth;
++		COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], depth);
++		if (depth < 1 || depth > MAX_PENDING_REQUESTS) {
++			command_print(CMD, "pending request depth must be in 1..%u", MAX_PENDING_REQUESTS);
++			return ERROR_COMMAND_ARGUMENT_INVALID;
++		}
++		pending_requests_override = depth;
++		return ERROR_OK;
++	}
++
++	command_print(CMD, "%u", pending_requests_override);
++
++	return ERROR_OK;
++}
++
++COMMAND_HANDLER(cmsis_dap_handle_eager_reads_command)
++{
++	if (CMD_ARGC > 1)
++		return ERROR_COMMAND_SYNTAX_ERROR;
++
++	if (CMD_ARGC == 1) {
++		COMMAND_PARSE_ENABLE(CMD_ARGV[0], eager_reads_override);
++		return ERROR_OK;
++	}
++
++	command_print(CMD, "%s", eager_reads_override ? "enabled" : "disabled");
++
++	return ERROR_OK;
++}
++
+ static const struct command_registration cmsis_dap_subcommand_handlers[] = {
+ 	{
+ 		.name = "info",
+@@ -2388,6 +2434,26 @@ static const struct command_registration cmsis_dap_subcommand_handlers[] = {
+ 		.help = "allow expensive workarounds of known adapter quirks.",
+ 		.usage = "[enable | disable]",
+ 	},
++	{
++		.name = "pending_requests",
++		.handler = &cmsis_dap_handle_pending_requests_command,
++		.mode = COMMAND_CONFIG,
++		.help = "set the depth of the pending-command FIFO (in-flight DAP "
++			"transfers before the first response is read). Deeper values hide "
++			"round-trip latency on wireless adapters; the adapter must support "
++			"the same number of buffered commands.",
++		.usage = "[depth]",
++	},
++	{
++		.name = "eager_reads",
++		.handler = &cmsis_dap_handle_eager_reads_command,
++		.mode = COMMAND_CONFIG,
++		.help = "submit the response (IN) transfer right after the command "
++			"(OUT) transfer, so the adapter can return the response without "
++			"waiting for the host to ask first. Hides one network leg per "
++			"transaction on wireless adapters.",
++		.usage = "[enable | disable]",
++	},
+ #if BUILD_CMSIS_DAP_USB
+ 	{
+ 		.name = "usb",
+diff --git a/src/jtag/drivers/cmsis_dap.h b/src/jtag/drivers/cmsis_dap.h
+index 7ad6fab..81bc241 100644
+--- a/src/jtag/drivers/cmsis_dap.h
++++ b/src/jtag/drivers/cmsis_dap.h
+@@ -20,9 +20,17 @@ struct pending_transfer_result {
+ 	void *buffer;
+ };
+ 
+-/* Up to MIN(packet_count, MAX_PENDING_REQUESTS) requests may be issued
+- * until the first response arrives */
+-#define MAX_PENDING_REQUESTS 4
++/* Up to MIN(packet_count, max_pending_requests) requests may be issued
++ * until the first response arrives.
++ *
++ * MAX_PENDING_REQUESTS is the compile-time capacity; the effective depth is
++ * runtime tunable via the 'cmsis_dap pending_requests' config command and
++ * defaults to MAX_PENDING_REQUESTS. Depth 4 is the upstream default; wireless
++ * CMSIS-DAP bridges (USBIP over Wi-Fi) benefit from a deeper in-flight window
++ * because every extra round trip costs milliseconds. The Wi-Fi DAP firmware
++ * (birdiebot dap_proxy USBIP pipeline) supports up to 8 outstanding response
++ * URBs (USBIP_PL_MAX_IN = 8), so 8 is the highest safe value there. */
++#define MAX_PENDING_REQUESTS 8
+ 
+ struct pending_request_block {
+ 	struct pending_transfer_result *transfers;
+@@ -58,6 +66,13 @@ struct cmsis_dap {
+ 	unsigned int pending_fifo_put_idx, pending_fifo_get_idx;
+ 	unsigned int pending_fifo_block_count;
+ 
++	/* Runtime tuning (config-command overridable), see MAX_PENDING_REQUESTS */
++	unsigned int max_pending_requests;
++	/* Submit the response (IN) URB right after the matching command (OUT)
++	 * URB instead of only when its response is needed. Hides one host->device
++	 * network leg per transaction on high-latency links. */
++	bool eager_reads;
++
+ 	uint16_t caps;
+ 
+ 	uint32_t swo_buf_sz;
+diff --git a/src/jtag/drivers/cmsis_dap_usb_bulk.c b/src/jtag/drivers/cmsis_dap_usb_bulk.c
+index ac684f4..c76b44d 100644
+--- a/src/jtag/drivers/cmsis_dap_usb_bulk.c
++++ b/src/jtag/drivers/cmsis_dap_usb_bulk.c
+@@ -39,6 +39,11 @@ enum {
+ 	CMSIS_DAP_TRANSFER_COMPLETED
+ };
+ 
++/* Timeout for a response transfer that was armed before its response was
++ * needed ('cmsis-dap eager_reads'). Generous on purpose: the transfer may sit
++ * in the host USB stack / adapter until the command has been executed. */
++#define CMSIS_DAP_EAGER_READ_TIMEOUT_MS 6000
++
+ struct cmsis_dap_bulk_transfer {
+ 	struct libusb_transfer *transfer;
+ 	uint8_t *buffer;
+@@ -414,20 +419,36 @@ static int cmsis_dap_usb_open(struct cmsis_dap *dap, const uint16_t vids[], cons
+ static void cmsis_dap_usb_close(struct cmsis_dap *dap)
+ {
+ 	for (unsigned int i = 0; i < MAX_PENDING_REQUESTS; i++) {
+-		if (dap->bdata->command_transfers[i].status == CMSIS_DAP_TRANSFER_PENDING) {
+-			LOG_DEBUG("busy command USB transfer at %u", dap->pending_fifo_put_idx);
+-			struct timeval tv = {
+-				.tv_sec = 1,
+-				.tv_usec = 1000
+-			};
+-			/* Complete pending commands */
+-			int res = libusb_handle_events_timeout_completed(dap->bdata->usb_ctx, &tv, NULL);
+-			if (res == 0)
+-				libusb_free_transfer(dap->bdata->command_transfers[i].transfer);
+-		} else {
+-			libusb_free_transfer(dap->bdata->command_transfers[i].transfer);
++		struct cmsis_dap_bulk_transfer *cmd = &dap->bdata->command_transfers[i];
++		struct cmsis_dap_bulk_transfer *rsp = &dap->bdata->response_transfers[i];
++
++		/* A transfer may still be in flight (e.g. an eagerly armed response
++		 * whose command completed, or an aborted session). Cancel and reap
++		 * it: freeing a pending libusb transfer is not allowed. */
++		if (cmd->status == CMSIS_DAP_TRANSFER_PENDING) {
++			LOG_DEBUG("canceling busy command USB transfer at %u", i);
++			libusb_cancel_transfer(cmd->transfer);
++		}
++		if (rsp->status == CMSIS_DAP_TRANSFER_PENDING) {
++			LOG_DEBUG("canceling busy response USB transfer at %u", i);
++			libusb_cancel_transfer(rsp->transfer);
++		}
++
++		struct timeval tv = {
++			.tv_sec = 1,
++			.tv_usec = 1000
++		};
++		for (unsigned int spin = 0; spin < 100; spin++) {
++			if (cmd->status != CMSIS_DAP_TRANSFER_PENDING &&
++			    rsp->status != CMSIS_DAP_TRANSFER_PENDING)
++				break;
++			if (libusb_handle_events_timeout_completed(dap->bdata->usb_ctx,
++								   &tv, NULL) != 0)
++				break;
+ 		}
+-		libusb_free_transfer(dap->bdata->response_transfers[i].transfer);
++
++		libusb_free_transfer(cmd->transfer);
++		libusb_free_transfer(rsp->transfer);
+ 	}
+ 	cmsis_dap_usb_free(dap);
+ 	libusb_release_interface(dap->bdata->dev_handle, dap->bdata->interface);
+@@ -452,6 +473,35 @@ static void LIBUSB_CALL cmsis_dap_usb_callback(struct libusb_transfer *transfer)
+ 	}
+ }
+ 
++/* Arm (submit) the response transfer for the pending request FIFO slot idx.
++ * No-op when the transfer is already in flight or completed; the response is
++ * then picked up by cmsis_dap_usb_read() when its block is reaped. */
++static int cmsis_dap_usb_submit_read(struct cmsis_dap *dap, unsigned int idx,
++				     int timeout_ms)
++{
++	struct cmsis_dap_bulk_transfer *tr = &dap->bdata->response_transfers[idx];
++	int err;
++
++	if (tr->status != CMSIS_DAP_TRANSFER_IDLE)
++		return ERROR_OK;
++
++	libusb_fill_bulk_transfer(tr->transfer,
++				  dap->bdata->dev_handle, dap->bdata->ep_in,
++				  tr->buffer, dap->packet_size,
++				  &cmsis_dap_usb_callback, tr,
++				  timeout_ms);
++	LOG_DEBUG_IO("submit read @ %u", idx);
++	tr->status = CMSIS_DAP_TRANSFER_PENDING;
++	err = libusb_submit_transfer(tr->transfer);
++	if (err) {
++		tr->status = CMSIS_DAP_TRANSFER_IDLE;
++		LOG_ERROR("error submitting USB read: %s", libusb_strerror(err));
++		return ERROR_FAIL;
++	}
++
++	return ERROR_OK;
++}
++
+ static int cmsis_dap_usb_read(struct cmsis_dap *dap, int transfer_timeout_ms,
+ 							  enum cmsis_dap_blocking blocking)
+ {
+@@ -461,19 +511,10 @@ static int cmsis_dap_usb_read(struct cmsis_dap *dap, int transfer_timeout_ms,
+ 	tr = &dap->bdata->response_transfers[dap->pending_fifo_get_idx];
+ 
+ 	if (tr->status == CMSIS_DAP_TRANSFER_IDLE) {
+-		libusb_fill_bulk_transfer(tr->transfer,
+-								  dap->bdata->dev_handle, dap->bdata->ep_in,
+-								  tr->buffer, dap->packet_size,
+-								  &cmsis_dap_usb_callback, tr,
+-								  transfer_timeout_ms);
+-		LOG_DEBUG_IO("submit read @ %u", dap->pending_fifo_get_idx);
+-		tr->status = CMSIS_DAP_TRANSFER_PENDING;
+-		err = libusb_submit_transfer(tr->transfer);
+-		if (err) {
+-			tr->status = CMSIS_DAP_TRANSFER_IDLE;
+-			LOG_ERROR("error submitting USB read: %s", libusb_strerror(err));
+-			return ERROR_FAIL;
+-		}
++		err = cmsis_dap_usb_submit_read(dap, dap->pending_fifo_get_idx,
++						transfer_timeout_ms);
++		if (err != ERROR_OK)
++			return err;
+ 	}
+ 
+ 	struct timeval tv;
+@@ -589,6 +630,18 @@ static int cmsis_dap_usb_write(struct cmsis_dap *dap, int txlen, int timeout_ms)
+ 		return ERROR_FAIL;
+ 	}
+ 
++	/* Eagerly arm the response transfer for this command, so the adapter can
++	 * return the response as soon as the command has executed instead of
++	 * waiting for a separate host->device IN request (one network leg less
++	 * on high-latency links). If submission fails, the response is simply
++	 * requested on demand when the block is reaped. */
++	if (dap->eager_reads) {
++		int ret = cmsis_dap_usb_submit_read(dap, dap->pending_fifo_put_idx,
++						    CMSIS_DAP_EAGER_READ_TIMEOUT_MS);
++		if (ret != ERROR_OK)
++			LOG_DEBUG("eager response submission failed (%d), read on demand", ret);
++	}
++
+ 	return ERROR_OK;
+ }
+ 

@@ -1,0 +1,16 @@
+diff --git a/src/jtag/drivers/cmsis_dap.c b/src/jtag/drivers/cmsis_dap.c
+index 16480ae..e63d726 100644
+--- a/src/jtag/drivers/cmsis_dap.c
++++ b/src/jtag/drivers/cmsis_dap.c
+@@ -779,7 +779,10 @@ static int cmsis_dap_get_caps_info(void)
+ 	if (retval != ERROR_OK)
+ 		return retval;
+ 
+-	if (data[0] == 1) {
++	/* CMSIS-DAP 2.1 returns 2 capability bytes (caps + UART caps); stock
++	 * OpenOCD 0.11 only accepts length 1 and otherwise treats the probe as
++	 * "SWD not supported".  Accept both lengths for this compatibility test. */
++	if (data[0] >= 1) {
+ 		uint8_t caps = data[1];
+ 
+ 		cmsis_dap_handle->caps = caps;
