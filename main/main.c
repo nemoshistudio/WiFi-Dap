@@ -19,9 +19,17 @@
 #include "wt_ota.h"
 #include "project_components/wt_common/wt_protocol_version.h"
 #include "components/board/include/birdiebot_board.h"
-#include "birdiebot_wired_dap.h"
 
 #include <sdkconfig.h>
+
+/* C1 wired DAP is a build variant whose component (plus its esp_tinyusb
+ * dependency) only exists for ESP32-S3 targets: the component manager excludes
+ * it from ESP32-C3/ESP32 builds, so its header must not be included
+ * unconditionally or those default builds fail.  It is also compiled out of the
+ * default S3 build (CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NONE). */
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "birdiebot_wired_dap.h"
+#endif
 
 #if defined(CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3)
 #define BIRDIEBOT_BOARD_STR "BOARD_ZXR_DAP_S3"
