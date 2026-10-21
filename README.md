@@ -205,13 +205,13 @@ Entry point: `http://<device-ip>/` (defaults to `/#/uart`). The frontend talks t
 | Page | Route | Purpose |
 |---|---|---|
 | **UART** | `/#/uart` | Serial terminal (TX/RX) and baud/data-bits/parity/stop-bits/flow control; traffic uses WS binary `RAW`/`RAW_BROADCAST` frames |
-| **Data Curve** | `/#/debug-curve` | Upload an ELF, pick RAM/Flash variables, sample at up to 100 Hz over WS-DAP and plot live curves; CSV/PNG export (takes over the DAP session; see [docs/web-variable-curve.md](docs/web-variable-curve.md)) |
+| **Data Curve** | `/#/debug-curve` | Upload an ELF (DWARF types parsed: source names/types/struct members/arrays), pick variables, sample at up to 100 Hz over WS-DAP and plot live curves; CSV/PNG export (takes over the DAP session; see [docs/web-variable-curve.md](docs/web-variable-curve.md)) |
 | **Wi-Fi** | `/#/wifi` | STA scan/connect, saved networks (up to 8, add/delete, auto-save), AP name/password, static IP/DNS, AP/STA mode and Smart APSTA delays |
 | **Update** | `/#/update` | Browser-local OTA: pick an app `.bin`, live progress, verification and rollback (S3 8 MB only; 4 MB targets show "unsupported") |
 | **About** | `/#/about` | Firmware / protocol / Web UI / hardware versions, serial number, IDF version |
 | **Feedback** | `/#/feedback` | Feedback entry points (author/project pages) |
 
-- Languages: Chinese / English (355 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
+- Languages: Chinese / English (367 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
 - Security: no login/auth (removed by design); the Web UI is usable from the trusted LAN only (see [§9](#9-security-defaults--hardening)).
 - Screenshots: [UART terminal](web/assets/uart.png)
 - Note: the former Widget / `#/widget` dashboard was removed on 2026-10-21 (the UART page keeps the data viewer, macros and its full feature set).

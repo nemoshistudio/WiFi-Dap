@@ -84,7 +84,7 @@
       </div>
     </section>
 
-    <!-- ELF 符号选择 -->
+    <!-- ELF / DWARF 变量浏览器 -->
     <section class="curve-card">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <h2 class="text-lg font-bold">{{ translate('curve.elfUpload') }}</h2>
@@ -93,40 +93,86 @@
       </div>
       <p class="mt-1 text-xs opacity-70">{{ translate('curve.elfHint') }}</p>
 
-      <p v-if="elfInfo" class="mt-2 text-sm">
-        {{ translate('curve.elfParsed', {count: elfInfo.symbols.length}) }}
-        <span class="opacity-70">(RAM {{ elfInfo.ramSymbols }} · Flash {{ elfInfo.flashSymbols }})</span>
-      </p>
+      <div v-if="elfInfo" class="mt-2">
+        <p v-if="elfInfo.source === 'dwarf'" class="text-sm">
+          {{ translate('curve.dwarfParsed', {count: elfInfo.dwarfNamed, fixed: elfInfo.dwarfWithAddress}) }}
+        </p>
+        <template v-else>
+          <el-alert
+              class="mt-1"
+              type="info"
+              :title="translate('curve.symtabNotice')"
+              :closable="false"
+              show-icon
+          />
+          <p v-if="dwarfFallbackReason" class="mt-1 text-xs opacity-70">
+            {{ translate('curve.dwarfFallback', {err: dwarfFallbackReason}) }}
+          </p>
+          <p class="mt-1 text-sm">{{ translate('curve.elfParsed', {count: elfInfo.variables.length}) }}</p>
+        </template>
+        <p v-if="wideHint" class="mt-1 text-xs opacity-70">{{ translate('curve.wideHint') }}</p>
+      </div>
       <el-alert v-if="elfError" class="mt-2" type="error" :title="elfError" :closable="false" show-icon/>
+      <el-alert v-if="addressError" class="mt-2" type="warning" :title="addressError" :closable="false" show-icon/>
 
-      <div v-if="elfInfo && elfInfo.symbols.length > 0" class="mt-3 grid gap-4 md:grid-cols-2">
-        <div>
-          <el-input v-model="symbolSearch" size="small" clearable :placeholder="translate('curve.searchPlaceholder')"/>
-          <div class="mt-1 text-xs opacity-70">{{ translate('curve.variables') }}: {{ filteredSymbols.length }}</div>
-          <div class="symbol-list">
-            <label v-for="symbol in filteredSymbols" :key="symbol.name + '@' + formatHex32(symbol.address)" class="symbol-row">
-              <el-checkbox :model-value="isSelected(symbol)" @change="toggleSymbol(symbol)"/>
-              <span class="flex-1 truncate" :title="symbol.name">{{ symbol.name }}</span>
-              <span class="font-mono text-xs opacity-70">{{ formatHex32(symbol.address) }}</span>
-              <span class="w-10 text-right text-xs opacity-60">{{ symbol.size }}</span>
-            </label>
-          </div>
+      <template v-if="elfInfo && elfInfo.variables.length > 0">
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <el-input
+              v-model="variableSearch"
+              size="small"
+              clearable
+              class="variable-search"
+              :placeholder="translate('curve.searchPlaceholder')"
+          />
+          <el-button size="small" @click="expandAll">{{ translate('curve.expandAll') }}</el-button>
+          <el-button size="small" @click="collapseAll">{{ translate('curve.collapseAll') }}</el-button>
+          <span class="ml-auto text-xs opacity-70">{{ translate('curve.variables') }}: {{ variableRows.length }}</span>
         </div>
-        <div>
-          <div class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }} / {{ MAX_CURVE_SERIES }}</div>
-          <div class="symbol-list">
-            <div v-for="item in seriesList" :key="item.id" class="symbol-row">
-              <span class="series-dot" :style="{background: item.color}"></span>
-              <span class="flex-1 truncate" :title="item.name">{{ item.name }}</span>
-              <span class="font-mono text-xs opacity-70">{{ formatHex32(item.address) }}</span>
-              <el-select v-model="item.format" size="small" style="width: 5.5rem">
-                <el-option v-for="format in FORMATS" :key="format" :value="format" :label="format"/>
-              </el-select>
-              <el-button type="danger" link size="small" @click="removeSeries(item.id)">×</el-button>
+
+        <div class="var-table mt-2">
+          <div class="var-head">
+            <span></span>
+            <span>{{ translate('curve.colName') }}</span>
+            <span>{{ translate('curve.colType') }}</span>
+            <span>{{ translate('curve.colAddress') }}</span>
+            <span class="text-right">{{ translate('curve.colSize') }}</span>
+            <span>{{ translate('curve.colSource') }}</span>
+          </div>
+          <div class="var-list">
+            <div
+                v-for="row in variableRows"
+                :key="row.key"
+                class="var-row"
+                :class="{selected: isRowSelected(row)}"
+            >
+              <span class="var-check">
+                <el-checkbox
+                    v-if="row.node.sample"
+                    :model-value="isRowSelected(row)"
+                    @change="toggleRow(row)"
+                />
+              </span>
+              <span class="var-name" :style="{paddingLeft: (row.depth * 12) + 'px'}" :title="row.path">
+                <button
+                    v-if="row.hasChildren"
+                    type="button"
+                    class="tree-arrow"
+                    @click.stop="toggleExpand(row)"
+                >{{ row.expanded ? '▾' : '▸' }}</button>
+                <span v-else class="tree-arrow-spacer"></span>
+                <span class="truncate">{{ row.node.name }}</span>
+              </span>
+              <span class="var-type truncate" :title="row.node.typeName">{{ row.node.typeName || translate('curve.unknownType') }}</span>
+              <span class="var-addr font-mono">{{ formatHex32(row.node.address) }}</span>
+              <span class="var-size text-right">{{ row.node.size }}</span>
+              <span class="var-src truncate" :title="row.node.file || ''">{{ sourceLabel(row.node) }}</span>
+            </div>
+            <div v-if="variableRows.length === 0" class="px-2 py-2 text-sm opacity-70">
+              {{ translate('curve.noSymbols') }}
             </div>
           </div>
         </div>
-      </div>
+      </template>
 
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <span class="text-sm font-bold">{{ translate('curve.manualAddress') }}</span>
@@ -139,7 +185,23 @@
         />
         <el-button size="small" @click="addManualAddress">{{ translate('curve.addAddress') }}</el-button>
       </div>
-      <el-alert v-if="addressError" class="mt-2" type="warning" :title="addressError" :closable="false" show-icon/>
+    </section>
+
+    <!-- 已选曲线 -->
+    <section v-if="seriesList.length > 0" class="curve-card">
+      <div class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }} / {{ MAX_CURVE_SERIES }}</div>
+      <div class="selected-list mt-1">
+        <div v-for="item in seriesList" :key="item.id" class="selected-row">
+          <span class="series-dot" :style="{background: item.color}"></span>
+          <span class="truncate" :title="item.name">{{ item.name }}</span>
+          <span class="truncate text-xs opacity-70" :title="item.typeName">{{ item.typeName || translate('curve.unknownType') }}</span>
+          <span class="font-mono text-xs opacity-70">{{ formatHex32(item.address) }}</span>
+          <el-select v-model="item.format" size="small" style="width: 5.5rem">
+            <el-option v-for="format in FORMATS" :key="format" :value="format" :label="format"/>
+          </el-select>
+          <el-button type="danger" link size="small" @click="removeSeries(item.id)">×</el-button>
+        </div>
+      </div>
     </section>
 
     <!-- 实时曲线 -->
@@ -176,11 +238,12 @@
             type="button"
             class="legend-item"
             :class="{off: !item.visible}"
-            :title="item.name"
+            :title="legendLabel(item)"
             @click="toggleVisible(item)"
         >
           <span class="series-dot" :style="{background: item.color}"></span>
           <span class="truncate">{{ item.name }}</span>
+          <span v-if="item.typeName" class="truncate text-xs opacity-60">[{{ item.typeName }}]</span>
           <span class="font-mono text-xs opacity-60">{{ latestText(item) }}</span>
         </button>
       </div>
@@ -197,14 +260,14 @@ import {CmsisDapClient, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} fr
 import {kickDapSession} from '@/api/apiDap'
 import {
   formatHex32,
-  parseElf32Symbols,
-  type ElfParseResult,
-  type ElfSymbol,
+  parseElfVariables,
+  type DisplayFormat,
+  type ElfVariablesResult,
+  type SampleLeaf,
+  type VariableNode,
 } from '@/utils/elfSymbols'
 
-type DisplayFormat = 'u32' | 'i32' | 'f32'
-
-const FORMATS: DisplayFormat[] = ['u32', 'i32', 'f32']
+const FORMATS: DisplayFormat[] = ['auto', 'u32', 'i32', 'f32']
 const SAMPLE_RATES = [10, 20, 50, 100]
 /** 环形缓冲总点数（约 10 分钟 @100Hz）。 */
 const MAX_POINTS = 60000
@@ -219,8 +282,14 @@ const COLORS = [
 
 interface CurveSeries {
   id: number
+  /** 变量显示路径（如 sn_tools.data.as_file / sn_buff[3]） */
   name: string
+  /** 去重键：path@address */
+  key: string
+  typeName: string
   address: number
+  size: number
+  sample: SampleLeaf
   format: DisplayFormat
   color: string
   visible: boolean
@@ -233,17 +302,27 @@ interface CurveNotice {
   title: string
 }
 
+interface VariableRow {
+  key: string
+  node: VariableNode
+  depth: number
+  path: string
+  hasChildren: boolean
+  expanded: boolean
+}
+
 const SAMPLE_RATES_DEFAULT = 100
 
 // ---- 页面状态 -------------------------------------------------------------
 const sampleRate = ref(SAMPLE_RATES_DEFAULT)
-const globalFormat = ref<DisplayFormat>('u32')
+const globalFormat = ref<DisplayFormat>('auto')
 const seriesList = ref<CurveSeries[]>([])
-const symbolSearch = ref('')
+const variableSearch = ref('')
+const expandedKeys = ref<Set<string>>(new Set())
 const manualInput = ref('')
 const addressError = ref('')
 const elfParsing = ref(false)
-const elfInfo = shallowRef<ElfParseResult | null>(null)
+const elfInfo = shallowRef<ElfVariablesResult | null>(null)
 const elfError = ref('')
 const elfInputRef = ref<HTMLInputElement | null>(null)
 const connecting = ref(false)
@@ -275,20 +354,24 @@ let sampleEpochMs = 0
 let nextSampleAt = 0
 let consecutiveFailures = 0
 let recentCompletions: number[] = []
-let constantReference: number[] | null = null
+let constantReference: Uint8Array[] | null = null
 let constantSamples = 0
 let resizeObserver: ResizeObserver | null = null
 let drawPending = false
 
-// 环形缓冲：timestamps/slotSeq 按写入顺序共享，原始值每个曲线一份 Uint32Array。
+// 环形缓冲：timestamps/slotSeq 按写入顺序共享；每个曲线存 64-bit 原始值的
+// 低/高 32-bit（支持 DWARF 的 1/2/4/8 字节 + 位域）。
 const timestamps = new Float64Array(MAX_POINTS)
 const slotSeq = new Float64Array(MAX_POINTS)
-const seriesBuffers = new Map<number, Uint32Array>()
+const seriesLo = new Map<number, Uint32Array>()
+const seriesHi = new Map<number, Uint32Array>()
 let ringHead = 0
 let ringCount = 0
 
-const f32Scratch = new Float32Array(1)
-const u32Scratch = new Uint32Array(f32Scratch.buffer)
+const f32Buffer = new Float32Array(1)
+const f32U32 = new Uint32Array(f32Buffer.buffer)
+const f64Buffer = new Float64Array(1)
+const f64U32 = new Uint32Array(f64Buffer.buffer)
 
 // ---- 连接状态 -------------------------------------------------------------
 const statusTagType = computed<'primary' | 'success' | 'info' | 'warning' | 'danger'>(() => {
@@ -378,7 +461,6 @@ async function onConnect(): Promise<void> {
   try {
     // 接管：先 POST /api/dap/kick 让固件断开占用中的 USBIP（或 elaphureLink）会话，
     // 等 ~300ms 后再连 WS；USBIP 仍占用时首次 WS 握手会超时，故最多重试 ~2s。
-    // 端点缺失或失败时仍继续尝试 WS-DAP：用户也可能已手动断开 USBIP。
     const kick = await kickDapSession()
     if (!kick.ok) {
       kickWarning.value = translate('curve.kickFailed')
@@ -397,7 +479,6 @@ async function onConnect(): Promise<void> {
     connected.value = true
     kickWarning.value = ''
     resetConstantTracking()
-    // 目标可能在接管时仍处于 halt（DHCSR.S_HALT）：提示用户可手动恢复运行。
     haltedSuspected.value = !info.resumed
     globalNotify(translate('curve.statusConnected'), 'success')
   } catch (error) {
@@ -439,6 +520,21 @@ async function onDisconnect(): Promise<void> {
   scheduleDraw()
 }
 
+async function onResetTarget(): Promise<void> {
+  const current = client
+  if (!current || resetting.value) return
+  resetting.value = true
+  try {
+    await current.resetAndRun()
+    haltedSuspected.value = false
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown error'
+    globalNotify(translate('curve.connectFailed', {err: message}), 'error')
+  } finally {
+    resetting.value = false
+  }
+}
+
 // ---- 采样循环 -------------------------------------------------------------
 function startSampling(): void {
   if (!connected.value || !client || seriesList.value.length === 0) return
@@ -476,14 +572,14 @@ async function runSample(): Promise<void> {
   sampleTimer = 0
   if (!sampling.value || !client) return
   const begin = performance.now()
-  // 固定本次采样的曲线快照：读取期间用户可能增删曲线/改地址，不能按新数组取值。
+  // 固定本次采样的曲线快照：读取期间用户可能增删曲线/改地址。
   const snapshot = seriesList.value.slice()
-  const addresses = snapshot.map((item) => item.address)
+  const reads = snapshot.map((item) => ({address: item.sample.address, size: item.sample.size}))
   try {
-    const values = await client.sampleWords(addresses)
+    const rawValues = await client.sampleRaw(reads)
     const date = (begin - sampleEpochMs) / 1000
-    pushSample(date, values, snapshot)
-    trackConstantValues(values)
+    pushSample(date, rawValues, snapshot)
+    trackConstantValues(rawValues)
     consecutiveFailures = 0
   } catch (error) {
     consecutiveFailures += 1
@@ -515,69 +611,6 @@ async function runSample(): Promise<void> {
   scheduleDraw()
 }
 
-function resetConstantTracking(): void {
-  constantReference = null
-  constantSamples = 0
-  haltedSuspected.value = false
-}
-
-/**
- * 目标 halt 时所有变量值恒定（真机接管后常见 DHCSR.S_HALT）。
- * 连续 25 个采样点完全不变时提示用户（可手动点“恢复目标运行”）。
- */
-function trackConstantValues(values: number[]): void {
-  if (constantReference === null || constantReference.length !== values.length) {
-    constantReference = values.map((value) => value >>> 0)
-    constantSamples = 0
-    return
-  }
-  let same = true
-  for (let i = 0; i < values.length; i++) {
-    if ((values[i] >>> 0) !== constantReference[i]) {
-      same = false
-      break
-    }
-  }
-  if (same) {
-    constantSamples += 1
-    if (constantSamples >= 25) haltedSuspected.value = true
-  } else {
-    constantReference = values.map((value) => value >>> 0)
-    constantSamples = 0
-    haltedSuspected.value = false
-  }
-}
-
-async function onResetTarget(): Promise<void> {
-    const current = client
-    if (!current || resetting.value) return
-    resetting.value = true
-    try {
-        await current.resetAndRun()
-        haltedSuspected.value = false
-    } catch (err) {
-        globalNotify(translate('curve.connectFailed', {err: String(err)}), 'error')
-    } finally {
-        resetting.value = false
-    }
-}
-
-async function onResumeTarget(): Promise<void> {
-  const current = client
-  if (!current || resuming.value) return
-  resuming.value = true
-  try {
-    await current.resumeTarget()
-    resetConstantTracking()
-    globalNotify(translate('common.success'), 'success')
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error'
-    notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
-  } finally {
-    resuming.value = false
-  }
-}
-
 /** 维持固定采样节拍；落后超过一个节拍时计入 dropped 并重新对齐（不补发）。 */
 function advanceSchedule(): void {
   if (!sampling.value) return
@@ -592,13 +625,41 @@ function advanceSchedule(): void {
   scheduleNextSample(nextSampleAt - performance.now())
 }
 
-function pushSample(time: number, values: number[], snapshot: readonly CurveSeries[]): void {
+/** 把 DWARF 叶子读到的字节转换成 64-bit 原始值（含位域抽取）。 */
+function extractSampleBits(bytes: Uint8Array, leaf: SampleLeaf): {lo: number; hi: number} {
+  if (leaf.bitSize > 0) {
+    let value = 0n
+    for (let i = bytes.length - 1; i >= 0; i--) {
+      value = (value << 8n) | BigInt(bytes[i] ?? 0)
+    }
+    const width = Math.min(leaf.bitSize, 64)
+    value = (value >> BigInt(leaf.bitOffset)) & ((1n << BigInt(width)) - 1n)
+    return {
+      lo: Number(value & 0xffffffffn) >>> 0,
+      hi: Number((value >> 32n) & 0xffffffffn) >>> 0,
+    }
+  }
+  let lo = 0
+  let hi = 0
+  for (let i = 0; i < bytes.length && i < 8; i++) {
+    if (i < 4) lo |= (bytes[i] ?? 0) << (i * 8)
+    else hi |= (bytes[i] ?? 0) << ((i - 4) * 8)
+  }
+  return {lo: lo >>> 0, hi: hi >>> 0}
+}
+
+function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly CurveSeries[]): void {
   const slot = ringHead
   timestamps[slot] = time
   slotSeq[slot] = sampleSeq
   for (let i = 0; i < snapshot.length; i++) {
-    const buffer = seriesBuffers.get(snapshot[i].id)
-    if (buffer) buffer[slot] = (values[i] ?? 0) >>> 0
+    const item = snapshot[i]
+    const loBuffer = seriesLo.get(item.id)
+    const hiBuffer = seriesHi.get(item.id)
+    if (!loBuffer || !hiBuffer) continue
+    const bits = extractSampleBits(rawValues[i] ?? new Uint8Array(item.sample.size), item.sample)
+    loBuffer[slot] = bits.lo
+    hiBuffer[slot] = bits.hi
   }
   ringHead = (ringHead + 1) % MAX_POINTS
   if (ringCount < MAX_POINTS) ringCount += 1
@@ -623,8 +684,135 @@ function clearData(): void {
   scheduleDraw()
 }
 
-// ---- 曲线管理 -------------------------------------------------------------
-function newSeries(name: string, address: number): CurveSeries | null {
+function resetConstantTracking(): void {
+  constantReference = null
+  constantSamples = 0
+  haltedSuspected.value = false
+}
+
+/** 目标 halt 时所有变量值恒定（真机接管后常见 DHCSR.S_HALT）。 */
+function trackConstantValues(rawValues: Uint8Array[]): void {
+  if (constantReference === null || constantReference.length !== rawValues.length) {
+    constantReference = rawValues.map((bytes) => bytes.slice())
+    constantSamples = 0
+    return
+  }
+  let same = true
+  for (let i = 0; i < rawValues.length; i++) {
+    const left = rawValues[i]
+    const right = constantReference[i]
+    if (!right || left.length !== right.length) {
+      same = false
+      break
+    }
+    for (let j = 0; j < left.length; j++) {
+      if (left[j] !== right[j]) {
+        same = false
+        break
+      }
+    }
+    if (!same) break
+  }
+  if (same) {
+    constantSamples += 1
+    if (constantSamples >= 25) haltedSuspected.value = true
+  } else {
+    constantReference = rawValues.map((bytes) => bytes.slice())
+    constantSamples = 0
+    haltedSuspected.value = false
+  }
+}
+
+async function onResumeTarget(): Promise<void> {
+  const current = client
+  if (!current || resuming.value) return
+  resuming.value = true
+  try {
+    await current.resumeTarget()
+    resetConstantTracking()
+    globalNotify(translate('common.success'), 'success')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown error'
+    notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
+  } finally {
+    resuming.value = false
+  }
+}
+
+// ---- 变量树 / 曲线管理 ----------------------------------------------------
+function nodeKey(path: string, node: VariableNode): string {
+  return `${path}@${node.address.toString(16)}`
+}
+
+function pathOf(depth: number, parentPath: string, node: VariableNode): string {
+  return depth === 0 ? node.name : parentPath + node.name
+}
+
+function nodeMatches(node: VariableNode, path: string, query: string): boolean {
+  const needle = query.toLowerCase()
+  if (path.toLowerCase().includes(needle)) return true
+  if ((node.typeName || '').toLowerCase().includes(needle)) return true
+  return formatHex32(node.address).toLowerCase().includes(needle)
+}
+
+function nodeMatchesDeep(node: VariableNode, path: string, query: string): boolean {
+  if (nodeMatches(node, path, query)) return true
+  if (!node.children) return false
+  return node.children.some((child) => nodeMatchesDeep(child, path + child.name, query))
+}
+
+const variableRows = computed<VariableRow[]>(() => {
+  const info = elfInfo.value
+  if (!info) return []
+  const query = variableSearch.value.trim()
+  const rows: VariableRow[] = []
+  const visit = (node: VariableNode, depth: number, parentPath: string) => {
+    const path = pathOf(depth, parentPath, node)
+    if (query && !nodeMatchesDeep(node, path, query)) return
+    const key = nodeKey(path, node)
+    const hasChildren = !!node.children && node.children.length > 0
+    const expanded = hasChildren && (query !== '' || expandedKeys.value.has(key))
+    rows.push({key, node, depth, path, hasChildren, expanded})
+    if (hasChildren && expanded) {
+      for (const child of node.children ?? []) visit(child, depth + 1, path)
+    }
+  }
+  for (const node of info.variables) visit(node, 0, '')
+  return rows
+})
+
+function isRowSelected(row: VariableRow): boolean {
+  return seriesList.value.some((item) => item.key === row.key)
+}
+
+function toggleExpand(row: VariableRow): void {
+  const next = new Set(expandedKeys.value)
+  if (next.has(row.key)) next.delete(row.key)
+  else next.add(row.key)
+  expandedKeys.value = next
+}
+
+function collectExpandable(node: VariableNode, path: string, out: string[]): void {
+  if (!node.children || node.children.length === 0) return
+  out.push(nodeKey(path, node))
+  for (const child of node.children) collectExpandable(child, path + child.name, out)
+}
+
+function expandAll(): void {
+  const info = elfInfo.value
+  if (!info) return
+  const keys: string[] = []
+  for (const node of info.variables) collectExpandable(node, node.name, keys)
+  expandedKeys.value = new Set(keys)
+}
+
+function collapseAll(): void {
+  expandedKeys.value = new Set()
+}
+
+function newSeries(name: string, key: string, typeName: string, node: VariableNode): CurveSeries | null {
+  if (!node.sample) return null
+  if (seriesList.value.some((item) => item.key === key)) return null
   if (seriesList.value.length >= MAX_CURVE_SERIES) {
     globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
     return null
@@ -632,23 +820,42 @@ function newSeries(name: string, address: number): CurveSeries | null {
   const series: CurveSeries = {
     id: nextSeriesId++,
     name,
-    address: address >>> 0,
+    key,
+    typeName,
+    address: node.address >>> 0,
+    size: node.size,
+    sample: node.sample,
     format: globalFormat.value,
     color: COLORS[seriesList.value.length % COLORS.length],
     visible: true,
     startSeq: sampleSeq + (sampling.value ? 1 : 0),
   }
-  seriesBuffers.set(series.id, new Uint32Array(MAX_POINTS))
+  seriesLo.set(series.id, new Uint32Array(MAX_POINTS))
+  seriesHi.set(series.id, new Uint32Array(MAX_POINTS))
   seriesList.value = [...seriesList.value, series]
   scheduleDraw()
   return series
 }
 
+function toggleRow(row: VariableRow): void {
+  if (isRowSelected(row)) {
+    removeSeriesByKey(row.key)
+    return
+  }
+  newSeries(row.path, row.key, row.node.typeName, row.node)
+}
+
 function removeSeries(id: number): void {
-  seriesBuffers.delete(id)
+  seriesLo.delete(id)
+  seriesHi.delete(id)
   seriesList.value = seriesList.value.filter((item) => item.id !== id)
   hover.value = null
   scheduleDraw()
+}
+
+function removeSeriesByKey(key: string): void {
+  const item = seriesList.value.find((candidate) => candidate.key === key)
+  if (item) removeSeries(item.id)
 }
 
 function toggleVisible(item: CurveSeries): void {
@@ -661,36 +868,24 @@ function applyGlobalFormat(): void {
   scheduleDraw()
 }
 
-function symbolKey(symbol: ElfSymbol): string {
-  return `${symbol.name}@${symbol.address}`
+const wideHint = computed(() => seriesList.value.some((item) => item.sample.size > 4 || item.sample.bitSize > 32))
+
+function sourceLabel(node: VariableNode): string {
+  if (!node.file) return '-'
+  const base = node.file.split(/[\\/]/).pop() ?? node.file
+  return node.line ? `${base}:${node.line}` : base
 }
 
-function isSelected(symbol: ElfSymbol): boolean {
-  return seriesList.value.some((item) => symbolKey(symbol) === `${item.name}@${item.address}`)
+function legendLabel(item: CurveSeries): string {
+  return item.typeName ? `${item.name} [${item.typeName}]` : item.name
 }
 
-function toggleSymbol(symbol: ElfSymbol): void {
-  if (isSelected(symbol)) {
-    const remaining = seriesList.value.filter((item) => `${item.name}@${item.address}` !== symbolKey(symbol))
-    for (const item of seriesList.value) {
-      if (!remaining.includes(item)) seriesBuffers.delete(item.id)
-    }
-    seriesList.value = remaining
-    scheduleDraw()
-    return
-  }
-  newSeries(symbol.name, symbol.address)
-}
-
-const filteredSymbols = computed<ElfSymbol[]>(() => {
+// ---- ELF 加载 -------------------------------------------------------------
+const dwarfFallbackReason = computed(() => {
   const info = elfInfo.value
-  if (!info) return []
-  const query = symbolSearch.value.trim().toLowerCase()
-  if (!query) return info.symbols
-  return info.symbols.filter((symbol) => {
-    if (symbol.name.toLowerCase().includes(query)) return true
-    return formatHex32(symbol.address).toLowerCase().includes(query)
-  })
+  if (!info) return ''
+  const warning = info.warnings.find((item) => item.startsWith('DWARF parse failed:'))
+  return warning ? warning.replace('DWARF parse failed:', '').trim() : ''
 })
 
 function openElfDialog(): void {
@@ -706,9 +901,11 @@ async function onElfSelected(event: Event): Promise<void> {
   elfError.value = ''
   try {
     const buffer = await file.arrayBuffer()
-    const result = parseElf32Symbols(buffer)
+    const result = parseElfVariables(buffer)
     elfInfo.value = result
-    if (result.symbols.length === 0) {
+    variableSearch.value = ''
+    expandedKeys.value = new Set()
+    if (result.variables.length === 0) {
       elfError.value = translate('curve.noSymbols')
     }
   } catch (error) {
@@ -748,29 +945,101 @@ function addManualAddress(): void {
       globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
       break
     }
-    if (seriesList.value.some((item) => item.address === address)) continue
-    if (newSeries(formatHex32(address), address)) added.push(formatHex32(address))
+    const name = formatHex32(address)
+    if (seriesList.value.some((item) => item.address === address && item.typeName === '')) continue
+    const sample: SampleLeaf = {address, size: 4, bitOffset: 0, bitSize: 0, kind: 'uint', signed: false}
+    const node: VariableNode = {name, typeName: '', address, size: 4, sample}
+    if (newSeries(name, `manual@${address.toString(16)}`, '', node)) added.push(name)
   }
   if (added.length > 0) manualInput.value = ''
 }
 
-// ---- 数值格式 -------------------------------------------------------------
-function rawToNumber(raw: number, format: DisplayFormat): number {
-  if (format === 'i32') return raw | 0
-  if (format === 'f32') {
-    u32Scratch[0] = raw >>> 0
-    return f32Scratch[0]
-  }
-  return raw >>> 0
+// ---- 数值解码（DWARF 类型感知） -------------------------------------------
+function f32FromU32(value: number): number {
+  f32U32[0] = value >>> 0
+  return f32Buffer[0]
 }
 
-function formatValue(raw: number, format: DisplayFormat): string {
-  if (format === 'f32') {
-    const value = rawToNumber(raw, format)
-    if (!Number.isFinite(value)) return String(value)
-    return String(Number.parseFloat(value.toPrecision(6)))
+function f64FromLoHi(lo: number, hi: number): number {
+  f64U32[0] = lo >>> 0
+  f64U32[1] = hi >>> 0
+  return f64Buffer[0]
+}
+
+function toBigInt(lo: number, hi: number): bigint {
+  return (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0)
+}
+
+function bitsValue(lo: number, hi: number, bits: number, signed: boolean): bigint {
+  let value = toBigInt(lo, hi)
+  if (bits > 0 && bits < 64) value &= (1n << BigInt(bits)) - 1n
+  if (signed && bits > 0) {
+    const signBit = 1n << BigInt(bits - 1)
+    if ((value & signBit) !== 0n) value -= 1n << BigInt(bits)
   }
-  return String(rawToNumber(raw, format))
+  return value
+}
+
+function sampleBitWidth(item: CurveSeries): number {
+  return item.sample.bitSize > 0 ? Math.min(item.sample.bitSize, 64) : Math.min(item.sample.size * 8, 64)
+}
+
+/** 图表 Y 值：按 series.format（auto 时按 DWARF 类型）解码成 number。 */
+function decodeNumber(item: CurveSeries, lo: number, hi: number): number {
+  if (item.format === 'u32') return lo >>> 0
+  if (item.format === 'i32') return lo | 0
+  if (item.format === 'f32') return f32FromU32(lo)
+  const bits = sampleBitWidth(item)
+  switch (item.sample.kind) {
+    case 'float32':
+      return f32FromU32(lo)
+    case 'float64':
+      return f64FromLoHi(lo, hi)
+    case 'bool':
+      return bitsValue(lo, hi, bits, false) !== 0n ? 1 : 0
+    case 'int':
+      return Number(bitsValue(lo, hi, bits, true))
+    case 'enum':
+      return Number(bitsValue(lo, hi, bits, false))
+    case 'raw':
+      return lo >>> 0
+    default:
+      return Number(bitsValue(lo, hi, bits, false))
+  }
+}
+
+function formatFloatText(value: number): string {
+  if (!Number.isFinite(value)) return String(value)
+  return String(Number.parseFloat(value.toPrecision(7)))
+}
+
+/** 读数/图例/悬浮提示文本：auto 时按 DWARF 类型（64-bit 精确字符串、枚举名）。 */
+function decodeText(item: CurveSeries, lo: number, hi: number): string {
+  if (item.format === 'u32') return String(lo >>> 0)
+  if (item.format === 'i32') return String(lo | 0)
+  if (item.format === 'f32') return formatFloatText(f32FromU32(lo))
+  const bits = sampleBitWidth(item)
+  switch (item.sample.kind) {
+    case 'float32':
+      return formatFloatText(f32FromU32(lo))
+    case 'float64':
+      return formatFloatText(f64FromLoHi(lo, hi))
+    case 'bool':
+      return bitsValue(lo, hi, bits, false) !== 0n ? 'true' : 'false'
+    case 'enum': {
+      const value = Number(bitsValue(lo, hi, bits, false))
+      const enumerator = item.sample.enumValues?.find((entry) => entry[0] === value)
+      return enumerator ? `${enumerator[1]} (${value})` : String(value)
+    }
+    case 'int':
+      return String(bitsValue(lo, hi, bits, true))
+    case 'raw': {
+      if (bits <= 32) return `0x${(lo >>> 0).toString(16).toUpperCase()}`
+      return `0x${toBigInt(lo, hi).toString(16).toUpperCase()}`
+    }
+    default:
+      return String(bitsValue(lo, hi, bits, false))
+  }
 }
 
 function formatAxisValue(value: number): string {
@@ -783,12 +1052,13 @@ function formatAxisValue(value: number): string {
 
 function latestText(item: CurveSeries): string {
   if (ringCount === 0) return '-'
+  const loBuffer = seriesLo.get(item.id)
+  const hiBuffer = seriesHi.get(item.id)
+  if (!loBuffer || !hiBuffer) return '-'
   for (let order = ringCount - 1; order >= 0; order--) {
     const slot = ringSlot(order)
     if (slotSeq[slot] < item.startSeq) continue
-    const buffer = seriesBuffers.get(item.id)
-    if (!buffer) return '-'
-    return formatValue(buffer[slot], item.format)
+    return decodeText(item, loBuffer[slot], hiBuffer[slot])
   }
   return '-'
 }
@@ -868,9 +1138,10 @@ function drawChart(): void {
     const slot = ringSlot(order)
     for (const item of visible) {
       if (slotSeq[slot] < item.startSeq) continue
-      const buffer = seriesBuffers.get(item.id)
-      if (!buffer) continue
-      const value = rawToNumber(buffer[slot], item.format)
+      const loBuffer = seriesLo.get(item.id)
+      const hiBuffer = seriesHi.get(item.id)
+      if (!loBuffer || !hiBuffer) continue
+      const value = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
       if (!Number.isFinite(value)) continue
       if (value < minValue) minValue = value
       if (value > maxValue) maxValue = value
@@ -925,8 +1196,9 @@ function drawChart(): void {
 
   // 数据曲线（窗口内最多约 20s * 100Hz = 2000 点，无需降采样）
   for (const item of visible) {
-    const buffer = seriesBuffers.get(item.id)
-    if (!buffer) continue
+    const loBuffer = seriesLo.get(item.id)
+    const hiBuffer = seriesHi.get(item.id)
+    if (!loBuffer || !hiBuffer) continue
     context.strokeStyle = item.color
     context.lineWidth = 1.5
     context.beginPath()
@@ -937,7 +1209,7 @@ function drawChart(): void {
         started = false
         continue
       }
-      const value = rawToNumber(buffer[slot], item.format)
+      const value = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
       if (!Number.isFinite(value)) {
         started = false
         continue
@@ -970,9 +1242,10 @@ function drawChart(): void {
       context.stroke()
       context.setLineDash([])
       for (const item of visible) {
-        const buffer = seriesBuffers.get(item.id)
-        if (!buffer || slotSeq[slot] < item.startSeq) continue
-        const value = rawToNumber(buffer[slot], item.format)
+        const loBuffer = seriesLo.get(item.id)
+        const hiBuffer = seriesHi.get(item.id)
+        if (!loBuffer || !hiBuffer || slotSeq[slot] < item.startSeq) continue
+        const value = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
         if (!Number.isFinite(value)) continue
         context.fillStyle = item.color
         context.beginPath()
@@ -1016,9 +1289,10 @@ function onCanvasMove(event: MouseEvent): void {
   const entries: Array<{name: string; color: string; text: string}> = []
   for (const item of seriesList.value) {
     if (!item.visible || slotSeq[slot] < item.startSeq) continue
-    const buffer = seriesBuffers.get(item.id)
-    if (!buffer) continue
-    entries.push({name: item.name, color: item.color, text: formatValue(buffer[slot], item.format)})
+    const loBuffer = seriesLo.get(item.id)
+    const hiBuffer = seriesHi.get(item.id)
+    if (!loBuffer || !hiBuffer) continue
+    entries.push({name: item.name, color: item.color, text: decodeText(item, loBuffer[slot], hiBuffer[slot])})
   }
   hover.value = {index: order, x, y, time: timestamps[slot], entries}
   scheduleDraw()
@@ -1035,7 +1309,7 @@ const hoverStyle = computed(() => {
   const wrap = chartWrapRef.value
   if (!state || !wrap) return {}
   const width = wrap.clientWidth
-  const left = Math.min(state.x + 14, Math.max(0, width - 210))
+  const left = Math.min(state.x + 14, Math.max(0, width - 230))
   const top = Math.max(8, Math.min(state.y + 14, wrap.clientHeight - 90))
   return {left: `${left}px`, top: `${top}px`}
 })
@@ -1061,17 +1335,18 @@ function csvEscape(text: string): string {
 
 function exportCsv(): void {
   if (ringCount === 0) return
-  const header = ['time_s', ...seriesList.value.map((item) => csvEscape(item.name))]
+  const header = ['time_s', ...seriesList.value.map((item) => csvEscape(legendLabel(item)))]
   const lines: string[] = [header.join(',')]
   for (let order = 0; order < ringCount; order++) {
     const slot = ringSlot(order)
     const cells: string[] = [(timestamps[slot] as number).toFixed(4)]
     for (const item of seriesList.value) {
-      const buffer = seriesBuffers.get(item.id)
-      if (!buffer || slotSeq[slot] < item.startSeq) {
+      const loBuffer = seriesLo.get(item.id)
+      const hiBuffer = seriesHi.get(item.id)
+      if (!loBuffer || !hiBuffer || slotSeq[slot] < item.startSeq) {
         cells.push('')
       } else {
-        cells.push(formatValue(buffer[slot], item.format))
+        cells.push(decodeText(item, loBuffer[slot], hiBuffer[slot]))
       }
     }
     lines.push(cells.join(','))
@@ -1133,17 +1408,86 @@ onBeforeUnmount(() => {
   @apply my-3 rounded-lg border border-gray-200 p-3;
 }
 
-.symbol-list {
-  @apply mt-1 overflow-auto rounded border border-gray-200;
-  max-height: 15rem;
+.variable-search {
+  @apply min-w-56 flex-1;
 }
 
-.symbol-row {
-  @apply flex cursor-pointer items-center gap-2 px-2 py-0.5 text-sm;
+.var-table {
+  @apply overflow-hidden rounded border border-gray-200;
 }
 
-.symbol-row:hover {
+.var-head,
+.var-row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1.7fr) minmax(0, 1.2fr) 6.5rem 3.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 0.375rem;
+}
+
+.var-head {
+  @apply sticky top-0 z-10 border-b border-gray-200 bg-gray-50 text-xs font-semibold text-gray-600;
+  height: 1.75rem;
+}
+
+.var-list {
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.var-row {
+  height: 1.75rem;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 0.75rem;
+}
+
+.var-row:hover {
   background-color: var(--el-color-primary-light-9);
+}
+
+.var-row.selected {
+  background-color: var(--el-color-primary-light-8);
+}
+
+.var-check {
+  @apply flex items-center justify-center;
+}
+
+.var-name {
+  @apply flex min-w-0 items-center gap-1;
+}
+
+.var-type,
+.var-src {
+  @apply min-w-0 overflow-hidden text-gray-600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.var-addr {
+  @apply text-gray-700;
+}
+
+.tree-arrow {
+  @apply flex h-4 w-4 shrink-0 items-center justify-center text-xs text-gray-500;
+}
+
+.tree-arrow-spacer {
+  @apply inline-block h-4 w-4 shrink-0;
+}
+
+.selected-list {
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.selected-row {
+  display: grid;
+  grid-template-columns: 0.75rem minmax(0, 1.5fr) minmax(0, 1fr) 6.5rem 5.5rem 1.5rem;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  padding: 0.125rem 0;
 }
 
 .series-dot {
@@ -1168,7 +1512,7 @@ onBeforeUnmount(() => {
 }
 
 .chart-tooltip {
-  @apply pointer-events-none absolute max-w-52 rounded border border-gray-200 bg-white px-2 py-1 text-xs shadow;
+  @apply pointer-events-none absolute max-w-72 rounded border border-gray-200 bg-white px-2 py-1 text-xs shadow;
 }
 
 .legend {
@@ -1176,7 +1520,7 @@ onBeforeUnmount(() => {
 }
 
 .legend-item {
-  @apply flex max-w-64 items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs;
+  @apply flex max-w-96 items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs;
 }
 
 .legend-item:hover {

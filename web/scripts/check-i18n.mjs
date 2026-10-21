@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 355
+const EXPECTED_TOTAL = 367
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 207
+const EXPECTED_ADDED = 219
 
 const errors = []
 const warnings = []
@@ -140,6 +140,9 @@ const ADDED_KEYS = [
         'searchPlaceholder', 'variables', 'selected', 'noSymbols', 'manualAddress',
         'manualAddressHint', 'addAddress', 'invalidAddress', 'maxSeries', 'exportCsv', 'exportPng',
         'noData',
+        // DWARF 类型浏览器增量
+        'colName', 'colType', 'colAddress', 'colSize', 'colSource', 'dwarfParsed',
+        'dwarfFallback', 'symtabNotice', 'expandAll', 'collapseAll', 'wideHint', 'unknownType',
     ]),
     ...keys('page', ['debugCurve']),
 ]
@@ -148,7 +151,7 @@ const EXPECTED_KEYS = [...BASELINE_KEYS, ...ADDED_KEYS]
 const EXPECTED_SET = new Set(EXPECTED_KEYS)
 const BASELINE_SET = new Set(BASELINE_KEYS)
 const ADDED_SET_RE = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/
-const ALLOWED_PLACEHOLDERS = new Set(['err', 'max', 'size', 'code', 'web', 'fw', 'count', 'ssid'])
+const ALLOWED_PLACEHOLDERS = new Set(['err', 'max', 'size', 'code', 'web', 'fw', 'count', 'ssid', 'fixed'])
 
 function selfCheckContract() {
     const problems = []
