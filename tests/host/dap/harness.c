@@ -365,6 +365,103 @@ static void test_n6_swj_pins_wait_microseconds(void)
     free(req); free(resp);
 }
 
+
+/* W5 batch-packing fix: DAP_ResponseMaxSize(ID_DAP_Transfer) must use the exact
+ * response size (3 + 4/read item, not 3 + 8/item).  With the exact estimate a
+ * 0x7F batch of write transfers fits 63 sub-commands in a 512-byte packet;
+ * before the fix the guard stopped at ~45 (each write was counted as 11 bytes
+ * instead of 4), so OpenOCD's queued mode needed extra re-sends. */
+static void test_w5_batch_exact_write_packing(void)
+{
+    uint8_t *req = calloc(1, DAP_PACKET_SIZE);
+    uint8_t *resp = calloc(1, DAP_PACKET_SIZE);
+    uint32_t n;
+    const uint32_t subs = 63U; /* 2 + 63*8 = 506 bytes, fits one packet */
+    uint8_t *p = req;
+
+    DAP_Data.debug_port = DAP_PORT_SWD;
+    *p++ = ID_DAP_ExecuteCommands;
+    *p++ = (uint8_t)subs;
+    for (uint32_t i = 0; i < subs; i++) {
+        *p++ = ID_DAP_Transfer; /* 0x01 */
+        *p++ = 0U;              /* DAP index */
+        *p++ = 1U;              /* count = 1 */
+        *p++ = 0x00U;           /* write DP register */
+        *p++ = 0U; *p++ = 0U; *p++ = 0U; *p++ = 0U; /* data */
+    }
+
+    n = DAP_ProcessCommand(req, resp);
+    printf("[W5] 0x7F batch of %u write transfers -> processed=%u resp_len=%u\n",
+           (unsigned)subs, resp[1], resp_len(n));
+    CHECK(resp[0] == ID_DAP_ExecuteCommands);
+    CHECK(resp[1] == (uint8_t)subs);   /* exact estimate: all fit */
+    CHECK(resp_len(n) == (uint16_t)(2U + subs * 3U)); /* batch hdr + echo+count+status per write sub */
+    CHECK(resp_len(n) <= DAP_PACKET_SIZE);
+
+    free(req); free(resp);
+}
+
+/* W5 batch-packing fix: exact read-item sizing (response = 3 + 4*read items).
+ * 73 single-read DAP_Transfer sub-commands: the 73rd would make the batch
+ * response 513 bytes, so it must stop at 72 (old estimate stopped at ~46). */
+static void test_w5_batch_exact_read_packing(void)
+{
+    uint8_t *req = calloc(1, DAP_PACKET_SIZE);
+    uint8_t *resp = calloc(1, DAP_PACKET_SIZE);
+    uint32_t n;
+    const uint32_t subs = 73U; /* 2 + 73*4 = 294 bytes request */
+    uint8_t *p = req;
+
+    DAP_Data.debug_port = DAP_PORT_SWD;
+    *p++ = ID_DAP_ExecuteCommands;
+    *p++ = (uint8_t)subs;
+    for (uint32_t i = 0; i < subs; i++) {
+        *p++ = ID_DAP_Transfer;          /* 0x01 */
+        *p++ = 0U;                       /* DAP index */
+        *p++ = 1U;                       /* count = 1 */
+        *p++ = DAP_TRANSFER_RnW;         /* read DP register */
+    }
+
+    n = DAP_ProcessCommand(req, resp);
+    printf("[W5] 0x7F batch of %u read transfers -> processed=%u resp_len=%u\n",
+           (unsigned)subs, resp[1], resp_len(n));
+    CHECK(resp[0] == ID_DAP_ExecuteCommands);
+    CHECK(resp[1] == 72U);   /* 2 + 72*7 = 506; the 73rd would exceed 512 */
+    CHECK(resp_len(n) == 506U);
+    CHECK(resp_len(n) <= DAP_PACKET_SIZE);
+
+    free(req); free(resp);
+}
+
+/* W5 batch-packing fix: a batched read TransferBlock count=127 has a 512-byte
+ * response; with the old estimator (which read the wrong offsets and treated
+ * the block as a write, 3 bytes) it was admitted and overflowed the 512-byte
+ * batch response by 2 bytes (ASan).  It must be rejected before execution. */
+static void test_w5_batch_read_block_overflow_rejected(void)
+{
+    uint8_t *req = calloc(1, DAP_PACKET_SIZE);
+    uint8_t *resp = calloc(1, DAP_PACKET_SIZE);
+    uint32_t n;
+
+    DAP_Data.debug_port = DAP_PORT_SWD;
+    req[0] = ID_DAP_ExecuteCommands;
+    req[1] = 1U;
+    req[2] = ID_DAP_TransferBlock; /* 0x06 */
+    req[3] = 0U;                   /* DAP index */
+    req[4] = 127U;                 /* count low */
+    req[5] = 0U;                   /* count high */
+    req[6] = DAP_TRANSFER_RnW;     /* read */
+
+    n = DAP_ProcessCommand(req, resp);
+    printf("[W5] 0x7F batch read block count=127 -> processed=%u resp_len=%u\n",
+           resp[1], resp_len(n));
+    CHECK(resp[0] == ID_DAP_ExecuteCommands);
+    CHECK(resp[1] == 0U);          /* rejected before touching the response tail */
+    CHECK(resp_len(n) == 2U);
+
+    free(req); free(resp);
+}
+
 int main(void)
 {
     DAP_Setup();
@@ -384,6 +481,9 @@ int main(void)
     test_n9_transferblock_in_0x7f_batch();
     test_n9_transferblock_in_0x7e_alias();
     test_n6_swj_pins_wait_microseconds();
+    test_w5_batch_exact_write_packing();
+    test_w5_batch_exact_read_packing();
+    test_w5_batch_read_block_overflow_rejected();
 
     printf("== %d checks passed, %d failed ==\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

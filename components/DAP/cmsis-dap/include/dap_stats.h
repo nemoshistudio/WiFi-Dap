@@ -14,13 +14,20 @@
 
 #include <stdint.h>
 
-#include "sdkconfig.h"
+/* Host builds (tests/host/dap ASan harness) compile this file without an
+ * ESP-IDF sdkconfig.h; the guard keeps the header usable there and leaves the
+ * counters disabled. */
+#if defined(__has_include)
+#  if __has_include("sdkconfig.h")
+#    include "sdkconfig.h"
+#  endif
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#if CONFIG_BIRDIEBOT_DAP_STATS
+#if defined(CONFIG_BIRDIEBOT_DAP_STATS) && CONFIG_BIRDIEBOT_DAP_STATS
 
 #define DAP_STATS_ENABLED 1
 
