@@ -47,7 +47,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | SoC | ESP32-S3 | ✅ hardware target | 8 MB flash, default board `BOARD_ZXR_DAP_S3`, dual OTA slots |
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA, not hardware-validated |
 | Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
-| Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`; ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); F4 and H7 flash are real-hardware verified; see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
+| Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`/`.elf`/`.hex`/`.srec` (front-end converts to a raw image); ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); F4 and H7 flash are real-hardware verified; see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
 | USB transport | USBIP / WinUSB | ✅ | CMSIS-DAP v2 on TCP **3240**; Windows: usbip-win 0.3.0 `attach_ude` |
 | Toolchains | OpenOCD / pyOCD / Keil | ✅ | Via CMSIS-DAP v2; **use OpenOCD master for 2.4× faster reads** (see [docs/openocd-master.md](docs/openocd-master.md)) |
@@ -211,7 +211,7 @@ Entry point: `http://<device-ip>/` (defaults to `/#/uart`). The frontend talks t
 | **About** | `/#/about` | Firmware / protocol / Web UI / hardware versions, serial number, IDF version |
 | **Feedback** | `/#/feedback` | Feedback entry points (author/project pages) |
 
-- Languages: Chinese / English (367 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
+- Languages: Chinese / English (382 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
 - Security: no login/auth (removed by design); the Web UI is usable from the trusted LAN only (see [§9](#9-security-defaults--hardening)).
 - Screenshots: [UART terminal](web/assets/uart.png)
 - Note: the former Widget / `#/widget` dashboard was removed on 2026-10-21 (the UART page keeps the data viewer, macros and its full feature set).

@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 367
+const EXPECTED_TOTAL = 382
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 219
+const EXPECTED_ADDED = 234
 
 const errors = []
 const warnings = []
@@ -129,6 +129,10 @@ const ADDED_KEYS = [
         'confirmFlashTitle', 'confirmFlash', 'noTargetHint', 'selectFirst', 'flashing',
         'flashingHint', 'uploadProgress', 'deviceStatus', 'success', 'failed', 'result',
         'written', 'reset', 'resetting', 'resetSuccess', 'resetFailed',
+        // 目标烧录多格式支持（BIN/ELF/HEX/SREC 前端转换）
+        'sourceFile', 'fileFormat', 'convertedImage', 'imageSize', 'flashUsage', 'segments',
+        'formatBin', 'formatElf', 'formatHex', 'formatSrec', 'ignoredSegments', 'filledGaps',
+        'debugInfoIgnored', 'convertComputing', 'convertFailed',
     ]),
     // 变量曲线页面（WS-DAP 采样 + ELF 选变量 + canvas 实时图）新增 41 个 + page.debugCurve
     ...keys('curve', [

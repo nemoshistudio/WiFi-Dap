@@ -65,19 +65,61 @@
     <input
         ref="fileInputRef"
         type="file"
-        accept=".bin,application/octet-stream"
+        accept=".bin,.elf,.out,.hex,.ihex,.srec,.s19,.mot,application/octet-stream"
         class="hidden"
         @change="onFileSelected"
     />
 
+    <el-alert v-if="converting" class="mt-2" type="info" :title="translate('target.convertComputing')" :closable="false" show-icon/>
+    <el-alert v-if="convertError" class="mt-2" type="error" :title="convertError" :closable="false" show-icon/>
+
     <el-descriptions v-if="selectedFile" class="mt-2" border :column="1">
-      <el-descriptions-item :label="translate('target.fileName')">{{ selectedFile.name }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.sourceFile')">{{ selectedFile.name }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.fileSize')">{{ formatBytes(selectedFile.size) }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.fileFormat')">{{ detectedFormat ? formatLabel(detectedFormat) : '-' }}</el-descriptions-item>
+    </el-descriptions>
+
+    <el-descriptions
+        v-if="firmware"
+        class="mt-2"
+        border
+        :column="1"
+        :title="translate('target.convertedImage')"
+    >
+      <el-descriptions-item :label="translate('target.fileFormat')">{{ formatLabel(firmware.format) }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.flashBase')">{{ formatRegister(firmware.base) }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.imageSize')">{{ formatBytes(firmware.image.length) }} ({{ firmware.image.length }} B)</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.flashUsage')">{{ flashUsageText }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.segments')">{{ firmware.segments.length }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.sha256')">
         <span v-if="hashing">{{ translate('target.hashComputing') }}</span>
         <span v-else class="font-mono text-xs break-all">{{ fileSha256 || '-' }}</span>
       </el-descriptions-item>
     </el-descriptions>
+    <el-alert
+        v-if="firmware && firmware.ignoredRamSegments > 0"
+        class="mt-2"
+        type="info"
+        :title="translate('target.ignoredSegments', {count: firmware.ignoredRamSegments})"
+        :closable="false"
+        show-icon
+    />
+    <el-alert
+        v-if="firmware && firmware.filledGapBytes > 0"
+        class="mt-2"
+        type="info"
+        :title="translate('target.filledGaps', {size: formatBytes(firmware.filledGapBytes)})"
+        :closable="false"
+        show-icon
+    />
+    <el-alert
+        v-if="firmware && firmware.format === 'elf'"
+        class="mt-2"
+        type="info"
+        :title="translate('target.debugInfoIgnored')"
+        :closable="false"
+        show-icon
+    />
 
     <div class="flex flex-wrap gap-2 justify-center mt-4">
       <el-button
@@ -121,6 +163,7 @@
         border
         :column="1"
     >
+      <el-descriptions-item :label="translate('target.fileFormat')">{{ firmware ? formatLabel(firmware.format) : '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.family')">{{ result.series || targetInfo?.series || result.family || targetInfo?.family || '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.model')">{{ targetInfo?.device || '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.idcode')">
@@ -154,7 +197,7 @@
 </template>
 
 <script setup lang="ts">
-import {computed, onUnmounted, ref} from "vue";
+import {computed, onUnmounted, ref, shallowRef} from "vue";
 import {ElMessageBox} from "element-plus";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
@@ -168,7 +211,13 @@ import {
   type TargetInfo,
   type TargetStatus,
 } from "@/api/apiTarget";
-import {sha256Hex} from "@/utils/sha256";
+import {sha256HexSync} from "@/utils/sha256";
+import {
+  detectFirmwareFormat,
+  firmwareImageFromFile,
+  type FirmwareFormat,
+  type FirmwareImage,
+} from "@/utils/firmwareImage";
 
 type FlashPhase = 'idle' | 'flashing' | 'success' | 'error'
 
@@ -177,6 +226,11 @@ const detecting = ref(false);
 const detectError = ref('');
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const selectedFile = ref<File | null>(null);
+const firmware = shallowRef<FirmwareImage | null>(null);
+const imageBytes = shallowRef<Uint8Array | null>(null);
+const detectedFormat = ref<FirmwareFormat | null>(null);
+const convertError = ref('');
+const converting = ref(false);
 const fileSha256 = ref('');
 const hashing = ref(false);
 const phase = ref<FlashPhase>('idle');
@@ -190,14 +244,32 @@ const resetting = ref(false);
 let statusTimer = 0;
 let flashHandle: { abort(): void } | null = null;
 
+/** 未检测到目标芯片时的转换默认值（STM32 典型 Flash），检测成功后以设备返回为准。 */
+const DEFAULT_FLASH_BASE = 0x08000000;
+const DEFAULT_FLASH_SIZE = 0x00100000;
+
 const flashing = computed(() => phase.value === 'flashing');
 const canFlash = computed(() => {
   return targetInfo.value?.detected === true
       && targetInfo.value?.supported !== false
-      && selectedFile.value !== null
+      && firmware.value !== null
+      && imageBytes.value !== null
       && fileSha256.value.length > 0
       && !hashing.value
+      && !converting.value
       && !flashing.value;
+});
+const flashUsageText = computed(() => {
+  const current = firmware.value;
+  if (!current) {
+    return '-';
+  }
+  const flashSize = targetInfo.value?.flash_size;
+  if (typeof flashSize !== 'number' || flashSize <= 0) {
+    return `${formatBytes(current.image.length)} (${current.image.length} B)`;
+  }
+  const percent = (current.image.length / flashSize) * 100;
+  return `${formatBytes(current.image.length)} / ${formatBytes(flashSize)} (${percent.toFixed(1)} %)`;
 });
 const deviceStatusText = computed(() => {
   const status = deviceStatus.value;
@@ -247,6 +319,31 @@ function formatBoolean(value?: boolean): string {
   return value ? translate('common.yes') : translate('common.no');
 }
 
+function formatLabel(format: FirmwareFormat): string {
+  switch (format) {
+    case 'bin':
+      return translate('target.formatBin');
+    case 'elf':
+      return translate('target.formatElf');
+    case 'hex':
+      return translate('target.formatHex');
+    case 'srec':
+      return translate('target.formatSrec');
+    default:
+      return '-';
+  }
+}
+
+/** 转换使用的目标 Flash 参数（优先设备 /api/target/info 返回值）。 */
+function flashParams(): {base: number; size: number} {
+  const base = targetInfo.value?.flash_base;
+  const size = targetInfo.value?.flash_size;
+  return {
+    base: typeof base === 'number' && base > 0 ? base : DEFAULT_FLASH_BASE,
+    size: typeof size === 'number' && size > 0 ? size : DEFAULT_FLASH_SIZE,
+  };
+}
+
 function stopStatusPolling() {
   if (statusTimer) {
     window.clearInterval(statusTimer);
@@ -291,6 +388,10 @@ async function onDetect() {
   } finally {
     detecting.value = false;
   }
+  // Flash 基地址/容量可能因芯片而异：检测成功后按设备参数重新转换已选固件。
+  if (selectedFile.value && !flashing.value) {
+    await convertSelectedFile(selectedFile.value);
+  }
 }
 
 function openFileDialog() {
@@ -322,36 +423,51 @@ async function selectFile(file: File) {
     return;
   }
   resetResultState();
-  if (!file.name.toLowerCase().endsWith('.bin')) {
-    selectedFile.value = null;
-    globalNotify(translate('target.invalidFile'), 'warning');
-    return;
-  }
+  selectedFile.value = file;
+  firmware.value = null;
+  imageBytes.value = null;
+  detectedFormat.value = null;
+  fileSha256.value = '';
+  convertError.value = '';
   if (file.size <= 0) {
-    selectedFile.value = null;
     globalNotify(translate('target.emptyFile'), 'warning');
     return;
   }
-  const flashSize = targetInfo.value?.flash_size;
-  if (typeof flashSize === 'number' && flashSize > 0 && file.size > flashSize) {
-    selectedFile.value = null;
-    globalNotify(translate('target.fileTooLarge', {size: formatBytes(flashSize)}), 'warning');
-    return;
-  }
-  selectedFile.value = file;
+  await convertSelectedFile(file);
+}
+
+/**
+ * 把任意支持的固件格式转换为“从 flash_base 开始的裸镜像”，
+ * 并对转换后的镜像（而非源文件）计算 SHA-256 / 大小校验。
+ */
+async function convertSelectedFile(file: File) {
+  const params = flashParams();
+  converting.value = true;
+  convertError.value = '';
+  firmware.value = null;
+  imageBytes.value = null;
   fileSha256.value = '';
-  hashing.value = true;
   try {
-    const buffer = await file.arrayBuffer();
-    fileSha256.value = await sha256Hex(buffer);
+    const result = await firmwareImageFromFile(file, params.base, params.size);
+    firmware.value = result;
+    imageBytes.value = result.image;
+    detectedFormat.value = result.format;
+    hashing.value = true;
+    fileSha256.value = sha256HexSync(result.image);
   } catch (error) {
-    fileSha256.value = '';
-    globalNotify(translate('common.failed'), 'error');
+    detectedFormat.value = detectedFormat.value
+        ?? detectFirmwareFormat(file.name, null);
+    const message = error instanceof Error ? error.message : 'unknown error';
+    convertError.value = /unsupported firmware format/.test(message)
+        ? translate('target.invalidFile')
+        : translate('target.convertFailed', {err: message});
+    globalNotify(convertError.value, 'warning');
     if (import.meta.env.VITE_APP_MODE === 'dev') {
-      console.warn('[target] sha256 failed', error);
+      console.warn('[target] firmware conversion failed', error);
     }
   } finally {
     hashing.value = false;
+    converting.value = false;
   }
 }
 
@@ -384,7 +500,7 @@ async function onStartFlash() {
     globalNotify(translate('target.unsupportedFamily'), 'warning');
     return;
   }
-  if (!selectedFile.value) {
+  if (!firmware.value || !imageBytes.value) {
     globalNotify(translate('target.selectFirst'), 'warning');
     return;
   }
@@ -392,7 +508,7 @@ async function onStartFlash() {
     globalNotify(translate('common.failed'), 'error');
     return;
   }
-  const sizeText = formatBytes(selectedFile.value.size);
+  const sizeText = formatBytes(imageBytes.value.length);
   const confirmed = await ElMessageBox.confirm(
       translate('target.confirmFlash', {size: sizeText}),
       translate('target.confirmFlashTitle'),
@@ -407,7 +523,9 @@ async function onStartFlash() {
   }
   resetResultState();
   phase.value = 'flashing';
-  flashHandle = flashTarget(selectedFile.value, fileSha256.value, {
+  // 设备端只接收裸镜像：发送转换后的 image（不是源 ELF/HEX 文件）。
+  const payload = new Blob([imageBytes.value as BlobPart], {type: 'application/octet-stream'});
+  flashHandle = flashTarget(payload, fileSha256.value, {
     onUploadProgress: (loaded, total) => {
       uploadPercent.value = total > 0 ? Math.min(100, (loaded / total) * 100) : 0;
     },

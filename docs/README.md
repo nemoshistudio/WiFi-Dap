@@ -67,6 +67,7 @@
 | [scripts/dap_stats_query.py](../scripts/dap_stats_query.py) | 自动化脚本 | stats 构建的 Vendor9 profiling 计数器读取（pyusb 原始 CMSIS-DAP，无需串口） | ✅ 已入库（2026-10-21） |
 | [web-variable-curve.md](web-variable-curve.md) | Web 功能说明 | 浏览器变量曲线页：ELF 选变量、WS-DAP 采样、`/api/dap/kick` 接管、复位/限速/导出、限制与验收证据 | ✅ 新增（2026-10-21） |
 | [ozone-timeline-hss-feasibility.md](ozone-timeline-hss-feasibility.md) | 可行性报告 | Ozone Timeline(HSS) 接入 WiFi DAP：官方支持边界、代理 DLL 方案、ABI、风险与 Phase-0 门槛 | ✅ 新增（2026-10-21） |
+| [target-flash-formats.md](target-flash-formats.md) | Web 功能说明 | 目标烧录多格式（BIN/ELF/Intel HEX/SREC→裸镜像）、段选择/空隙填充/SHA 契约、真机 4/4 验证 | ✅ 新增（2026-10-21） |
 
 测试文档中的 **【需真机】** / **【本地】** / **【需 4MB 硬件/可选】** 标记约定见各文档开头；C3/ESP32 仅为编译验收目标。
 host 测试报告引用的 `tests/host/**`、`scripts/test_host.sh`、`scripts/dap_smoke.py`、`scripts/test_wifi_*` 等随对应 Wave 3 分支合入，本索引只索引文档、不直接链接这些脚本产物。

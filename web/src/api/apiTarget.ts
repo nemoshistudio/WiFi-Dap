@@ -3,7 +3,8 @@
  *
  * Endpoints (firmware side owned by web-dev/dap-dev):
  * - GET  /api/target/info    -> target detection info
- * - POST /api/target/flash   -> octet-stream app .bin (+ X-Target-SHA256 header)
+ * - POST /api/target/flash   -> octet-stream 裸镜像 (+ X-Target-SHA256 header；
+ *                                镜像由页面把 .bin/.elf/.hex/.srec 统一转换后发送)
  * - POST /api/target/reset   -> {"run":true} SWD reset/run
  * - GET  /api/target/status  -> optional progress snapshot (graceful if unsupported)
  *
@@ -146,9 +147,10 @@ export async function getTargetStatus(): Promise<TargetStatus | null> {
 
 /**
  * POST /api/target/flash (XHR for upload progress).
- * Body is the raw File so the browser sets Content-Length (no chunked upload).
+ * `body` 为转换后的裸 Flash 镜像 Blob（从 flash_base 开始），浏览器自动
+ * 设置 Content-Length（无 chunked upload）；设备端契约不变。
  */
-export function flashTarget(file: File, sha256Hex: string, handlers: TargetFlashHandlers): { abort(): void } {
+export function flashTarget(body: Blob, sha256Hex: string, handlers: TargetFlashHandlers): { abort(): void } {
     const xhr = new XMLHttpRequest()
     let finished = false
 
@@ -207,7 +209,7 @@ export function flashTarget(file: File, sha256Hex: string, handlers: TargetFlash
     xhr.ontimeout = () => fail({httpStatus: 0, err: 'request timeout'})
     xhr.onabort = () => fail({httpStatus: 0, err: 'aborted'})
 
-    xhr.send(file)
+    xhr.send(body)
 
     return {
         abort() {

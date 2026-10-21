@@ -209,7 +209,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 | **About** | `/#/about` | 固件版本 / 协议版本 / Web UI 版本 / 硬件版本 / SN / IDF 版本等信息 |
 | **Feedback** | `/#/feedback` | 反馈入口（作者主页/项目主页链接） |
 
-- 语言：中文 / English 可切换（i18n 367 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
+- 语言：中文 / English 可切换（i18n 382 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
 - 安全：按需求**无登录/鉴权**；Web UI 仅可在可信局域网使用（见 [§9](#9-安全默认与加固)）。
 - 图片预览：[UART 终端](web/assets/uart.png)
 - 说明：原 Widget / `#/widget` 仪表盘页面已于 2026-10-21 移除；UART 页面保留数据显示器、宏命令等全部功能。
