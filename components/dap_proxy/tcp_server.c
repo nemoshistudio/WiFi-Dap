@@ -82,6 +82,30 @@ static void tcp_server_tune_socket(int sock)
     }
 }
 
+/* C1: the host can disappear without a TCP FIN when the USB-NCM link is
+ * re-enumerated or the host network configuration is lost (observed during the
+ * NCM flash-hang investigation: the device kept the old session, kSock stayed
+ * open and the next attach could not be served until the socket timed out).
+ * Default lwIP keepalive is ~2 h; use a few seconds so a dead USBIP peer is
+ * torn down and the next attach can reset the DAP data path.
+ * Keepalive only probes an idle peer: a live OpenOCD session answers the probes,
+ * so an idle-but-healthy session is not dropped.  TCP_KEEP* are optional lwIP
+ * options; when not available only SO_KEEPALIVE is enabled. */
+static void tcp_server_enable_fast_keepalive(int sock)
+{
+    int on = 1;
+    (void)setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (void *)&on, sizeof(on));
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
+    {
+        int idle = 5, intvl = 2, cnt = 3;
+        (void)setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, (void *)&idle, sizeof(idle));
+        (void)setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, (void *)&intvl, sizeof(intvl));
+        (void)setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, (void *)&cnt, sizeof(cnt));
+    }
+#endif
+    (void)on;
+}
+
 void tcp_server_task(void *pvParameters)
 {
     static uint8_t tcp_rx_buffer[4096]; /* static: keep it off the task stack */
@@ -162,9 +186,9 @@ void tcp_server_task(void *pvParameters)
                 close(listen_sock);
                 break;
             }
-            setsockopt(kSock, SOL_SOCKET, SO_KEEPALIVE, (void *)&on, sizeof(on));
             setsockopt(kSock, IPPROTO_TCP, TCP_NODELAY, (void *)&on, sizeof(on));
             tcp_server_tune_socket(kSock); /* A3 */
+            tcp_server_enable_fast_keepalive(kSock); /* C1: stale-session cleanup */
             printf("Socket accepted\r\n");
 
             // Read header
