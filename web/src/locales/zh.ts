@@ -454,6 +454,9 @@ export default {
         exportCsv: '导出 CSV',
         exportPng: '导出 PNG',
         noData: '暂无数据',
+        sampleRateAuto: '自动（目标 ≤100 Hz）',
+        autoRate: 'Auto 目标速率',
+        samplingHint: '实际采样率受网络往返限制；Auto 会自动降低目标采样率以减少丢弃点。',
 
         colName: '名称',
         colType: '类型',

@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 382
+const EXPECTED_TOTAL = 385
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 234
+const EXPECTED_ADDED = 237
 
 const errors = []
 const warnings = []
@@ -147,6 +147,8 @@ const ADDED_KEYS = [
         // DWARF 类型浏览器增量
         'colName', 'colType', 'colAddress', 'colSize', 'colSource', 'dwarfParsed',
         'dwarfFallback', 'symtabNotice', 'expandAll', 'collapseAll', 'wideHint', 'unknownType',
+        // 采样管线 / Auto 采样率
+        'sampleRateAuto', 'autoRate', 'samplingHint',
     ]),
     ...keys('page', ['debugCurve']),
 ]

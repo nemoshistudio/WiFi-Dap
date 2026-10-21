@@ -68,10 +68,16 @@
         <label class="flex items-center gap-2">
           <span class="whitespace-nowrap">{{ translate('curve.sampleRate') }}</span>
           <el-select v-model="sampleRate" size="small" style="width: 8rem" :disabled="sampling">
-            <el-option v-for="rate in SAMPLE_RATES" :key="rate" :value="rate" :label="rate + ' Hz'"/>
+            <el-option
+                v-for="rate in SAMPLE_RATES"
+                :key="rate"
+                :value="rate"
+                :label="rate === 0 ? translate('curve.sampleRateAuto') : rate + ' Hz'"
+            />
           </el-select>
         </label>
         <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
+        <span v-if="sampleRate === 0">{{ translate('curve.autoRate') }}: <b>{{ autoRateDisplay }} Hz</b></span>
         <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
         <span>{{ translate('curve.failedCount') }}: <b>{{ failedCount }}</b></span>
         <span>{{ translate('curve.droppedCount') }}: <b>{{ droppedCount }}</b></span>
@@ -82,6 +88,7 @@
           </el-select>
         </label>
       </div>
+      <div class="mt-1 text-xs opacity-70">{{ translate('curve.samplingHint') }}</div>
     </section>
 
     <!-- ELF / DWARF 变量浏览器 -->
@@ -268,7 +275,20 @@ import {
 } from '@/utils/elfSymbols'
 
 const FORMATS: DisplayFormat[] = ['auto', 'u32', 'i32', 'f32']
-const SAMPLE_RATES = [10, 20, 50, 100]
+/**
+ * 采样率选项；0 = Auto（自适应目标速率）。
+ * 默认 100 Hz；WS-DAP 管线化后实际速率受网络往返限制，Auto 会自动降低目标
+ * 采样率以减少“丢弃点数”。
+ */
+const SAMPLE_RATES = [0, 10, 20, 50, 100]
+/** 0 = Auto 模式标识。 */
+const SAMPLE_RATE_AUTO = 0
+/** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
+const PIPELINE_DEPTH = 8
+const AUTO_MIN_RATE = 10
+const AUTO_MAX_RATE = 100
+/** Auto 自适应窗口（毫秒）。 */
+const AUTO_RATE_WINDOW_MS = 2500
 /** 环形缓冲总点数（约 10 分钟 @100Hz）。 */
 const MAX_POINTS = 60000
 /** 曲线窗口（秒）：X 轴显示最近 20 秒，自动滚动。 */
@@ -315,6 +335,8 @@ const SAMPLE_RATES_DEFAULT = 100
 
 // ---- 页面状态 -------------------------------------------------------------
 const sampleRate = ref(SAMPLE_RATES_DEFAULT)
+/** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
+const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<DisplayFormat>('auto')
 const seriesList = ref<CurveSeries[]>([])
 const variableSearch = ref('')
@@ -340,6 +362,7 @@ const sampleCount = ref(0)
 const failedCount = ref(0)
 const droppedCount = ref(0)
 const effectiveRate = ref(0)
+const autoRateDisplay = computed(() => Math.round(autoRate.value))
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const chartWrapRef = ref<HTMLDivElement | null>(null)
@@ -354,10 +377,29 @@ let sampleEpochMs = 0
 let nextSampleAt = 0
 let consecutiveFailures = 0
 let recentCompletions: number[] = []
+/** 采样运行代次：停止/重启后忽略迟到的完成回调。 */
+let samplingRunId = 0
+/** 已发出、尚未完成的采样请求数。 */
+let inflightSamples = 0
+// Auto 速率控制窗口统计
+let autoWindowStart = 0
+let autoWindowBeats = 0
+let autoWindowSkipped = 0
+let autoWindowCompletions = 0
+let autoWindowInflightSum = 0
+let autoWindowInflightCount = 0
+/** Auto 连续“差/好”窗口计数：避免偶发抖动导致速率被棘轮式压低。 */
+let autoBadWindows = 0
+let autoGoodWindows = 0
 let constantReference: Uint8Array[] | null = null
 let constantSamples = 0
 let resizeObserver: ResizeObserver | null = null
 let drawPending = false
+/** 采样统计的 UI 刷新节流：采样本身在 100Hz 完成，但 Vue 响应式/DOM 更新不必
+ *  每个点都触发（否则主线程频繁重渲染会造成采样节拍抖动和管线积压）。 */
+let statsTimer = 0
+let lastStatsAt = 0
+let droppedPending = 0
 
 // 环形缓冲：timestamps/slotSeq 按写入顺序共享；每个曲线存 64-bit 原始值的
 // 低/高 32-bit（支持 DWARF 的 1/2/4/8 字节 + 位域）。
@@ -472,6 +514,8 @@ async function onConnect(): Promise<void> {
     pendingTransport.onClose = (reason) => handleTransportClosed(reason)
     const nextClient = new CmsisDapClient(pendingTransport)
     const info = await nextClient.connect()
+    // bring-up 全部串行完成后再开启采样管线（connect/info/config 保持串行语义）。
+    nextClient.setPipelineDepth(PIPELINE_DEPTH)
     transport = pendingTransport
     pendingTransport = null
     client = nextClient
@@ -535,7 +579,87 @@ async function onResetTarget(): Promise<void> {
   }
 }
 
-// ---- 采样循环 -------------------------------------------------------------
+// ---- 采样循环（节拍调度与完成事件解耦，WS-DAP 管线化） -------------------
+function currentTargetRate(): number {
+  if (sampleRate.value === SAMPLE_RATE_AUTO) return autoRate.value
+  return sampleRate.value
+}
+
+function resetAutoWindow(now: number): void {
+  autoWindowStart = now
+  autoWindowBeats = 0
+  autoWindowSkipped = 0
+  autoWindowCompletions = 0
+  autoWindowInflightSum = 0
+  autoWindowInflightCount = 0
+}
+
+/**
+ * Auto 自适应：每个窗口（约 1.5s）评估一次。
+ *  - 窗口内出现被跳过的发送节拍 → 目标速率 *0.85（减少丢弃）；
+ *  - 否则完成数 ≥ 0.9*目标速率且平均在途数 < depth/2 → *1.10（尝试提高）。
+ */
+function maybeAdjustAutoRate(now: number): void {
+  if (sampleRate.value !== SAMPLE_RATE_AUTO) return
+  if (now - autoWindowStart < AUTO_RATE_WINDOW_MS) return
+  let next = autoRate.value
+  const skipRatio = autoWindowBeats > 0 ? autoWindowSkipped / autoWindowBeats : 0
+  const averageInflight = autoWindowInflightCount > 0
+      ? autoWindowInflightSum / autoWindowInflightCount
+      : 0
+  if (skipRatio > 0.03) {
+    autoBadWindows += 1
+    autoGoodWindows = 0
+    // 连续两个窗口管线都吃紧才降速，避免单个抖动窗口造成“棘轮降速”。
+    if (autoBadWindows >= 2) {
+      next = Math.max(AUTO_MIN_RATE, autoRate.value * 0.90)
+      autoBadWindows = 0
+    }
+  } else {
+    autoGoodWindows += 1
+    autoBadWindows = 0
+    const canRise = skipRatio <= 0.005 &&
+        autoWindowCompletions >= 0.9 * autoRate.value &&
+        averageInflight < PIPELINE_DEPTH * 0.5
+    if (canRise && autoGoodWindows >= 3) {
+      // 连续干净窗口：小幅升速（优先把丢弃点压到接近 0）。
+      next = Math.min(AUTO_MAX_RATE, autoRate.value * 1.05)
+    }
+  }
+  resetAutoWindow(now)
+  if (Math.abs(next - autoRate.value) > 0.01) {
+    autoRate.value = next
+    // 速率变化后按新周期重新对齐下一个节拍。
+    if (sampleTimer) {
+      window.clearTimeout(sampleTimer)
+      sampleTimer = 0
+    }
+    nextSampleAt = performance.now()
+    scheduleBeat(samplingRunId, 1000 / Math.max(currentTargetRate(), 1))
+  }
+}
+
+/** 以约 8 Hz 刷新采样统计显示，避免每个样本都触发响应式重渲染。 */
+function scheduleStatsFlush(): void {
+  if (statsTimer) return
+  const now = performance.now()
+  const remain = Math.max(0, 120 - (now - lastStatsAt))
+  statsTimer = window.setTimeout(() => {
+    statsTimer = 0
+    flushStats()
+  }, remain)
+}
+
+function flushStats(): void {
+  lastStatsAt = performance.now()
+  sampleCount.value = ringCount
+  effectiveRate.value = recentCompletions.length
+  if (droppedPending > 0) {
+    droppedCount.value += droppedPending
+    droppedPending = 0
+  }
+}
+
 function startSampling(): void {
   if (!connected.value || !client || seriesList.value.length === 0) return
   if (sampling.value) return
@@ -545,84 +669,106 @@ function startSampling(): void {
   consecutiveFailures = 0
   recentCompletions = []
   effectiveRate.value = 0
+  inflightSamples = 0
+  if (sampleRate.value === SAMPLE_RATE_AUTO) {
+    autoRate.value = AUTO_MAX_RATE
+  }
   resetConstantTracking()
-  const lastT = sampleCount.value > 0 ? timestamps[(ringHead - 1 + MAX_POINTS) % MAX_POINTS] : 0
+  const lastT = ringCount > 0 ? timestamps[(ringHead - 1 + MAX_POINTS) % MAX_POINTS] : 0
   sampleEpochMs = performance.now() - lastT * 1000
   nextSampleAt = performance.now()
+  autoBadWindows = 0
+  autoGoodWindows = 0
+  resetAutoWindow(performance.now())
   sampling.value = true
   everSampled.value = true
-  scheduleNextSample(0)
+  const runId = ++samplingRunId
+  scheduleBeat(runId, 0)
 }
 
 function stopSampling(): void {
   sampling.value = false
+  samplingRunId += 1
   if (sampleTimer) {
     window.clearTimeout(sampleTimer)
     sampleTimer = 0
   }
+  inflightSamples = 0
+  flushStats()
 }
 
-function scheduleNextSample(delay: number): void {
-  if (!sampling.value) return
-  if (sampleTimer) window.clearTimeout(sampleTimer)
-  sampleTimer = window.setTimeout(runSample, Math.max(0, delay))
+function scheduleBeat(runId: number, delay: number): void {
+  if (!sampling.value || runId !== samplingRunId) return
+  sampleTimer = window.setTimeout(() => samplingBeat(runId), Math.max(0, delay))
 }
 
-async function runSample(): Promise<void> {
+/** 固定节拍：先排下一拍，再视管线容量决定“发起采样”还是“跳过并计入 dropped”。 */
+function samplingBeat(runId: number): void {
   sampleTimer = 0
-  if (!sampling.value || !client) return
-  const begin = performance.now()
-  // 固定本次采样的曲线快照：读取期间用户可能增删曲线/改地址。
+  if (!sampling.value || runId !== samplingRunId || !client) return
+  const period = 1000 / Math.max(currentTargetRate(), 1)
+  const now = performance.now()
+  nextSampleAt += period
+  if (nextSampleAt < now) {
+    // 浏览器定时器/主线程抖动会让节拍迟到；迟到只是采样时刻轻微漂移，本拍仍会
+    // 发一个采样请求，没有“丢样本”。因此这里只重新对齐相位、不计 dropped。
+    // dropped 只统计“管线已满、主动跳过的采样节拍”（真正的采样点缺失）。
+    nextSampleAt = now + period
+  }
+  scheduleBeat(runId, nextSampleAt - now)
+  autoWindowBeats += 1
+
+  if (inflightSamples >= PIPELINE_DEPTH) {
+    // 管线已满：跳过这一拍（没有数据丢失，只是少发一个采样请求）。
+    droppedPending += 1
+    autoWindowSkipped += 1
+    scheduleStatsFlush()
+    maybeAdjustAutoRate(now)
+    return
+  }
+
   const snapshot = seriesList.value.slice()
   const reads = snapshot.map((item) => ({address: item.sample.address, size: item.sample.size}))
-  try {
-    const rawValues = await client.sampleRaw(reads)
+  const begin = now
+  inflightSamples += 1
+  autoWindowInflightSum += inflightSamples
+  autoWindowInflightCount += 1
+  client.sampleRaw(reads).then((rawValues) => {
+    if (!sampling.value || runId !== samplingRunId) return
+    inflightSamples = Math.max(0, inflightSamples - 1)
+    // 时间戳使用“发起请求”的时刻（管线化后完成时刻会晚于采样时刻）。
     const date = (begin - sampleEpochMs) / 1000
     pushSample(date, rawValues, snapshot)
     trackConstantValues(rawValues)
     consecutiveFailures = 0
-  } catch (error) {
-    consecutiveFailures += 1
-    failedCount.value += 1
-    if (!sampling.value) return
-    if (consecutiveFailures >= 3) {
-      stopSampling()
-      statusError.value = true
-      const message = error instanceof Error ? error.message : 'unknown error'
-      if (transport === null || transport.isClosed) {
-        notice.value = {type: 'error', title: translate('curve.reconnectHint')}
-      } else {
-        notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
-      }
-      scheduleDraw()
-      return
-    }
-    // 读失败：不额外计 dropped，等一个节拍后重试（连续失败 3 次会停止采样）。
-    nextSampleAt = performance.now() + 1000 / sampleRate.value
-    scheduleNextSample(1000 / sampleRate.value)
-    return
-  }
-  const completedAt = performance.now()
-  recentCompletions.push(completedAt)
-  const cutoff = completedAt - 1000
-  while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
-  effectiveRate.value = recentCompletions.length
-  advanceSchedule()
-  scheduleDraw()
+    const completedAt = performance.now()
+    recentCompletions.push(completedAt)
+    const cutoff = completedAt - 1000
+    while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
+    scheduleStatsFlush()
+    autoWindowCompletions += 1
+    maybeAdjustAutoRate(completedAt)
+    scheduleDraw()
+  }).catch((error) => {
+    if (!sampling.value || runId !== samplingRunId) return
+    inflightSamples = Math.max(0, inflightSamples - 1)
+    handleSampleError(error)
+  })
 }
 
-/** 维持固定采样节拍；落后超过一个节拍时计入 dropped 并重新对齐（不补发）。 */
-function advanceSchedule(): void {
-  if (!sampling.value) return
-  const period = 1000 / sampleRate.value
-  const now = performance.now()
-  nextSampleAt += period
-  if (nextSampleAt < now) {
-    const missed = Math.max(1, Math.floor((now - nextSampleAt) / period))
-    droppedCount.value += missed
-    nextSampleAt = now + period
+function handleSampleError(error: unknown): void {
+  failedCount.value += 1
+  consecutiveFailures += 1
+  if (consecutiveFailures < 3) return
+  stopSampling()
+  statusError.value = true
+  const message = error instanceof Error ? error.message : 'unknown error'
+  if (transport === null || transport.isClosed) {
+    notice.value = {type: 'error', title: translate('curve.reconnectHint')}
+  } else {
+    notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
   }
-  scheduleNextSample(nextSampleAt - performance.now())
+  scheduleDraw()
 }
 
 /** 把 DWARF 叶子读到的字节转换成 64-bit 原始值（含位域抽取）。 */
@@ -664,13 +810,15 @@ function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly Cu
   ringHead = (ringHead + 1) % MAX_POINTS
   if (ringCount < MAX_POINTS) ringCount += 1
   sampleSeq += 1
-  sampleCount.value = ringCount
+  scheduleStatsFlush()
 }
 
 function clearData(): void {
   ringHead = 0
   ringCount = 0
   sampleSeq = 0
+  droppedPending = 0
+  if (statsTimer) { window.clearTimeout(statsTimer); statsTimer = 0 }
   sampleCount.value = 0
   failedCount.value = 0
   droppedCount.value = 0

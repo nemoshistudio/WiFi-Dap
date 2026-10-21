@@ -450,6 +450,9 @@ export default {
         exportCsv: 'Export CSV',
         exportPng: 'Export PNG',
         noData: 'No data yet',
+        sampleRateAuto: 'Auto (target ≤100 Hz)',
+        autoRate: 'Auto target',
+        samplingHint: 'Actual rate is limited by network round-trip time; Auto lowers the target rate to reduce dropped samples.',
 
         colName: 'Name',
         colType: 'Type',
