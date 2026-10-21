@@ -203,12 +203,13 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 | 页面 | 路径 | 功能 |
 |---|---|---|
 | **UART** | `/#/uart` | 串口终端（TX/RX）、波特率/数据位/校验/停止位/流控配置；数据走 WS 二进制 `RAW`/`RAW_BROADCAST` 帧 |
+| **变量曲线** | `/#/debug-curve` | 上传 ELF 选择 RAM/Flash 变量，经 WS-DAP 最高 100 Hz 采样并实时画曲线，支持 CSV/PNG 导出（会接管 DAP 会话，见 [docs/web-variable-curve.md](docs/web-variable-curve.md)） |
 | **Wi-Fi** | `/#/wifi` | STA 扫描/连接、已保存网络（最多 8 个，可增删/自动保存）、AP 名称与口令、静态 IP/DNS、AP/STA 模式与 Smart APSTA 延迟 |
 | **Update** | `/#/update` | 浏览器本地 OTA：选择 app `.bin` 上传、实时进度、校验与回滚（仅 S3 8 MB；4 MB 目标显示不支持） |
 | **About** | `/#/about` | 固件版本 / 协议版本 / Web UI 版本 / 硬件版本 / SN / IDF 版本等信息 |
 | **Feedback** | `/#/feedback` | 反馈入口（作者主页/项目主页链接） |
 
-- 语言：中文 / English 可切换（i18n 312 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
+- 语言：中文 / English 可切换（i18n 355 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
 - 安全：按需求**无登录/鉴权**；Web UI 仅可在可信局域网使用（见 [§9](#9-安全默认与加固)）。
 - 图片预览：[UART 终端](web/assets/uart.png)
 - 说明：原 Widget / `#/widget` 仪表盘页面已于 2026-10-21 移除；UART 页面保留数据显示器、宏命令等全部功能。

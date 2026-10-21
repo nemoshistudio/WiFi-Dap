@@ -23,7 +23,7 @@ idf_component_register(
         #   (SHA-256 of the uploaded image; uri_target.c)
         # - web_host_guard (browser Host/Origin safety): no extra dependency
         PRIV_REQUIRES request_runner api_router json memory_pool utils html SSDP ws_router wt_common uart_service dataflow wt_ota
-                     target_flash mbedtls
+                     target_flash mbedtls dap_proxy
 )
 
 idf_component_set_property(${COMPONENT_NAME} WHOLE_ARCHIVE ON)

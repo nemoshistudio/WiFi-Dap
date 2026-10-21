@@ -50,6 +50,19 @@
 
 int kSock = -1;
 
+/* Drop the active DAP proxy session.  kSock is only assigned by the
+ * tcp_server task and reset to -1 before the fd is closed; shutdown() from
+ * another task wakes the blocked recv()/usbip loop so the session handler
+ * returns through its normal cleanup path (RESET_HANDLE hand-off included). */
+void tcp_server_kick_session(void)
+{
+    int fd = kSock;
+    if (fd >= 0) {
+        printf("tcp_server: kicking active DAP session fd=%d\r\n", fd);
+        shutdown(fd, SHUT_RDWR);
+    }
+}
+
 /*
  * A3: larger per-socket TCP buffers for the USBIP data path.
  *

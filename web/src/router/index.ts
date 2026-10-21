@@ -1,6 +1,7 @@
 import {createRouter, createWebHashHistory, type RouteLocationNormalizedLoaded} from 'vue-router'
 import Wifi from '@/views/Wifi.vue'
 import TargetFlash from '@/views/TargetFlash.vue'
+import DebugCurve from '@/views/DebugCurve.vue'
 import About from '@/views/About.vue'
 import Uart from '@/views/Uart.vue'
 import Page404 from '@/views/404.vue'
@@ -38,6 +39,8 @@ function translateRouteTitle(name: unknown): string {
             return translate('page.about');
         case 'targetFlash':
             return translate('target.title');
+        case 'debugCurve':
+            return translate('page.debugCurve');
         case 'update':
             return translate('page.update');
         default:
@@ -89,6 +92,11 @@ const router = createRouter({
             meta: { titleKey: 'target.title' },
             name: 'targetFlash',
             component: TargetFlash,
+        }, {
+            path: '/debug-curve:ext(.*)',
+            meta: { titleKey: 'page.debugCurve' },
+            name: 'debugCurve',
+            component: DebugCurve,
         }, {
             path: '/about:ext(.*)',
             meta: { titleKey: 'page.about' },

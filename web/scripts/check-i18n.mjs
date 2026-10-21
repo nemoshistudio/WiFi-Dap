@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 312
+const EXPECTED_TOTAL = 355
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 164
+const EXPECTED_ADDED = 207
 
 const errors = []
 const warnings = []
@@ -130,6 +130,18 @@ const ADDED_KEYS = [
         'flashingHint', 'uploadProgress', 'deviceStatus', 'success', 'failed', 'result',
         'written', 'reset', 'resetting', 'resetSuccess', 'resetFailed',
     ]),
+    // 变量曲线页面（WS-DAP 采样 + ELF 选变量 + canvas 实时图）新增 41 个 + page.debugCurve
+    ...keys('curve', [
+        'takeoverHint', 'takeoverConfirmTitle', 'kickFailed', 'connectFailed', 'reconnectHint',
+        'usbipReattachHint', 'connect', 'disconnect', 'start', 'stop', 'clear',
+        'statusIdle', 'statusConnecting', 'statusConnected', 'statusSampling', 'statusStopped',
+        'statusError', 'targetHalted', 'resumeTarget', 'resetTarget', 'sampleRate', 'effectiveRate', 'points',
+        'failedCount', 'droppedCount', 'format', 'elfUpload', 'elfHint', 'elfParsed', 'elfInvalid',
+        'searchPlaceholder', 'variables', 'selected', 'noSymbols', 'manualAddress',
+        'manualAddressHint', 'addAddress', 'invalidAddress', 'maxSeries', 'exportCsv', 'exportPng',
+        'noData',
+    ]),
+    ...keys('page', ['debugCurve']),
 ]
 
 const EXPECTED_KEYS = [...BASELINE_KEYS, ...ADDED_KEYS]

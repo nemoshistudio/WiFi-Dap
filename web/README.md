@@ -16,6 +16,7 @@ From this interface you can monitor and interact with your target device.
 
 *   **Wi-Fi Configuration**: Easily configure Wi-Fi settings including station mode (STA) and access point mode (AP), with support for static/dynamic IP addressing and DNS settings.
 *   **Real-time Data Visualization**: Includes a UART data viewer for monitoring serial communication from your target device.
+*   **Variable Curves (`#/debug-curve`)**: Upload an ELF, select RAM/Flash variables, sample at up to 100 Hz over WS-DAP and plot live curves (CSV/PNG export). See `docs/web-variable-curve.md`.
 *   **Embedded-First Design**: Deploy in single .html file to reduce the number of http connection.
 *   **Designed to be usable on small screen**: Responsive layout that adapts to mobile devices and tablets, with touch-friendly controls and optimized UI elements for small displays.
 

@@ -215,6 +215,10 @@ import {nextTick, onMounted, onUnmounted, ref, watch} from "vue";
 import {useDataViewerStore} from "@/stores/dataViewerStore";
 import InlineSvg from "@/components/InlineSvg.vue";
 import TextDataConfig from "@/views/text-data-viewer/textDataConfig.vue";
+// Vuetify is only used for the virtual-scroll list on this page. Import the
+// single component directly (its own CSS is pulled in by the component module)
+// instead of registering the whole framework + global Vuetify stylesheet.
+import { VVirtualScroll } from "vuetify/components/VVirtualScroll";
 import {debouncedWatch} from "@vueuse/core";
 import {globalNotify} from "@/composables/notification";
 import {translate} from "@/locales";

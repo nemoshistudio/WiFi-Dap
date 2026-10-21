@@ -49,6 +49,7 @@
 #include "web_error_json.h"
 
 #include "wt_target_flash.h"
+#include "tcp_server.h"
 
 #include <sdkconfig.h>
 
@@ -84,6 +85,7 @@
 #define TARGET_URI_FLASH  "/api/target/flash"
 #define TARGET_URI_STATUS "/api/target/status"
 #define TARGET_URI_RESET  "/api/target/reset"
+#define DAP_URI_KICK      "/api/dap/kick"
 
 #define TARGET_CHUNK_SIZE      4096
 #define TARGET_JSON_MAX        768
@@ -633,6 +635,20 @@ static esp_err_t target_flash_handler(httpd_req_t *req)
 	return target_send_json(req, 200, TARGET_CMD_FLASH, root);
 }
 
+/* POST /api/dap/kick                                                         */
+/* Drop the active USBIP/elaphureLink/WS-DAP session so the browser can open  */
+/* its own WS-DAP connection on TCP 3240 (Web UI variable-curve page).       */
+static esp_err_t dap_kick_handler(httpd_req_t *req)
+{
+    (void)req;
+    tcp_server_kick_session();
+    static const char resp[] = "{\"module\":7,\"cmd\":1,\"ok\":true,\"kicked\":true}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, "200 OK");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Registration                                                              */
 /* ------------------------------------------------------------------------- */
@@ -661,6 +677,12 @@ static const httpd_uri_t uri_target_reset = {
 	.handler = target_reset_handler,
 };
 
+static const httpd_uri_t dap_kick = {
+	.uri = DAP_URI_KICK,
+	.method = HTTP_POST,
+	.handler = dap_kick_handler,
+};
+
 void uri_target_register(httpd_handle_t server)
 {
 	esp_err_t err = wt_tf_init();
@@ -676,6 +698,7 @@ void uri_target_register(httpd_handle_t server)
 		{TARGET_URI_FLASH, &uri_target_flash},
 		{TARGET_URI_STATUS, &uri_target_status},
 		{TARGET_URI_RESET, &uri_target_reset},
+		{DAP_URI_KICK, &dap_kick},
 	};
 
 	for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); ++i) {

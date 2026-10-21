@@ -107,10 +107,10 @@ void start_webserver(void)
 	 * not as a generic socket error. Also used as the per-request recv timeout
 	 * by esp_http_server. */
 	config.recv_wait_timeout = 10;
-	/* URI handlers: 4x /api/target (uri_target.c) + /ws, /api, /api/ota/upload
-	 * and the "/" SPA fallback = 8 with the default limit, so keep headroom for
-	 * future endpoints. */
-	config.max_uri_handlers = 12;
+	/* URI handlers: 4x /api/target + /api/dap/kick (uri_target.c) + /ws, /api,
+	 * /api/ota/upload and the "/" SPA fallback = 9 with the default limit, so
+	 * keep headroom for future endpoints. */
+	config.max_uri_handlers = 14;
 
 	ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
 	if ((err = httpd_start(&http_server, &config)) != ESP_OK) {

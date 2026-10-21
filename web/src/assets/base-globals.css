@@ -1,0 +1,20 @@
+/*
+ * Global page defaults.
+ *
+ * These declarations used to come implicitly from Vuetify's global stylesheet
+ * (`import 'vuetify/styles'`), which was dropped because the app only uses the
+ * single `VVirtualScroll` component. Keep exactly the global rules the layout
+ * relies on so typography, horizontal-overflow clipping and font smoothing do
+ * not change. Do not add component styles here - use per-component CSS imports
+ * (Element Plus) or the component's own stylesheet instead.
+ */
+html {
+  font-family: "Roboto", sans-serif;
+  line-height: 1.5;
+  font-size: 1rem;
+  overflow-x: hidden;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+}

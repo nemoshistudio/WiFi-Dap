@@ -65,6 +65,8 @@
 | [c1-ncm-flash-hang-analysis.md](c1-ncm-flash-hang-analysis.md) | C1 烧录卡死走查 | NCM 烧录卡死的代码走查与根因假设（历史分析，w7/c1review） | ✅ 已入库（2026-10-21） |
 | [h7-flash-speedup.md](h7-flash-speedup.md) | 速度优化报告 | H7 烧录/调试 A/B 实测（sysprogs 分析、OpenOCD 候选、时钟扫描、增量烧录、C4 负结果） | ✅ 已入库（2026-10-21） |
 | [scripts/dap_stats_query.py](../scripts/dap_stats_query.py) | 自动化脚本 | stats 构建的 Vendor9 profiling 计数器读取（pyusb 原始 CMSIS-DAP，无需串口） | ✅ 已入库（2026-10-21） |
+| [web-variable-curve.md](web-variable-curve.md) | Web 功能说明 | 浏览器变量曲线页：ELF 选变量、WS-DAP 采样、`/api/dap/kick` 接管、复位/限速/导出、限制与验收证据 | ✅ 新增（2026-10-21） |
+| [ozone-timeline-hss-feasibility.md](ozone-timeline-hss-feasibility.md) | 可行性报告 | Ozone Timeline(HSS) 接入 WiFi DAP：官方支持边界、代理 DLL 方案、ABI、风险与 Phase-0 门槛 | ✅ 新增（2026-10-21） |
 
 测试文档中的 **【需真机】** / **【本地】** / **【需 4MB 硬件/可选】** 标记约定见各文档开头；C3/ESP32 仅为编译验收目标。
 host 测试报告引用的 `tests/host/**`、`scripts/test_host.sh`、`scripts/dap_smoke.py`、`scripts/test_wifi_*` 等随对应 Wave 3 分支合入，本索引只索引文档、不直接链接这些脚本产物。

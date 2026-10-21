@@ -204,6 +204,9 @@ const menuItems: ComputedRef<Item[]> = computed(() => ([
   }, {
     name: translate("target.title"),
     href: "/target",
+  }, {
+    name: translate("page.debugCurve"),
+    href: "/debug-curve",
   },
 ]));
 
@@ -215,6 +218,9 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
     }, {
       name: translate("target.title"),
       href: "/target",
+    }, {
+      name: translate("page.debugCurve"),
+      href: "/debug-curve",
     }, {
       name: translate("page.uart"),
       href: "/uart",
