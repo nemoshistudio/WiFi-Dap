@@ -1,0 +1,161 @@
+# DAP/ USBIP session-reset hardening (2/2): dap_respond underflow clamp, drain
+# before counter reset, and dap_handle_wait_reset() reporting a RESET_HANDLE that
+# could not re-create the ring buffers. PROPOSED, NOT APPLIED (see
+# docs/c1-second-session-analysis.md sections 4-5 for trade-offs).
+--- a/components/dap_proxy/DAP_handle.c
++++ b/components/dap_proxy/DAP_handle.c
+@@ -163,6 +163,9 @@
+ static volatile uint32_t s_dbg_cmd_in;
+ static volatile uint32_t s_dbg_cmd_done;
+ static volatile uint32_t s_dbg_resp_out;
++/* Mode of the last applied reset request (reported by dap_handle_wait_reset()
++ * when a RESET_HANDLE failed to re-create the ring buffers). */
++static volatile int s_last_reset_mode = NO_SIGNAL;
+ 
+ 
+ static DapPacket_t DAPDataProcessed;
+@@ -223,6 +226,33 @@
+     }
+ }
+ 
++/* dap_respond counts the responses waiting in the OUT ring.  It is updated by
++ * the DAP task (producer) and decremented by the TCP task (fast_reply /
++ * pipeline take).  A session reset races with the consumer, so the decrement
++ * is clamped and a reset uses dap_respond_reset() instead of a bare
++ * "dap_respond = 0". */
++static void dap_respond_add(int delta)
++{
++    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
++        if (delta < 0) {
++            if (dap_respond > 0) {
++                --dap_respond;
++            }
++        } else {
++            ++dap_respond;
++        }
++        xSemaphoreGive(data_response_mux);
++    }
++}
++
++static void dap_respond_reset(void)
++{
++    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
++        dap_respond = 0;
++        xSemaphoreGive(data_response_mux);
++    }
++}
++
+ void free_dap_ringbuf(void) {
+     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+         if (dap_dataIN_handle) {
+@@ -233,6 +263,7 @@
+         }
+ 
+         dap_dataIN_handle = dap_dataOUT_handle = NULL;
++        dap_respond = 0;
+         xSemaphoreGive(data_response_mux);
+     }
+ 
+@@ -265,6 +296,14 @@
+         return -1;
+     }
+ 
++    /* A RESET_HANDLE that could not re-create the ring buffers (heap
++     * fragmentation after a DELETE_HANDLE hand-off) must not be reported as a
++     * restored data path; let the caller see the degraded state.  DELETE_HANDLE
++     * legitimately leaves the handles NULL. */
++    if (s_last_reset_mode == RESET_HANDLE &&
++        (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL)) {
++        return -1;
++    }
+     return 0;
+ }
+ 
+@@ -386,10 +425,7 @@
+         return false;
+     }
+ 
+-    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+-        ++dap_respond;
+-        xSemaphoreGive(data_response_mux);
+-    }
++    dap_respond_add(1);
+     return true;
+ }
+ 
+@@ -427,10 +463,7 @@
+     }
+     vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+ 
+-    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+-        --dap_respond;
+-        xSemaphoreGive(data_response_mux);
+-    }
++    dap_respond_add(-1);
+     return true;
+ }
+ 
+@@ -481,12 +514,13 @@
+                      * elaphureLink / target-flash hand-off) and only created
+                      * here when they do not exist yet. */
+                     if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+-                        if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+-                            dap_respond = 0;
+-                            xSemaphoreGive(data_response_mux);
+-                        }
++                        /* Drain first, then reset the bookkeeping: a TCP
++                         * consumer (fast_reply / pipeline) may be taking an
++                         * OUT-ring item concurrently and its clamped
++                         * dap_respond_add(-1) must not underflow. */
+                         drain_one_ringbuf(dap_dataIN_handle);
+                         drain_one_ringbuf(dap_dataOUT_handle);
++                        dap_respond_reset();
+                         s_dbg_ring_drained++;
+                     } else {
+                         /* Re-create after a previous DELETE_HANDLE.  Retry a
+@@ -511,6 +545,7 @@
+                 }
+ 
+                 kRestartDAPHandle = NO_SIGNAL;
++                s_last_reset_mode = (int)mode;
+                 s_dbg_reset_applied++;
+ 
+                 if (dap_reset_done)
+@@ -573,11 +608,7 @@
+                                                  DAPDataProcessed.length);
+             } else if (dap_push_response(&DAPDataProcessed))
+             {
+-                if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
+-                {
+-                    ++dap_respond;
+-                    xSemaphoreGive(data_response_mux);
+-                }
++                dap_respond_add(1);
+             }
+         }
+     }
+@@ -614,10 +645,7 @@
+             send_stage2_submit_data_fast((usbip_stage2_header *)buf, item->buf, (int32_t)reply_len);
+             dap_stats_mark_in(); /* A3: response reached the host IN URB */
+ 
+-            if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+-                --dap_respond;
+-                xSemaphoreGive(data_response_mux);
+-            }
++            dap_respond_add(-1);
+ 
+             vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+             return 1;
+@@ -664,11 +692,7 @@
+                                                      pdMS_TO_TICKS(10), DAP_HANDLE_SIZE);
+         if (packetSize == DAP_HANDLE_SIZE)
+         {
+-            if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
+-            {
+-                --dap_respond;
+-                xSemaphoreGive(data_response_mux);
+-            }
++            dap_respond_add(-1);
+ 
+             vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+         }

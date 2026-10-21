@@ -1,0 +1,44 @@
+# DAP/ USBIP session-reset hardening (1/2): bounded wait for the end-of-session
+# DAP reset to be applied before the TCP server accepts the next connection.
+# APPLIED on feature/birdiebot-v1 as part of the C1 second-session fix
+# (components/dap_proxy/tcp_server.c, commit 6f10b3c).
+--- a/components/dap_proxy/tcp_server.c
++++ b/components/dap_proxy/tcp_server.c
+@@ -30,6 +30,14 @@
+ #include "components/elaphureLink/elaphureLink_protocol.h"
+ #include "proxy_server_conf.h"
+ 
++/* C1 hardening (second-session fix): bounded wait for the end-of-session DAP
++ * reset to be applied before the next connection is accepted.  See cleanup. */
++#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM)
++#define DAP_CLEANUP_RESET_WAIT_MS 1500U
++#else
++#define DAP_CLEANUP_RESET_WAIT_MS 250U
++#endif
++
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
+ 
+@@ -206,6 +214,22 @@
+                 /* The DAP task frees/recreates the ring buffers itself; this
+                  * task only posts the request (see DAP_handle.h). */
+                 dap_handle_request_reset(RESET_HANDLE);
++                /*
++                 * C1 hardening: normally the DAP task (prio 16 on the same
++                 * core) preempts us inside dap_handle_request_reset()'s
++                 * xTaskNotifyGive(), so the reset -- now a cheap drain instead
++                 * of a 2 x 20 KiB free+re-create -- is applied before we return
++                 * to accept().  If the DAP task is still busy with a long DAP
++                 * command, a new USBIP session could otherwise queue commands
++                 * that the pending IN-ring drain then discards, leaving the
++                 * new session's bulk-IN URB unanswered ("CMSIS-DAP command
++                 * CMD_INFO failed").  Wait (bounded) for the drain to be
++                 * applied; continue regardless on timeout.
++                 */
++                if (dap_handle_wait_reset(DAP_CLEANUP_RESET_WAIT_MS) != 0) {
++                    printf("tcp_server: DAP session reset not applied within %u ms\r\n",
++                           (unsigned)DAP_CLEANUP_RESET_WAIT_MS);
++                }
+ 
+                 //shutdown(listen_sock, 0);
+                 //close(listen_sock);
