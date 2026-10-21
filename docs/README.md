@@ -59,6 +59,12 @@
 | [dap-boundary-host-tests.md](dap-boundary-host-tests.md) | host 测试选题（只读走查） | DAP ↔ 传输层边界契约速查与 host 可测候选（HT-01…），供 QA 选题与后续测试扩展 | ✅ 已入库（Wave 3） |
 | [scripts/e2e_ws_client.py](../scripts/e2e_ws_client.py) | 自动化脚本 | 纯标准库 WS 客户端：`ping` / `wifi-scan` / `uart-echo` / `dataflow-list` / `ota-info` / `json`，供上面的清单直接引用 | ✅ 已入库 |
 | [scripts/ota_upload.py](../scripts/ota_upload.py) | 自动化脚本 | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 模块 5 `GET_INFO` 轮询，支持 `--token`/错误注入 | ✅ 已入库 |
+| [merge-and-verification-2026-10-21.md](merge-and-verification-2026-10-21.md) | 合并 + 全量验证报告 | 本次全量合并清单（含 C1）、构建矩阵、host 测试、真机 WiFi/USB-NCM/USBIP/DAP profiling 验证数据与回滚方式 | ✅ 已入库（2026-10-21） |
+| [c1-ncm-status.md](c1-ncm-status.md) | C1 有线 DAP 状态 | USB-NCM 双会话根因/修复、NCM 与 WiFi 验收数据、主机侧注意事项、残余风险 | ✅ 已入库（2026-10-21） |
+| [c1-second-session-analysis.md](c1-second-session-analysis.md) | C1 根因分析附录 | 第二会话 `CMD_INFO failed` 的完整证据链、修复独立评审与加固建议（含补丁） | ✅ 已入库（2026-10-21） |
+| [c1-ncm-flash-hang-analysis.md](c1-ncm-flash-hang-analysis.md) | C1 烧录卡死走查 | NCM 烧录卡死的代码走查与根因假设（历史分析，w7/c1review） | ✅ 已入库（2026-10-21） |
+| [h7-flash-speedup.md](h7-flash-speedup.md) | 速度优化报告 | H7 烧录/调试 A/B 实测（sysprogs 分析、OpenOCD 候选、时钟扫描、增量烧录、C4 负结果） | ✅ 已入库（2026-10-21） |
+| [scripts/dap_stats_query.py](../scripts/dap_stats_query.py) | 自动化脚本 | stats 构建的 Vendor9 profiling 计数器读取（pyusb 原始 CMSIS-DAP，无需串口） | ✅ 已入库（2026-10-21） |
 
 测试文档中的 **【需真机】** / **【本地】** / **【需 4MB 硬件/可选】** 标记约定见各文档开头；C3/ESP32 仅为编译验收目标。
 host 测试报告引用的 `tests/host/**`、`scripts/test_host.sh`、`scripts/dap_smoke.py`、`scripts/test_wifi_*` 等随对应 Wave 3 分支合入，本索引只索引文档、不直接链接这些脚本产物。
