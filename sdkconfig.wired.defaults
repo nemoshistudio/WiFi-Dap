@@ -31,10 +31,16 @@ CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="WiFi Dap"
 CONFIG_TINYUSB_DESC_PRODUCT_STRING="WiFi Dap (Wired NCM)"
 CONFIG_TINYUSB_DEBUG_LEVEL=1
 
-# C1 tuning-only control: USB task priority/stack + NCM buffers, DMA mode.
-# No tcp_server changes (keeps baseline USBIP session behavior).
-CONFIG_TINYUSB_TASK_PRIORITY=22
-CONFIG_TINYUSB_TASK_STACK_SIZE=8192
-CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=6
-CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=6
+# C1 tuning (A/B measured on the wired-DAP hardware window):
+#   - priority 22 broke even the FIRST WiFi-USBIP session; the default 5 is
+#     required for the WiFi transport to stay usable while NCM is installed.
+#   - stack 4096 + 3+3 NCM NTB buffers keep the heap headroom needed by the
+#     USBIP/DAP path (the device only has ~30-50 KiB free heap with TinyUSB
+#     installed); measured USB-NCM flash throughput is unchanged vs the
+#     previous 8192/6+6 setting (5.85 s for 345,600 B, 57.7 KiB/s).
+#   - DMA mode is required for USB-NCM throughput.
+CONFIG_TINYUSB_TASK_PRIORITY=5
+CONFIG_TINYUSB_TASK_STACK_SIZE=4096
+CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=3
+CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=3
 CONFIG_TINYUSB_MODE_DMA=y

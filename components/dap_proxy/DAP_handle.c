@@ -185,6 +185,28 @@ void malloc_dap_ringbuf(void) {
     }
 }
 
+/* Drain one bytebuf ring without freeing it.  Used by the USBIP session reset
+ * below: discarding the payloads is enough to start a new session, and keeping
+ * the buffers allocated avoids a 20 KiB xRingbufferCreate() per session.  With
+ * TinyUSB installed the heap is fragmented enough that the re-create failed
+ * (largest free block 20480 B < ring size 20544 B + overhead); the old failure
+ * path deleted the DAP task, so the next USBIP session died with
+ * "CMSIS-DAP command CMD_INFO failed" (C1 second-session bug). */
+static void drain_one_ringbuf(RingbufHandle_t rb)
+{
+    if (rb == NULL) {
+        return;
+    }
+    for (;;) {
+        size_t item_size = 0;
+        void *item = xRingbufferReceiveUpTo(rb, &item_size, 0, DAP_HANDLE_SIZE);
+        if (item == NULL) {
+            break;
+        }
+        vRingbufferReturnItem(rb, item);
+    }
+}
+
 void free_dap_ringbuf(void) {
     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
         if (dap_dataIN_handle) {
@@ -427,15 +449,44 @@ void DAP_Thread(void *argument)
                  * only here, never in the TCP/WebSocket tasks. */
                 enum reset_handle_t mode = (enum reset_handle_t)kRestartDAPHandle;
 
-                free_dap_ringbuf();
-
-                if (mode == RESET_HANDLE) {
-                    malloc_dap_ringbuf();
-                    if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL)
-                    {
-                        printf("Can not create DAP ringbuf/mux!\r\n");
-                        vTaskDelete(NULL);
+                if (mode == RESET_HANDLE)
+                {
+                    /* A USBIP/OpenOCD session end only needs the payloads
+                     * discarded, not a free + re-create of the two ~20 KiB ring
+                     * buffers (C1: the re-create failed on a fragmented heap,
+                     * the old failure path killed this task and the next USBIP
+                     * session then timed out on CMD_INFO).  Keep the buffers
+                     * across sessions and drain them.  They are still freed for
+                     * DELETE_HANDLE (WebSocket / elaphureLink / target-flash
+                     * hand-off) and only created here when absent. */
+                    if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+                        if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+                            dap_respond = 0;
+                            xSemaphoreGive(data_response_mux);
+                        }
+                        drain_one_ringbuf(dap_dataIN_handle);
+                        drain_one_ringbuf(dap_dataOUT_handle);
+                    } else {
+                        /* Re-create after a previous DELETE_HANDLE.  Retry a
+                         * few times: a transient allocation failure must not
+                         * kill the DAP task (it would take USBIP down for the
+                         * rest of the boot). */
+                        for (int attempt = 0; attempt < 5; attempt++) {
+                            malloc_dap_ringbuf();
+                            if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+                                break;
+                            }
+                            free_dap_ringbuf();
+                            vTaskDelay(pdMS_TO_TICKS(20));
+                        }
+                        if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL) {
+                            printf("Can not re-create DAP ringbuf!\r\n");
+                        }
                     }
+                }
+                else /* DELETE_HANDLE */
+                {
+                    free_dap_ringbuf();
                 }
 
                 kRestartDAPHandle = NO_SIGNAL;
