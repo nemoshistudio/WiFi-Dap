@@ -738,15 +738,29 @@ function flushStats(): void {
 }
 
 /** 地址表达式求值时的批量指针读取器：同一微任务里的 readWord 合并为一次 sampleRaw。 */
+interface WordWaiter {
+  resolve: (value: number) => void
+  reject: (error: unknown) => void
+}
+
 class WordPrefetcher {
-  private pending = new Map<number, {resolve: (value: number) => void; reject: (error: unknown) => void}>()
+  /**
+   * 同一地址可能被多个待求值表达式同时请求（例如多个成员都基于同一个指针
+   * `*[r13+4]`）。必须为每个地址保存一个 waiter 列表；旧实现用 Map<地址, waiter>
+   * 后写覆盖先写，会让前一个 Promise 永远不 resolve，调试采样首拍即永久挂起
+   * （表现为 Samples 0 / Failures 0 / 0 Hz）。
+   */
+  private pending = new Map<number, WordWaiter[]>()
   private scheduled = false
 
   constructor(private readonly target: CmsisDapClient) {}
 
   read(address: number): Promise<number> {
     return new Promise<number>((resolve, reject) => {
-      this.pending.set(address >>> 0, {resolve, reject})
+      const key = address >>> 0
+      const waiters = this.pending.get(key)
+      if (waiters) waiters.push({resolve, reject})
+      else this.pending.set(key, [{resolve, reject}])
       if (!this.scheduled) {
         this.scheduled = true
         queueMicrotask(() => { void this.flush() })
@@ -761,14 +775,15 @@ class WordPrefetcher {
     if (batch.length === 0) return
     try {
       const raws = await this.target.sampleRaw(batch.map(([address]) => ({address, size: 4})))
-      batch.forEach(([, pending], index) => {
+      batch.forEach(([, waiters], index) => {
         const raw = raws[index] ?? new Uint8Array(4)
         let value = 0
         for (let byte = 0; byte < 4; byte++) value |= (raw[byte] ?? 0) << (byte * 8)
-        pending.resolve(value >>> 0)
+        const word = value >>> 0
+        for (const waiter of waiters) waiter.resolve(word)
       })
     } catch (error) {
-      batch.forEach(([, pending]) => pending.reject(error))
+      for (const [, waiters] of batch) for (const waiter of waiters) waiter.reject(error)
     }
     if (this.pending.size > 0) {
       this.scheduled = true
