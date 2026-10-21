@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 385
+const EXPECTED_TOTAL = 393
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 237
+const EXPECTED_ADDED = 245
 
 const errors = []
 const warnings = []
@@ -149,6 +149,9 @@ const ADDED_KEYS = [
         'dwarfFallback', 'symtabNotice', 'expandAll', 'collapseAll', 'wideHint', 'unknownType',
         // 采样管线 / Auto 采样率
         'sampleRateAuto', 'autoRate', 'samplingHint',
+        // DWARF 源码名 / 不可采样变量 / 分组
+        'onlySampleable', 'unsampleable', 'unsampleableHint', 'groupBy', 'groupNone',
+        'groupFile', 'groupNamespace', 'debugInfoHint',
     ]),
     ...keys('page', ['debugCurve']),
 ]

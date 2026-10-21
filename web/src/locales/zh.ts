@@ -470,5 +470,13 @@ export default {
         collapseAll: '折叠全部',
         wideHint: '存在 64 位或位域变量：按 DWARF 类型解码（f64/u64 读取两个 32 位字）',
         unknownType: '未知',
+        onlySampleable: '仅显示可采样变量',
+        unsampleable: '不可采样',
+        unsampleableHint: '另有 {count} 个变量无固定地址（寄存器/栈/被优化掉），关闭“仅显示可采样变量”可查看',
+        groupBy: '分组',
+        groupNone: '不分组',
+        groupFile: '按源文件',
+        groupNamespace: '按命名空间',
+        debugInfoHint: '要采集任意代码变量，请用 -O0/-Og -g3 构建（避免 LTO/死代码消除）；-O2 固件通常只有部分变量有固定地址。',
     },
 }

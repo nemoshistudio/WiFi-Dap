@@ -466,5 +466,13 @@ export default {
         collapseAll: 'Collapse all',
         wideHint: '64-bit/bitfield variables present: decoded from DWARF type (f64/u64 read as two 32-bit words)',
         unknownType: 'unknown',
+        onlySampleable: 'Only sampleable',
+        unsampleable: 'Not sampleable',
+        unsampleableHint: 'Another {count} variable(s) have no fixed address (register/stack/optimized out); turn off “Only sampleable” to show them',
+        groupBy: 'Group by',
+        groupNone: 'No grouping',
+        groupFile: 'Source file',
+        groupNamespace: 'Namespace',
+        debugInfoHint: 'To sample arbitrary code variables, build with -O0/-Og -g3 (avoid LTO/dead-code elimination); -O2 firmware usually exposes only fixed-address variables.',
     },
 }

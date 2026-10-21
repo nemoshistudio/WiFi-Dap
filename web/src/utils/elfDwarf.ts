@@ -61,6 +61,7 @@ const TAG_VOLATILE_TYPE = 0x35
 const TAG_RESTRICT_TYPE = 0x37
 const TAG_NAMESPACE = 0x39
 const TAG_UNSPECIFIED_TYPE = 0x3b
+const TAG_SUBPROGRAM = 0x2e
 const TAG_RVALUE_REFERENCE_TYPE = 0x42
 const TAG_ATOMIC_TYPE = 0x47
 const TAG_PACKED_TYPE = 0x2d
@@ -359,6 +360,8 @@ interface Ctx {
     units: Unit[]
     dies: Map<number, Die>
     warning: (message: string) => void
+    /** Itanium C++ 反混淆（由 elfSymbols 注入，避免循环依赖）。 */
+    demangle?: (mangled: string) => string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1368,6 +1371,7 @@ function buildNode(name: string, type: TypeInfo, address: number, depth: number,
     } else {
         node.sample = makeLeaf(type, address)
     }
+    node.sampleable = !!node.sample
     const resolved = unwrapType(type)
     if (resolved.kind === 'struct' || resolved.kind === 'union' || resolved.kind === 'array') {
         node.children = buildChildren(resolved, address, depth + 1)
@@ -1418,75 +1422,215 @@ function buildChildren(type: TypeInfo, baseAddress: number, depth: number): Vari
 }
 
 // ---------------------------------------------------------------------------
-// 变量收集
+// 变量收集：声明/定义链（DW_AT_specification / DW_AT_abstract_origin）
 // ---------------------------------------------------------------------------
-function variableName(ctx: Ctx, die: Die): string {
+/**
+ * 沿 DW_AT_specification / DW_AT_abstract_origin 递归收集 DIE 链（定义优先）。
+ * C++ 类静态成员/函数内 static 局部变量的名字、类型、decl_file/line 常只在
+ * 声明 DIE 上；某些实现也会把 location 放在被引用 DIE 上，因此统一沿链查找。
+ */
+function referenceChain(ctx: Ctx, die: Die): Die[] {
+    const chain: Die[] = []
+    const seen = new Set<number>()
     let current: Die | null = die
     let guard = 0
-    while (current && guard++ < 6) {
-        const name = attrString(ctx, current.unit, current.attrs.get(AT_NAME))
-        if (name) return name
-        current = resolveReference(ctx, current.unit, current.attrs.get(AT_SPECIFICATION)) ??
-            resolveReference(ctx, current.unit, current.attrs.get(AT_ABSTRACT_ORIGIN))
+    while (current && guard++ < 16 && !seen.has(current.offset)) {
+        seen.add(current.offset)
+        chain.push(current)
+        const specification = resolveReference(ctx, current.unit, current.attrs.get(AT_SPECIFICATION))
+        const origin = resolveReference(ctx, current.unit, current.attrs.get(AT_ABSTRACT_ORIGIN))
+        current = specification ?? origin
     }
-    const linkage = attrString(ctx, die.unit, die.attrs.get(AT_LINKAGE_NAME))
-    if (linkage) return linkage
-    const spec = resolveReference(ctx, die.unit, die.attrs.get(AT_SPECIFICATION))
-    if (spec) {
-        const specLinkage = attrString(ctx, spec.unit, spec.attrs.get(AT_LINKAGE_NAME))
-        if (specLinkage) return specLinkage
+    return chain
+}
+
+function chainAttrString(ctx: Ctx, chain: readonly Die[], name: number): string {
+    for (const die of chain) {
+        const value = attrString(ctx, die.unit, die.attrs.get(name))
+        if (value) return value
     }
     return ''
 }
 
-function variableTypeRef(ctx: Ctx, die: Die): number | null {
-    let current: Die | null = die
-    let guard = 0
-    while (current && guard++ < 6) {
-        const ref = typeRefOf(current)
+/** 类型引用：每个候选 DIE 的 ref 是相对其所在 CU 的，必须用各自 unit 计算绝对偏移。 */
+function chainTypeRef(chain: readonly Die[]): number | null {
+    for (const die of chain) {
+        const ref = typeRefOf(die)
         if (ref !== null) return ref
-        current = resolveReference(ctx, current.unit, current.attrs.get(AT_SPECIFICATION)) ??
-            resolveReference(ctx, current.unit, current.attrs.get(AT_ABSTRACT_ORIGIN))
     }
     return null
 }
 
-function variableDecl(ctx: Ctx, die: Die): {file?: string; line?: number} {
-    let file = die.declFile
-    let line = die.declLine
-    if (file === undefined) {
-        const spec = resolveReference(ctx, die.unit, die.attrs.get(AT_SPECIFICATION))
-        if (spec) {
-            file = spec.declFile
-            line = line ?? spec.declLine
-        }
+/**
+ * 位置：沿链找第一个 DW_AT_location。
+ * address !== null = 固定地址；hasLocation=true 但 address=null = 寄存器/栈/loclist
+ * （可列出但不可采样）。
+ */
+function chainLocation(ctx: Ctx, chain: readonly Die[]): {address: number | null; hasLocation: boolean} {
+    for (const die of chain) {
+        const attr = die.attrs.get(AT_LOCATION)
+        if (!attr) continue
+        const address = locationFixedAddress(ctx, die.unit, attr)
+        return {address: address === null ? null : address >>> 0, hasLocation: true}
     }
-    return {
-        file: file !== undefined ? resolveDeclFile(ctx, die.unit, file) : undefined,
-        line: line,
-    }
+    return {address: null, hasLocation: false}
 }
 
-/** 变量名是否位于 namespace/class 作用域内：返回带作用域前缀的显示名。 */
-function scopedVariableName(ctx: Ctx, die: Die, rawName: string): string {
+/** decl_file/line：定义 DIE 自身（含父作用域继承）优先，其次沿 spec/origin 链。 */
+function chainDecl(ctx: Ctx, chain: readonly Die[]): {fileIndex?: number; unit?: Unit; line?: number} {
+    for (const die of chain) {
+        if (die.declFile !== undefined) return {fileIndex: die.declFile, unit: die.unit, line: die.declLine}
+        if (die.declLine !== undefined) return {fileIndex: undefined, unit: die.unit, line: die.declLine}
+    }
+    return {}
+}
+
+/** 作用域链：namespace/class/struct/union + 最近的外层函数（用于 static 局部变量）。 */
+function enclosingScope(ctx: Ctx, die: Die): string[] {
     const scopes: string[] = []
     let parent = die.parent
     let guard = 0
-    while (parent && guard++ < 16) {
+    while (parent && guard++ < 24) {
         if (
             parent.tag === TAG_NAMESPACE ||
             parent.tag === TAG_CLASS_TYPE ||
             parent.tag === TAG_STRUCTURE_TYPE ||
-            parent.tag === TAG_UNION_TYPE
+            parent.tag === TAG_UNION_TYPE ||
+            parent.tag === TAG_SUBPROGRAM
         ) {
             const name = attrString(ctx, parent.unit, parent.attrs.get(AT_NAME))
-            if (name) scopes.unshift(name)
+            if (name) scopes.unshift(parent.tag === TAG_SUBPROGRAM ? `${name}()` : name)
         }
         parent = parent.parent
     }
-    if (scopes.length === 0) return rawName
-    if (rawName.includes('::')) return rawName
-    return `${scopes.join('::')}::${rawName}`
+    return scopes
+}
+
+interface VariableIdentity {
+    shortName: string
+    qualifiedName: string
+    mangledName: string
+    nameDie: Die | null
+}
+
+/** 源码名解析：DW_AT_name（沿 spec/origin 链）→ DW_AT_linkage_name 反混淆兜底。 */
+function resolveVariableIdentity(ctx: Ctx, die: Die): VariableIdentity | null {
+    const chain = referenceChain(ctx, die)
+    let shortName = ''
+    let nameDie: Die | null = null
+    for (const candidate of chain) {
+        const name = attrString(ctx, candidate.unit, candidate.attrs.get(AT_NAME))
+        if (name) {
+            shortName = name
+            nameDie = candidate
+            break
+        }
+    }
+    const mangledName = chainAttrString(ctx, chain, AT_LINKAGE_NAME)
+    let qualifiedFromLinkage = ''
+    if (!shortName && mangledName) {
+        const demangled = ctx.demangle ? ctx.demangle(mangledName) : null
+        if (demangled) {
+            qualifiedFromLinkage = demangled
+            shortName = demangled.split('::').pop() ?? demangled
+        } else {
+            qualifiedFromLinkage = mangledName
+            shortName = mangledName
+        }
+    }
+    if (!shortName) return null
+    let qualifiedName = shortName
+    if (nameDie) {
+        // 名字来自 spec/声明 DIE 时，作用域要用该 DIE 的父链（C++ 类静态成员）。
+        const scopes = enclosingScope(ctx, nameDie)
+        qualifiedName = scopes.length > 0 ? `${scopes.join('::')}::${shortName}` : shortName
+    } else if (qualifiedFromLinkage) {
+        qualifiedName = qualifiedFromLinkage
+    }
+    return {shortName, qualifiedName, mangledName, nameDie}
+}
+
+// ---------------------------------------------------------------------------
+// 相对源文件路径（去掉项目/构建根前缀）
+// ---------------------------------------------------------------------------
+function normalizePath(file: string): string {
+    return file.replace(/\\/g, '/')
+}
+
+/** 去掉 CU 的 comp_dir 前缀（如 /work、E:/.../build），得到相对源码路径。 */
+function stripCompDirPrefix(file: string, compDir: string | undefined): string | null {
+    if (!compDir) return null
+    const normalizedFile = normalizePath(file)
+    const normalizedDir = normalizePath(compDir).replace(/\/+$/, '')
+    if (normalizedDir && normalizedFile.startsWith(`${normalizedDir}/`)) {
+        return normalizedFile.slice(normalizedDir.length + 1)
+    }
+    return null
+}
+
+/** 解析路径中的 . / .. 段（DWARF 行表常给出相对目录）。 */
+function normalizeSegments(file: string): string[] {
+    const parts = normalizePath(file).split('/')
+    const out: string[] = []
+    for (const part of parts) {
+        if (part === '' && out.length > 0) continue
+        if (part === '.') continue
+        if (part === '..') {
+            if (out.length > 1) out.pop()
+            continue
+        }
+        out.push(part)
+    }
+    return out
+}
+
+/** 源码根目录名（用于从构建树绝对路径中截出项目相对路径）。 */
+const SOURCE_ROOT_SEGMENTS = new Set(['src', 'lib', 'hw', 'mcu', 'modules', 'app', 'bsp', 'core', 'drivers', 'components', 'user'])
+
+/**
+ * 计算相对源码路径：
+ *  1) 先去掉 CU comp_dir 前缀（/work/build、E:/.../build 等）；
+ *  2) 剩余绝对路径按“第一个 src/lib/hw/...”段截出项目相对路径
+ *     （如 /work/src/a.c -> src/a.c）；工具链系统头再尝试公共前缀。
+ */
+function postProcessRelativeFiles(variables: readonly VariableNode[]): void {
+    const unresolved: VariableNode[] = []
+    for (const variable of variables) {
+        if (!variable.file) continue
+        const parts = normalizeSegments(variable.file)
+        let rootIndex = -1
+        for (let index = 1; index < parts.length - 1; index++) {
+            if (SOURCE_ROOT_SEGMENTS.has(parts[index])) {
+                rootIndex = index
+                break
+            }
+        }
+        if (rootIndex > 0) {
+            variable.relativeFile = parts.slice(rootIndex).join('/')
+        } else {
+            unresolved.push(variable)
+        }
+    }
+    for (const variable of variables) {
+        if (variable.file && !variable.relativeFile) variable.relativeFile = normalizePath(variable.file)
+    }
+    if (unresolved.length === 0) return
+    const files = unresolved.map((item) => normalizeSegments(item.file as string))
+    const common: string[] = []
+    const first = files[0]
+    for (let index = 0; index < first.length - 1; index++) {
+        const segment = first[index]
+        if (files.every((parts) => parts.length > index + 1 && parts[index] === segment)) {
+            common.push(segment)
+        } else {
+            break
+        }
+    }
+    if (common.length === 0) return
+    for (const variable of unresolved) {
+        const parts = normalizeSegments(variable.file as string)
+        variable.relativeFile = parts.slice(common.length).join('/')
+    }
 }
 
 interface DwarfCollectResult {
@@ -1499,8 +1643,11 @@ interface DwarfCollectResult {
     warnings: string[]
 }
 
-/** 从 ELF 字节 + section 表提取 DWARF 全局/静态变量。 */
-export function extractDwarfVariables(bytes: Uint8Array, sections: readonly ElfSectionInfo[]): DwarfCollectResult {
+export function extractDwarfVariables(
+    bytes: Uint8Array,
+    sections: readonly ElfSectionInfo[],
+    options: {demangle?: (mangled: string) => string | null} = {},
+): DwarfCollectResult {
     const warnings: string[] = []
     const info = sectionBytes(bytes, sections, '.debug_info')
     const abbrev = sectionBytes(bytes, sections, '.debug_abbrev')
@@ -1532,6 +1679,7 @@ export function extractDwarfVariables(bytes: Uint8Array, sections: readonly ElfS
         warning: (message: string) => {
             if (warnings.length < 20) warnings.push(message)
         },
+        demangle: options.demangle,
     }
 
     const abbrevCache = new Map<number, Map<number, Abbrev>>()
@@ -1553,43 +1701,76 @@ export function extractDwarfVariables(bytes: Uint8Array, sections: readonly ElfS
     let dwarfNamed = 0
     let dwarfWithAddress = 0
     let dwarfSkipped = 0
-    const seen = new Set<string>()
+
+    /** 去重：同一变量可能同时存在声明/定义 DIE（spec 链）与内联副本。 */
+    const byPlace = new Map<string, number>()
+    const insertVariable = (node: VariableNode) => {
+        const place = `${node.shortName ?? node.name}|${node.relativeFile ?? node.file ?? ''}|${node.line ?? ''}`
+        const existingIndex = byPlace.get(place)
+        if (existingIndex !== undefined) {
+            const existing = variables[existingIndex]
+            // 声明（不可采样）与定义（可采样）冲突时保留可采样定义。
+            if (node.sampleable && !existing.sampleable) variables[existingIndex] = node
+            return
+        }
+        byPlace.set(place, variables.length)
+        variables.push(node)
+    }
+
     for (const unit of units) {
         for (const die of unit.dies) {
             if (die.tag !== TAG_VARIABLE) continue
             dwarfVariables += 1
-            const rawName = variableName(ctx, die)
-            if (!rawName) {
+            const identity = resolveVariableIdentity(ctx, die)
+            if (!identity) {
                 dwarfSkipped += 1
                 continue
             }
             dwarfNamed += 1
-            const location = die.attrs.get(AT_LOCATION)
-            const address = locationFixedAddress(ctx, unit, location)
-            if (address === null) {
-                dwarfSkipped += 1
-                continue
+            const chain = referenceChain(ctx, die)
+            const location = chainLocation(ctx, chain)
+            if (location.address !== null) dwarfWithAddress += 1
+            const type = resolveType(ctx, chainTypeRef(chain))
+            const decl = chainDecl(ctx, chain)
+            let file: string | undefined
+            if (decl.fileIndex !== undefined && decl.unit) {
+                file = resolveDeclFile(ctx, decl.unit, decl.fileIndex)
             }
-            dwarfWithAddress += 1
-            if (!isPlausibleTargetAddress(address) || address % 4 !== 0) {
-                dwarfSkipped += 1
-                continue
+            const address = location.address
+            const sampleable = address !== null && address !== 0 && isPlausibleTargetAddress(address)
+            const node: VariableNode = {
+                name: identity.qualifiedName,
+                shortName: identity.shortName,
+                qualifiedName: identity.qualifiedName,
+                mangledName: identity.mangledName || undefined,
+                typeName: type.display,
+                address: sampleable ? address >>> 0 : 0,
+                size: type.size,
+                file,
+                relativeFile: file ? stripCompDirPrefix(file, decl.unit?.compDir) ?? undefined : undefined,
+                line: decl.line,
+                sampleable,
             }
-            const type = resolveType(ctx, variableTypeRef(ctx, die))
-            const name = scopedVariableName(ctx, die, rawName)
-            const key = `${name}@${address.toString(16)}`
-            if (seen.has(key)) continue
-            seen.add(key)
-            nodeBudget = MAX_NODES_PER_VARIABLE
-            const node = buildNode(name, type, address, 0)
-            nodeBudget = 0
-            const decl = variableDecl(ctx, die)
-            node.file = decl.file
-            node.line = decl.line
-            variables.push(node)
+            if (sampleable) {
+                node.sample = makeLeaf(type, address >>> 0)
+                nodeBudget = MAX_NODES_PER_VARIABLE
+                const resolvedType = unwrapType(type)
+                if (resolvedType.kind === 'struct' || resolvedType.kind === 'union' || resolvedType.kind === 'array') {
+                    node.children = buildChildren(resolvedType, address >>> 0, 1)
+                }
+                nodeBudget = 0
+            }
+            insertVariable(node)
         }
     }
-    variables.sort((left, right) => left.name.localeCompare(right.name) || left.address - right.address)
+
+    // 相对路径：优先去掉 CU comp_dir 前缀；剩余（工具链头文件）再尝试公共前缀。
+    postProcessRelativeFiles(variables)
+
+    variables.sort((left, right) => {
+        if (left.sampleable !== right.sampleable) return left.sampleable ? -1 : 1
+        return left.name.localeCompare(right.name) || left.address - right.address
+    })
 
     return {
         variables,

@@ -550,7 +550,7 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
 
     let dwarf: ReturnType<typeof extractDwarfVariables> | null = null
     try {
-        dwarf = extractDwarfVariables(bytes, image.sections)
+        dwarf = extractDwarfVariables(bytes, image.sections, {demangle: demangleItanium})
         warnings.push(...dwarf.warnings)
     } catch (error) {
         warnings.push(`DWARF parse failed: ${error instanceof Error ? error.message : String(error)}`)

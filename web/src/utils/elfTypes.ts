@@ -33,14 +33,24 @@ export interface SampleLeaf {
 
 /** 变量浏览树的一个节点（根变量或 struct 成员 / 数组成员）。 */
 export interface VariableNode {
-    /** 节点名；根为变量名，成员为 `.member`，数组元素为 `[i]` */
+    /** 节点名；根为限定名（Namespace::Class::var），成员为 `.member`，数组元素为 `[i]` */
     name: string
+    /** 源码短名（DW_AT_name；用于搜索/显示别名） */
+    shortName?: string
+    /** 完整限定名（Namespace::Class::member；无作用域时同 shortName） */
+    qualifiedName?: string
+    /** Itanium mangled name（DW_AT_linkage_name，若有） */
+    mangledName?: string
     typeName: string
     address: number
     size: number
-    /** 源文件（若 DWARF 提供） */
+    /** 源文件完整路径（若 DWARF 提供） */
     file?: string
+    /** 相对源文件路径（去掉项目/构建根前缀，如 src/system/FreeRTOS/db.cpp） */
+    relativeFile?: string
     line?: number
+    /** 是否有固定地址（false = 不可采样：寄存器/栈/被优化/地址无效） */
+    sampleable?: boolean
     /** 可采样叶子；聚合节点（struct/array）没有 */
     sample?: SampleLeaf
     /** struct/union 成员或数组成员（展开深度有限） */

@@ -102,7 +102,11 @@
 
       <div v-if="elfInfo" class="mt-2">
         <p v-if="elfInfo.source === 'dwarf'" class="text-sm">
-          {{ translate('curve.dwarfParsed', {count: elfInfo.dwarfNamed, fixed: elfInfo.dwarfWithAddress}) }}
+          {{ translate('curve.dwarfParsed', {count: elfInfo.variables.length, fixed: elfInfo.dwarfWithAddress}) }}
+          <span v-if="unsampleableCount > 0" class="block text-xs opacity-70">
+            {{ translate('curve.unsampleableHint', {count: unsampleableCount}) }}
+          </span>
+          <span class="block text-xs opacity-70">{{ translate('curve.debugInfoHint') }}</span>
         </p>
         <template v-else>
           <el-alert
@@ -131,9 +135,16 @@
               class="variable-search"
               :placeholder="translate('curve.searchPlaceholder')"
           />
+          <el-checkbox v-model="onlySampleable" size="small">{{ translate('curve.onlySampleable') }}</el-checkbox>
+          <label class="flex items-center gap-1 text-xs">
+            <span class="whitespace-nowrap">{{ translate('curve.groupBy') }}</span>
+            <el-select v-model="groupBy" size="small" style="width: 9rem">
+              <el-option v-for="option in GROUP_OPTIONS" :key="option" :value="option" :label="groupLabel(option)"/>
+            </el-select>
+          </label>
           <el-button size="small" @click="expandAll">{{ translate('curve.expandAll') }}</el-button>
           <el-button size="small" @click="collapseAll">{{ translate('curve.collapseAll') }}</el-button>
-          <span class="ml-auto text-xs opacity-70">{{ translate('curve.variables') }}: {{ variableRows.length }}</span>
+          <span class="ml-auto text-xs opacity-70">{{ translate('curve.variables') }}: {{ visibleVariableCount }}</span>
         </div>
 
         <div class="var-table mt-2">
@@ -146,35 +157,45 @@
             <span>{{ translate('curve.colSource') }}</span>
           </div>
           <div class="var-list">
-            <div
-                v-for="row in variableRows"
-                :key="row.key"
-                class="var-row"
-                :class="{selected: isRowSelected(row)}"
-            >
-              <span class="var-check">
-                <el-checkbox
-                    v-if="row.node.sample"
-                    :model-value="isRowSelected(row)"
-                    @change="toggleRow(row)"
-                />
-              </span>
-              <span class="var-name" :style="{paddingLeft: (row.depth * 12) + 'px'}" :title="row.path">
-                <button
-                    v-if="row.hasChildren"
-                    type="button"
-                    class="tree-arrow"
-                    @click.stop="toggleExpand(row)"
-                >{{ row.expanded ? '▾' : '▸' }}</button>
-                <span v-else class="tree-arrow-spacer"></span>
-                <span class="truncate">{{ row.node.name }}</span>
-              </span>
-              <span class="var-type truncate" :title="row.node.typeName">{{ row.node.typeName || translate('curve.unknownType') }}</span>
-              <span class="var-addr font-mono">{{ formatHex32(row.node.address) }}</span>
-              <span class="var-size text-right">{{ row.node.size }}</span>
-              <span class="var-src truncate" :title="row.node.file || ''">{{ sourceLabel(row.node) }}</span>
-            </div>
-            <div v-if="variableRows.length === 0" class="px-2 py-2 text-sm opacity-70">
+            <template v-for="row in variableRows" :key="row.key">
+              <div v-if="row.kind === 'group'" class="var-group-row">
+                <span class="truncate font-semibold" :title="row.groupLabel">{{ row.groupLabel }}</span>
+                <span class="opacity-60">({{ row.groupCount }})</span>
+              </div>
+              <div
+                  v-else
+                  class="var-row"
+                  :class="{selected: isRowSelected(row), unsampleable: !row.node.sampleable}"
+              >
+                <span class="var-check">
+                  <el-checkbox
+                      v-if="row.node.sample"
+                      :model-value="isRowSelected(row)"
+                      @change="toggleRow(row)"
+                  />
+                </span>
+                <span
+                    class="var-name"
+                    :style="{paddingLeft: (row.depth * 12) + 'px'}"
+                    :title="row.node.mangledName ? row.path + '\n' + row.node.mangledName : row.path"
+                >
+                  <button
+                      v-if="row.hasChildren"
+                      type="button"
+                      class="tree-arrow"
+                      @click.stop="toggleExpand(row)"
+                  >{{ row.expanded ? '▾' : '▸' }}</button>
+                  <span v-else class="tree-arrow-spacer"></span>
+                  <span class="truncate">{{ row.node.name }}</span>
+                </span>
+                <span class="var-type truncate" :title="row.node.typeName">{{ row.node.typeName || translate('curve.unknownType') }}</span>
+                <span v-if="row.node.sampleable" class="var-addr font-mono">{{ formatHex32(row.node.address) }}</span>
+                <span v-else class="var-addr unsampleable-text" :title="translate('curve.unsampleable')">{{ translate('curve.unsampleable') }}</span>
+                <span class="var-size text-right">{{ row.node.size }}</span>
+                <span class="var-src truncate" :title="row.node.file || ''">{{ sourceLabel(row.node) }}</span>
+              </div>
+            </template>
+            <div v-if="visibleVariableCount === 0" class="px-2 py-2 text-sm opacity-70">
               {{ translate('curve.noSymbols') }}
             </div>
           </div>
@@ -322,13 +343,20 @@ interface CurveNotice {
   title: string
 }
 
+type GroupMode = 'none' | 'file' | 'namespace'
+const GROUP_OPTIONS: GroupMode[] = ['none', 'file', 'namespace']
+
 interface VariableRow {
+  kind: 'variable' | 'group'
   key: string
+  /** 变量行使用真实节点；分组行用占位节点（模板按 kind 区分）。 */
   node: VariableNode
   depth: number
   path: string
   hasChildren: boolean
   expanded: boolean
+  groupLabel?: string
+  groupCount?: number
 }
 
 const SAMPLE_RATES_DEFAULT = 100
@@ -340,6 +368,9 @@ const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<DisplayFormat>('auto')
 const seriesList = ref<CurveSeries[]>([])
 const variableSearch = ref('')
+/** 默认只看可采样变量；关闭后列出寄存器/栈/被优化掉的命名变量（标记不可采样）。 */
+const onlySampleable = ref(true)
+const groupBy = ref<GroupMode>('none')
 const expandedKeys = ref<Set<string>>(new Set())
 const manualInput = ref('')
 const addressError = ref('')
@@ -898,9 +929,41 @@ function pathOf(depth: number, parentPath: string, node: VariableNode): string {
 
 function nodeMatches(node: VariableNode, path: string, query: string): boolean {
   const needle = query.toLowerCase()
-  if (path.toLowerCase().includes(needle)) return true
-  if ((node.typeName || '').toLowerCase().includes(needle)) return true
-  return formatHex32(node.address).toLowerCase().includes(needle)
+  const fields = [
+    path,
+    node.name,
+    node.shortName,
+    node.qualifiedName,
+    node.mangledName,
+    node.typeName,
+    node.relativeFile,
+    node.file,
+    node.sampleable ? formatHex32(node.address) : '',
+  ]
+  return fields.some((value) => !!value && String(value).toLowerCase().includes(needle))
+}
+
+function groupLabel(mode: GroupMode): string {
+  switch (mode) {
+    case 'file':
+      return translate('curve.groupFile')
+    case 'namespace':
+      return translate('curve.groupNamespace')
+    default:
+      return translate('curve.groupNone')
+  }
+}
+
+function groupKeyOf(node: VariableNode, mode: GroupMode): string {
+  if (mode === 'file') {
+    return node.relativeFile ?? node.file ?? '-'
+  }
+  if (mode === 'namespace') {
+    const qualified = node.qualifiedName ?? node.name
+    const index = qualified.lastIndexOf('::')
+    return index > 0 ? qualified.slice(0, index) : '-'
+  }
+  return ''
 }
 
 function nodeMatchesDeep(node: VariableNode, path: string, query: string): boolean {
@@ -914,26 +977,64 @@ const variableRows = computed<VariableRow[]>(() => {
   if (!info) return []
   const query = variableSearch.value.trim()
   const rows: VariableRow[] = []
-  const visit = (node: VariableNode, depth: number, parentPath: string) => {
-    const path = pathOf(depth, parentPath, node)
+  const visit = (node: VariableNode, depth: number, parentPath: string, bucket: VariableRow[]) => {
+    const path = depth === 0 ? node.name : parentPath + node.name
     if (query && !nodeMatchesDeep(node, path, query)) return
     const key = nodeKey(path, node)
     const hasChildren = !!node.children && node.children.length > 0
     const expanded = hasChildren && (query !== '' || expandedKeys.value.has(key))
-    rows.push({key, node, depth, path, hasChildren, expanded})
+    bucket.push({kind: 'variable', key, node, depth, path, hasChildren, expanded})
     if (hasChildren && expanded) {
-      for (const child of node.children ?? []) visit(child, depth + 1, path)
+      for (const child of node.children ?? []) visit(child, depth + 1, path, bucket)
     }
   }
-  for (const node of info.variables) visit(node, 0, '')
+
+  // 默认只列可采样变量；关闭过滤后把“有名字但无固定地址”的变量也列出（标记不可采样）。
+  const base = info.variables.filter((node) => !onlySampleable.value || node.sampleable)
+  if (groupBy.value === 'none') {
+    for (const node of base) visit(node, 0, '', rows)
+    return rows
+  }
+  const groups = new Map<string, VariableNode[]>()
+  for (const node of base) {
+    const label = groupKeyOf(node, groupBy.value)
+    const bucket = groups.get(label)
+    if (bucket) bucket.push(node)
+    else groups.set(label, [node])
+  }
+  const labels = [...groups.keys()].sort((left, right) => left.localeCompare(right))
+  for (const label of labels) {
+    const bucket = groups.get(label) ?? []
+    rows.push({
+      kind: 'group',
+      key: `group:${label}`,
+      node: {name: label, typeName: '', address: 0, size: 0},
+      depth: 0,
+      path: label,
+      hasChildren: false,
+      expanded: false,
+      groupLabel: label,
+      groupCount: bucket.length,
+    })
+    for (const node of bucket) visit(node, 0, '', rows)
+  }
   return rows
 })
 
+const visibleVariableCount = computed(() => variableRows.value.filter((row) => row.kind === 'variable').length)
+const unsampleableCount = computed(() => {
+  const info = elfInfo.value
+  if (!info) return 0
+  return info.variables.filter((node) => !node.sampleable).length
+})
+
 function isRowSelected(row: VariableRow): boolean {
+  if (row.kind !== 'variable') return false
   return seriesList.value.some((item) => item.key === row.key)
 }
 
 function toggleExpand(row: VariableRow): void {
+  if (row.kind !== 'variable') return
   const next = new Set(expandedKeys.value)
   if (next.has(row.key)) next.delete(row.key)
   else next.add(row.key)
@@ -986,6 +1087,7 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
 }
 
 function toggleRow(row: VariableRow): void {
+  if (row.kind !== 'variable' || !row.node.sample) return
   if (isRowSelected(row)) {
     removeSeriesByKey(row.key)
     return
@@ -1019,9 +1121,9 @@ function applyGlobalFormat(): void {
 const wideHint = computed(() => seriesList.value.some((item) => item.sample.size > 4 || item.sample.bitSize > 32))
 
 function sourceLabel(node: VariableNode): string {
-  if (!node.file) return '-'
-  const base = node.file.split(/[\\/]/).pop() ?? node.file
-  return node.line ? `${base}:${node.line}` : base
+  const path = node.relativeFile ?? node.file
+  if (!path) return '-'
+  return node.line ? `${path}:${node.line}` : path
 }
 
 function legendLabel(item: CurveSeries): string {
@@ -1595,6 +1697,20 @@ onBeforeUnmount(() => {
 
 .var-row.selected {
   background-color: var(--el-color-primary-light-8);
+}
+
+.var-row.unsampleable {
+  opacity: 0.62;
+}
+
+.unsampleable-text {
+  font-size: 0.7rem;
+  color: #9ca3af;
+}
+
+.var-group-row {
+  @apply flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-2 text-xs font-semibold text-gray-700;
+  height: 1.5rem;
 }
 
 .var-check {
