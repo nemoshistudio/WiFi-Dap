@@ -16,7 +16,7 @@ import {
     TARGET_RAM_RANGE,
 } from './elfTypes'
 
-export type {DisplayFormat, ElfSectionInfo, ElfVariablesResult, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
+export type {AddressExpr, DisplayFormat, ElfSectionInfo, ElfVariablesResult, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
 export {formatHex32, isPlausibleTargetAddress, TARGET_FLASH_RANGE, TARGET_RAM_RANGE}
 export {DwarfParseError} from './elfDwarf'
 
@@ -564,6 +564,10 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
             dwarfNamed: dwarf.dwarfNamed,
             dwarfWithAddress: dwarf.dwarfWithAddress,
             dwarfSkipped: dwarf.dwarfSkipped,
+            dwarfLiveSamplable: dwarf.dwarfLiveSamplable,
+            dwarfHaltSamplable: dwarf.dwarfHaltSamplable,
+            dwarfPointerExpanded: dwarf.dwarfPointerExpanded,
+            dwarfNoLocation: dwarf.dwarfNoLocation,
             dwarfUnits: dwarf.units,
             warnings,
         }
@@ -611,6 +615,10 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
         dwarfNamed: dwarf?.dwarfNamed ?? 0,
         dwarfWithAddress: dwarf?.dwarfWithAddress ?? 0,
         dwarfSkipped: dwarf?.dwarfSkipped ?? 0,
+        dwarfLiveSamplable: dwarf?.dwarfLiveSamplable ?? 0,
+        dwarfHaltSamplable: dwarf?.dwarfHaltSamplable ?? 0,
+        dwarfPointerExpanded: dwarf?.dwarfPointerExpanded ?? 0,
+        dwarfNoLocation: dwarf?.dwarfNoLocation ?? 0,
         dwarfUnits: dwarf?.units ?? 0,
         warnings,
     }

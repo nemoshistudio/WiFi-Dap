@@ -66,6 +66,13 @@
 
       <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
         <label class="flex items-center gap-2">
+          <span class="whitespace-nowrap">{{ translate('curve.samplingMode') }}</span>
+          <el-select v-model="samplingMode" size="small" style="width: 12rem" :disabled="sampling" @change="onSamplingModeChange">
+            <el-option value="live" :label="translate('curve.samplingModeLive')"/>
+            <el-option value="debug" :label="translate('curve.samplingModeDebug')"/>
+          </el-select>
+        </label>
+        <label v-if="!isDebugMode" class="flex items-center gap-2">
           <span class="whitespace-nowrap">{{ translate('curve.sampleRate') }}</span>
           <el-select v-model="sampleRate" size="small" style="width: 8rem" :disabled="sampling">
             <el-option
@@ -76,8 +83,14 @@
             />
           </el-select>
         </label>
+        <label v-else class="flex items-center gap-2">
+          <span class="whitespace-nowrap">{{ translate('curve.debugInterval') }}</span>
+          <el-select v-model="debugIntervalMs" size="small" style="width: 7rem" :disabled="sampling">
+            <el-option v-for="interval in DEBUG_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
+          </el-select>
+        </label>
         <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
-        <span v-if="sampleRate === 0">{{ translate('curve.autoRate') }}: <b>{{ autoRateDisplay }} Hz</b></span>
+        <span v-if="!isDebugMode && sampleRate === 0">{{ translate('curve.autoRate') }}: <b>{{ autoRateDisplay }} Hz</b></span>
         <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
         <span>{{ translate('curve.failedCount') }}: <b>{{ failedCount }}</b></span>
         <span>{{ translate('curve.droppedCount') }}: <b>{{ droppedCount }}</b></span>
@@ -88,7 +101,9 @@
           </el-select>
         </label>
       </div>
-      <div class="mt-1 text-xs opacity-70">{{ translate('curve.samplingHint') }}</div>
+      <div class="mt-1 text-xs opacity-70">
+        {{ isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint') }}
+      </div>
     </section>
 
     <!-- ELF / DWARF 变量浏览器 -->
@@ -105,6 +120,12 @@
           {{ translate('curve.dwarfParsed', {count: elfInfo.variables.length, fixed: elfInfo.dwarfWithAddress}) }}
           <span v-if="unsampleableCount > 0" class="block text-xs opacity-70">
             {{ translate('curve.unsampleableHint', {count: unsampleableCount}) }}
+          </span>
+          <span v-if="elfInfo.dwarfHaltSamplable > 0" class="block text-xs opacity-70">
+            {{ translate('curve.haltSamplableHint', {count: elfInfo.dwarfHaltSamplable}) }}
+          </span>
+          <span v-if="elfInfo.dwarfPointerExpanded > 0" class="block text-xs opacity-70">
+            {{ translate('curve.pointerExpandedHint', {count: elfInfo.dwarfPointerExpanded}) }}
           </span>
           <span class="block text-xs opacity-70">{{ translate('curve.debugInfoHint') }}</span>
         </p>
@@ -147,7 +168,7 @@
           <span class="ml-auto text-xs opacity-70">{{ translate('curve.variables') }}: {{ visibleVariableCount }}</span>
         </div>
 
-        <div class="var-table mt-2">
+        <div class="var-table mt-2" :key="variableListEpoch">
           <div class="var-head">
             <span></span>
             <span>{{ translate('curve.colName') }}</span>
@@ -169,7 +190,7 @@
               >
                 <span class="var-check">
                   <el-checkbox
-                      v-if="row.node.sample"
+                      v-if="nodeSelectable(row.node)"
                       :model-value="isRowSelected(row)"
                       @change="toggleRow(row)"
                   />
@@ -177,7 +198,7 @@
                 <span
                     class="var-name"
                     :style="{paddingLeft: (row.depth * 12) + 'px'}"
-                    :title="row.node.mangledName ? row.path + '\n' + row.node.mangledName : row.path"
+                    :title="[row.path, nodeLocationText(row.node), row.node.mangledName].filter(Boolean).join('\n')"
                 >
                   <button
                       v-if="row.hasChildren"
@@ -189,7 +210,12 @@
                   <span class="truncate">{{ row.node.name }}</span>
                 </span>
                 <span class="var-type truncate" :title="row.node.typeName">{{ row.node.typeName || translate('curve.unknownType') }}</span>
-                <span v-if="row.node.sampleable" class="var-addr font-mono">{{ formatHex32(row.node.address) }}</span>
+                <span v-if="row.node.sampleable" class="var-addr font-mono">
+                  <template v-if="row.node.sample && row.node.sample.address">{{ formatHex32(row.node.sample.address) }}</template>
+                  <span v-else class="mode-badge" :title="nodeLocationText(row.node)">
+                    {{ row.node.liveSamplable ? translate('curve.pointerSamplable') : translate('curve.debugSamplable') }}
+                  </span>
+                </span>
                 <span v-else class="var-addr unsampleable-text" :title="translate('curve.unsampleable')">{{ translate('curve.unsampleable') }}</span>
                 <span class="var-size text-right">{{ row.node.size }}</span>
                 <span class="var-src truncate" :title="row.node.file || ''">{{ sourceLabel(row.node) }}</span>
@@ -223,7 +249,7 @@
           <span class="series-dot" :style="{background: item.color}"></span>
           <span class="truncate" :title="item.name">{{ item.name }}</span>
           <span class="truncate text-xs opacity-70" :title="item.typeName">{{ item.typeName || translate('curve.unknownType') }}</span>
-          <span class="font-mono text-xs opacity-70">{{ formatHex32(item.address) }}</span>
+          <span class="font-mono text-xs opacity-70" :title="item.location ? addressExprText(item.location) : ''">{{ item.location ? addressExprText(item.location) : formatHex32(item.address) }}</span>
           <el-select v-model="item.format" size="small" style="width: 5.5rem">
             <el-option v-for="format in FORMATS" :key="format" :value="format" :label="format"/>
           </el-select>
@@ -289,11 +315,13 @@ import {kickDapSession} from '@/api/apiDap'
 import {
   formatHex32,
   parseElfVariables,
+  type AddressExpr,
   type DisplayFormat,
   type ElfVariablesResult,
   type SampleLeaf,
   type VariableNode,
 } from '@/utils/elfSymbols'
+import {addressExprIsLive, addressExprRegisters, addressExprText} from '@/utils/dwarfLocation'
 
 const FORMATS: DisplayFormat[] = ['auto', 'u32', 'i32', 'f32']
 /**
@@ -304,6 +332,9 @@ const FORMATS: DisplayFormat[] = ['auto', 'u32', 'i32', 'f32']
 const SAMPLE_RATES = [0, 10, 20, 50, 100]
 /** 0 = Auto 模式标识。 */
 const SAMPLE_RATE_AUTO = 0
+/** 调试采样模式：暂停目标读寄存器/栈帧/指针，采样间隔可选（低采样率）。 */
+const DEBUG_INTERVALS = [50, 100, 200]
+const DEFAULT_DEBUG_INTERVAL_MS = 100
 /** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
 const PIPELINE_DEPTH = 8
 const AUTO_MIN_RATE = 10
@@ -336,6 +367,12 @@ interface CurveSeries {
   visible: boolean
   /** 该曲线开始采样的 sampleSeq：中途新增的曲线不回填旧点。 */
   startSeq: number
+  /** 采样方式：live=实时；halt=调试模式（暂停目标后读取） */
+  mode: 'live' | 'halt'
+  /** 指针链/调试位置表达式（实时两阶段或调试采样时求值） */
+  location?: AddressExpr
+  /** 值直接在核心寄存器里（DW_OP_reg） */
+  register?: number
 }
 
 interface CurveNotice {
@@ -363,6 +400,10 @@ const SAMPLE_RATES_DEFAULT = 100
 
 // ---- 页面状态 -------------------------------------------------------------
 const sampleRate = ref(SAMPLE_RATES_DEFAULT)
+/** 采样模式：实时（固定地址，高采样率）/ 调试（暂停读取帧/寄存器/指针，低采样率）。 */
+const samplingMode = ref<'live' | 'debug'>('live')
+const debugIntervalMs = ref(DEFAULT_DEBUG_INTERVAL_MS)
+const isDebugMode = computed(() => samplingMode.value === 'debug')
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<DisplayFormat>('auto')
@@ -372,6 +413,8 @@ const variableSearch = ref('')
 const onlySampleable = ref(true)
 const groupBy = ref<GroupMode>('none')
 const expandedKeys = ref<Set<string>>(new Set())
+/** 变量列表整体重渲染代次：替换 ELF 时强制重建 DOM，避免旧过滤列表的残留行。 */
+const variableListEpoch = ref(0)
 const manualInput = ref('')
 const addressError = ref('')
 const elfParsing = ref(false)
@@ -403,6 +446,9 @@ let client: CmsisDapClient | null = null
 let transport: WsDapTransport | null = null
 let nextSeriesId = 1
 let sampleTimer = 0
+let debugTimer = 0
+let debugRunId = 0
+let debugInFlight = false
 let sampleSeq = 0
 let sampleEpochMs = 0
 let nextSampleAt = 0
@@ -691,6 +737,194 @@ function flushStats(): void {
   }
 }
 
+/** 地址表达式求值时的批量指针读取器：同一微任务里的 readWord 合并为一次 sampleRaw。 */
+class WordPrefetcher {
+  private pending = new Map<number, {resolve: (value: number) => void; reject: (error: unknown) => void}>()
+  private scheduled = false
+
+  constructor(private readonly target: CmsisDapClient) {}
+
+  read(address: number): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      this.pending.set(address >>> 0, {resolve, reject})
+      if (!this.scheduled) {
+        this.scheduled = true
+        queueMicrotask(() => { void this.flush() })
+      }
+    })
+  }
+
+  private async flush(): Promise<void> {
+    this.scheduled = false
+    const batch = [...this.pending.entries()]
+    this.pending = new Map()
+    if (batch.length === 0) return
+    try {
+      const raws = await this.target.sampleRaw(batch.map(([address]) => ({address, size: 4})))
+      batch.forEach(([, pending], index) => {
+        const raw = raws[index] ?? new Uint8Array(4)
+        let value = 0
+        for (let byte = 0; byte < 4; byte++) value |= (raw[byte] ?? 0) << (byte * 8)
+        pending.resolve(value >>> 0)
+      })
+    } catch (error) {
+      batch.forEach(([, pending]) => pending.reject(error))
+    }
+    if (this.pending.size > 0) {
+      this.scheduled = true
+      queueMicrotask(() => { void this.flush() })
+    }
+  }
+}
+
+/** 异步求值地址表达式（指针解引用通过 WordPrefetcher 批量读取）。 */
+async function resolveAddressAsync(
+    expr: AddressExpr,
+    registers: ReadonlyMap<number, number>,
+    prefetcher: WordPrefetcher,
+): Promise<number> {
+  switch (expr.kind) {
+    case 'addr':
+      return expr.address >>> 0
+    case 'reg': {
+      const value = registers.get(expr.reg)
+      if (value === undefined) throw new Error(`missing core register r${expr.reg}`)
+      return (value + expr.offset) >>> 0
+    }
+    case 'cfa': {
+      const value = registers.get(13)
+      if (value === undefined) throw new Error('missing core register SP (r13) for CFA')
+      return (value + expr.offset) >>> 0
+    }
+    case 'add':
+      return ((await resolveAddressAsync(expr.inner, registers, prefetcher)) + expr.offset) >>> 0
+    case 'deref': {
+      const pointerAddress = await resolveAddressAsync(expr.inner, registers, prefetcher)
+      return ((await prefetcher.read(pointerAddress)) + expr.offset) >>> 0
+    }
+    default:
+      throw new Error('unsupported DWARF address expression')
+  }
+}
+
+/**
+ * 实时采样读取：普通叶子直接读固定地址；指针链成员需要先读指针（两阶段），
+ * 仍不需要暂停目标，因此实时模式也可采样固定地址指针的成员。
+ */
+async function fetchLiveRawValues(snapshot: readonly CurveSeries[]): Promise<Uint8Array[]> {
+  const current = client
+  if (!current) throw new Error('not connected')
+  if (!snapshot.some((item) => item.location)) {
+    return current.sampleRaw(snapshot.map((item) => ({address: item.sample.address, size: item.sample.size})))
+  }
+  const prefetcher = new WordPrefetcher(current)
+  const emptyRegisters = new Map<number, number>()
+  const addresses = await Promise.all(snapshot.map((item) => (
+    item.location
+      ? resolveAddressAsync(item.location, emptyRegisters, prefetcher)
+      : Promise.resolve(item.sample.address >>> 0)
+  )))
+  return current.sampleRaw(snapshot.map((item, index) => ({address: addresses[index], size: item.sample.size})))
+}
+
+/**
+ * 调试采样：haltTarget → 读需要的一次性核心寄存器 → 批量指针/内存读取 → resume。
+ * 每次采样独立 halt/resume，约 5–20 Hz；出错时立即停止采样并在 finally 恢复目标。
+ */
+async function debugSampleTick(runId: number): Promise<void> {
+  debugTimer = 0
+  if (!sampling.value || runId !== debugRunId || !client) return
+  const current = client
+  const begin = performance.now()
+  let halted = false
+  let snapshot: CurveSeries[] = []
+  debugInFlight = true
+  try {
+    halted = await current.haltTarget()
+    if (!halted) throw new Error('target halt failed')
+    snapshot = seriesList.value.slice()
+    if (snapshot.length === 0) return
+    const registerIds = new Set<number>()
+    for (const item of snapshot) {
+      if (item.register !== undefined) registerIds.add(item.register)
+      if (item.location) {
+        for (const reg of addressExprRegisters(item.location)) registerIds.add(reg)
+      }
+    }
+    const orderedRegs = [...registerIds].sort((left, right) => left - right)
+    const registers = new Map<number, number>()
+    if (orderedRegs.length > 0) {
+      const values = await current.readCoreRegs(orderedRegs)
+      orderedRegs.forEach((reg, index) => registers.set(reg, values[index] ?? 0))
+    }
+    const prefetcher = new WordPrefetcher(current)
+    const addresses = await Promise.all(snapshot.map((item) => (
+      item.location
+        ? resolveAddressAsync(item.location, registers, prefetcher)
+        : Promise.resolve(item.sample.address >>> 0)
+    )))
+    const values: Uint8Array[] = new Array(snapshot.length)
+    const memoryReads: Array<{address: number; size: number}> = []
+    const memoryIndices: number[] = []
+    for (let index = 0; index < snapshot.length; index++) {
+      const item = snapshot[index]
+      if (item.register !== undefined) {
+        const size = Math.max(1, Math.min(8, item.sample.size))
+        const bytes = new Uint8Array(size)
+        let value = registers.get(item.register) ?? 0
+        for (let byte = 0; byte < size; byte++) {
+          bytes[byte] = value & 0xff
+          value = Math.floor(value / 256)
+        }
+        values[index] = bytes
+      } else {
+        memoryReads.push({address: addresses[index], size: item.sample.size})
+        memoryIndices.push(index)
+      }
+    }
+    if (memoryReads.length > 0) {
+      const raws = await current.sampleRaw(memoryReads)
+      memoryIndices.forEach((seriesIndex, slot) => {
+        values[seriesIndex] = raws[slot] ?? new Uint8Array(1)
+      })
+    }
+    if (!sampling.value || runId !== debugRunId) return
+    pushSample((begin - sampleEpochMs) / 1000, values, snapshot)
+    consecutiveFailures = 0
+    const completedAt = performance.now()
+    recentCompletions.push(completedAt)
+    const cutoff = completedAt - 1000
+    while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
+    scheduleStatsFlush()
+    scheduleDraw()
+  } catch (error) {
+    if (!sampling.value || runId !== debugRunId) return
+    failedCount.value += 1
+    consecutiveFailures += 1
+    stopSampling()
+    statusError.value = true
+    const message = error instanceof Error ? error.message : 'unknown error'
+    notice.value = {type: 'error', title: translate('curve.debugSampleFailed', {err: message})}
+    scheduleDraw()
+    return
+  } finally {
+    debugInFlight = false
+    if (halted) {
+      try {
+        await current.resumeTarget()
+      } catch {
+        // 恢复失败时连接层会报错；这里不覆盖原始错误信息。
+      }
+    }
+  }
+  if (sampling.value && runId === debugRunId) {
+    const elapsed = performance.now() - begin
+    if (elapsed > debugIntervalMs.value * 1.5) droppedPending += 1
+    debugTimer = window.setTimeout(() => { void debugSampleTick(runId) }, debugIntervalMs.value)
+    scheduleStatsFlush()
+  }
+}
+
 function startSampling(): void {
   if (!connected.value || !client || seriesList.value.length === 0) return
   if (sampling.value) return
@@ -713,6 +947,14 @@ function startSampling(): void {
   resetAutoWindow(performance.now())
   sampling.value = true
   everSampled.value = true
+  if (samplingMode.value === 'debug') {
+    debugRunId += 1
+    samplingRunId = debugRunId
+    debugTimer = 0
+    void debugSampleTick(debugRunId)
+    return
+  }
+  debugRunId += 1
   const runId = ++samplingRunId
   scheduleBeat(runId, 0)
 }
@@ -720,12 +962,35 @@ function startSampling(): void {
 function stopSampling(): void {
   sampling.value = false
   samplingRunId += 1
+  debugRunId += 1
   if (sampleTimer) {
     window.clearTimeout(sampleTimer)
     sampleTimer = 0
   }
+  if (debugTimer) {
+    window.clearTimeout(debugTimer)
+    debugTimer = 0
+  }
+  // 调试模式停止时确保目标恢复运行（正在进行的 tick 会在 finally 里恢复）。
+  const current = client
+  if (isDebugMode.value && !debugInFlight && current && connected.value) {
+    void current.resumeTarget().catch(() => { /* ignore */ })
+  }
   inflightSamples = 0
   flushStats()
+}
+
+/** 切换采样模式：实时模式不能采样依赖寄存器的调试帧变量，切回时移除这些曲线。 */
+function onSamplingModeChange(): void {
+  if (sampling.value) return
+  if (samplingMode.value === 'live') {
+    const removable = seriesList.value.filter((item) => !!item.location && !addressExprIsLive(item.location))
+    for (const item of removable) removeSeries(item.id)
+    if (removable.length > 0) {
+      globalNotify(translate('curve.haltSeriesRemoved', {count: removable.length}), 'info')
+    }
+  }
+  scheduleDraw()
 }
 
 function scheduleBeat(runId: number, delay: number): void {
@@ -759,12 +1024,11 @@ function samplingBeat(runId: number): void {
   }
 
   const snapshot = seriesList.value.slice()
-  const reads = snapshot.map((item) => ({address: item.sample.address, size: item.sample.size}))
   const begin = now
   inflightSamples += 1
   autoWindowInflightSum += inflightSamples
   autoWindowInflightCount += 1
-  client.sampleRaw(reads).then((rawValues) => {
+  fetchLiveRawValues(snapshot).then((rawValues) => {
     if (!sampling.value || runId !== samplingRunId) return
     inflightSamples = Math.max(0, inflightSamples - 1)
     // 时间戳使用“发起请求”的时刻（管线化后完成时刻会晚于采样时刻）。
@@ -938,7 +1202,9 @@ function nodeMatches(node: VariableNode, path: string, query: string): boolean {
     node.typeName,
     node.relativeFile,
     node.file,
-    node.sampleable ? formatHex32(node.address) : '',
+    node.sample && node.sample.address ? formatHex32(node.sample.address) : '',
+    node.sample?.register !== undefined ? `r${node.sample.register}` : '',
+    node.location ? addressExprText(node.location) : '',
   ]
   return fields.some((value) => !!value && String(value).toLowerCase().includes(needle))
 }
@@ -972,6 +1238,22 @@ function nodeMatchesDeep(node: VariableNode, path: string, query: string): boole
   return node.children.some((child) => nodeMatchesDeep(child, path + child.name, query))
 }
 
+/** 当前采样模式下该节点是否可选（实时：固定地址/无寄存器指针；调试：含帧/寄存器位置）。 */
+function nodeSelectable(node: VariableNode): boolean {
+  if (samplingMode.value === 'debug') {
+    return !!node.sampleable && (!!node.sample || !!node.location)
+  }
+  return !!node.sample && (node.sample.address !== 0 || !!node.liveSamplable)
+}
+
+/** 调试定位表达式/寄存器的人读文本（地址列 tooltip、搜索）。 */
+function nodeLocationText(node: VariableNode): string {
+  const expr = node.location ?? node.sample?.location
+  if (expr) return addressExprText(expr)
+  if (node.sample?.register !== undefined) return `r${node.sample.register}`
+  return ''
+}
+
 const variableRows = computed<VariableRow[]>(() => {
   const info = elfInfo.value
   if (!info) return []
@@ -989,8 +1271,11 @@ const variableRows = computed<VariableRow[]>(() => {
     }
   }
 
-  // 默认只列可采样变量；关闭过滤后把“有名字但无固定地址”的变量也列出（标记不可采样）。
-  const base = info.variables.filter((node) => !onlySampleable.value || node.sampleable)
+  // 默认只列当前模式下可采样的变量；关闭过滤后把“有名字但无位置”的变量也列出（标记不可采样）。
+  const base = info.variables.filter((node) => {
+    if (!onlySampleable.value) return true
+    return samplingMode.value === 'debug' ? node.sampleable : node.liveSamplable
+  })
   if (groupBy.value === 'none') {
     for (const node of base) visit(node, 0, '', rows)
     return rows
@@ -1060,7 +1345,9 @@ function collapseAll(): void {
 }
 
 function newSeries(name: string, key: string, typeName: string, node: VariableNode): CurveSeries | null {
-  if (!node.sample) return null
+  if (!node.sample && !node.location) return null
+  const location = node.sample?.location ?? node.location
+  const register = node.sample?.register
   if (seriesList.value.some((item) => item.key === key)) return null
   if (seriesList.value.length >= MAX_CURVE_SERIES) {
     globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
@@ -1073,11 +1360,14 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
     typeName,
     address: node.address >>> 0,
     size: node.size,
-    sample: node.sample,
+    sample: node.sample as SampleLeaf,
     format: globalFormat.value,
     color: COLORS[seriesList.value.length % COLORS.length],
     visible: true,
     startSeq: sampleSeq + (sampling.value ? 1 : 0),
+    mode: samplingMode.value === 'debug' ? 'halt' : 'live',
+    location,
+    register,
   }
   seriesLo.set(series.id, new Uint32Array(MAX_POINTS))
   seriesHi.set(series.id, new Uint32Array(MAX_POINTS))
@@ -1087,7 +1377,7 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
 }
 
 function toggleRow(row: VariableRow): void {
-  if (row.kind !== 'variable' || !row.node.sample) return
+  if (row.kind !== 'variable' || !nodeSelectable(row.node)) return
   if (isRowSelected(row)) {
     removeSeriesByKey(row.key)
     return
@@ -1153,6 +1443,7 @@ async function onElfSelected(event: Event): Promise<void> {
     const buffer = await file.arrayBuffer()
     const result = parseElfVariables(buffer)
     elfInfo.value = result
+    variableListEpoch.value += 1
     variableSearch.value = ''
     expandedKeys.value = new Set()
     if (result.variables.length === 0) {
@@ -1706,6 +1997,13 @@ onBeforeUnmount(() => {
 .unsampleable-text {
   font-size: 0.7rem;
   color: #9ca3af;
+}
+
+.mode-badge {
+  @apply inline-flex items-center rounded px-1 text-[0.6rem] font-semibold;
+  background-color: #e0f2fe;
+  color: #0369a1;
+  white-space: nowrap;
 }
 
 .var-group-row {

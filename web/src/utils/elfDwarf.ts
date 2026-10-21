@@ -19,14 +19,20 @@
  *    DW_AT_data_bit_offset/DW_AT_bit_size 位域、匿名成员展开、继承；
  *  - decl_file/line：解析 .debug_line 文件表（v2–v5），取 basename:line。
  *
+ * 支持（调试采样 A2）：
+ *  - 位置表达式：DW_OP_addr/addrx（实时）、DW_OP_fbreg + 子程序 DW_AT_frame_base
+ *    （reg7/reg11/CFA）、DW_OP_bregN/bregx（栈帧局部变量）、DW_OP_regN（值在寄存器）；
+ *  - 指针成员展开：指针变量 → 被指向 struct/union 成员 / 数组元素（`->member`），
+ *    带解引用表达式，可在实时（两阶段）或调试（暂停）模式采样。
+ *
  * 限制（页面 UI 会提示/降级）：
- *  - 只取“固定地址”变量（DW_OP_addr / DW_OP_addrx），寄存器/栈局部变量跳过；
- *  - .debug_loc 位置列表不解析（局部变量）；
+ *  - .debug_loc 位置列表不解析（局部变量，标记为无位置）；
  *  - 展开深度 3、每节点最多 64 个子项，防止巨型结构体爆 UI；
  *  - 64-bit 值以两个 32-bit word 读取，>64-bit 聚合只读前 8 字节。
  */
-import type {DisplayFormat, ElfSectionInfo, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
+import type {AddressExpr, DisplayFormat, ElfSectionInfo, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
 import {isPlausibleTargetAddress} from './elfTypes'
+import {addressExprIsLive} from './dwarfLocation'
 
 export class DwarfParseError extends Error {
     constructor(message: string) {
@@ -68,6 +74,7 @@ const TAG_PACKED_TYPE = 0x2d
 
 const AT_NAME = 0x03
 const AT_LOCATION = 0x02
+const AT_FRAME_BASE = 0x40
 const AT_BYTE_SIZE = 0x0b
 const AT_BIT_SIZE = 0x0d
 const AT_BIT_OFFSET = 0x0c
@@ -142,6 +149,16 @@ const OP_LIT0 = 0x30
 const OP_LIT31 = 0x4f
 const OP_ADDRX = 0xa1
 const OP_GNU_ADDR_INDEX = 0xfb
+const OP_REG0 = 0x50
+const OP_REG31 = 0x6f
+const OP_BREG0 = 0x70
+const OP_BREG31 = 0x8f
+const OP_REGX = 0x90
+const OP_FBREG = 0x91
+const OP_BREGX = 0x92
+const OP_CALL_FRAME_CFA = 0x9c
+const OP_STACK_VALUE = 0x9f
+const OP_NOP = 0x96
 
 const DW_ATE_ADDRESS = 0x01
 const DW_ATE_BOOLEAN = 0x02
@@ -541,6 +558,140 @@ function locationFixedAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined)
         }
     }
     return null
+}
+
+
+// ---------------------------------------------------------------------------
+// 调试采样位置：DW_AT_frame_base / DW_OP_fbreg / breg / reg
+// ---------------------------------------------------------------------------
+interface FrameBaseLocation {
+    /** true = DW_OP_call_frame_cfa（用 SP=r13 近似） */
+    cfa: boolean
+    reg: number
+    offset: number
+}
+
+function parseFrameBaseBlock(block: Uint8Array): FrameBaseLocation | null {
+    if (!block || block.length === 0) return null
+    const reader = new ByteReader(block)
+    try {
+        const opcode = reader.u8()
+        let cfa = false
+        let reg = 0
+        let offset = 0
+        if (opcode === OP_CALL_FRAME_CFA) {
+            cfa = true
+        } else if (opcode >= OP_REG0 && opcode <= OP_REG31) {
+            reg = opcode - OP_REG0
+        } else if (opcode >= OP_BREG0 && opcode <= OP_BREG31) {
+            reg = opcode - OP_BREG0
+            offset = reader.sleb()
+        } else if (opcode === OP_REGX) {
+            reg = reader.uleb()
+        } else if (opcode === OP_BREGX) {
+            reg = reader.uleb()
+            offset = reader.sleb()
+        } else {
+            return null
+        }
+        while (reader.remaining > 0) {
+            const next = reader.u8()
+            if (next === OP_PLUS_UCONST) offset += reader.uleb()
+            else if (next === OP_STACK_VALUE || next === OP_NOP) break
+            else return null
+        }
+        return {cfa, reg, offset}
+    } catch {
+        return null
+    }
+}
+
+/** 最近的外层 DW_TAG_subprogram 的 DW_AT_frame_base（帧基址寄存器）。 */
+function frameBaseForDIE(ctx: Ctx, die: Die): FrameBaseLocation | null {
+    const seen = new Set<number>()
+    let current: Die | null = die
+    let guard = 0
+    while (current && guard++ < 24 && !seen.has(current.offset)) {
+        seen.add(current.offset)
+        if (current.tag === TAG_SUBPROGRAM) {
+            const attr = current.attrs.get(AT_FRAME_BASE)
+            if (attr?.block) {
+                const parsed = parseFrameBaseBlock(attr.block)
+                if (parsed) return parsed
+            }
+            const specification = resolveReference(ctx, current.unit, current.attrs.get(AT_SPECIFICATION))
+            if (specification?.tag === TAG_SUBPROGRAM) {
+                const specAttr = specification.attrs.get(AT_FRAME_BASE)
+                if (specAttr?.block) {
+                    const parsed = parseFrameBaseBlock(specAttr.block)
+                    if (parsed) return parsed
+                }
+            }
+        }
+        current = current.parent
+    }
+    return null
+}
+
+interface ParsedLocation {
+    kind: 'fixed' | 'memory' | 'register' | 'none' | 'unsupported'
+    address?: number
+    expr?: AddressExpr
+    register?: number
+    reason?: string
+}
+
+/** 解析 DW_AT_location：固定地址 / 帧+寄存器内存位置 / 寄存器值。 */
+function parseLocationExpr(ctx: Ctx, die: Die, attr: AttrValue | undefined): ParsedLocation {
+    if (!attr) return {kind: 'none'}
+    if (!attr.block || attr.block.length === 0) {
+        if (attr.number !== undefined) return {kind: 'unsupported', reason: 'location list'}
+        return {kind: 'none'}
+    }
+    const fixed = locationFixedAddress(ctx, die.unit, attr)
+    if (fixed !== null) return {kind: 'fixed', address: fixed >>> 0}
+    const reader = new ByteReader(attr.block)
+    try {
+        const opcode = reader.u8()
+        if (opcode === OP_FBREG) {
+            const offset = reader.sleb()
+            const frame = frameBaseForDIE(ctx, die)
+            if (!frame) return {kind: 'unsupported', reason: 'missing DW_AT_frame_base'}
+            const total = frame.offset + offset
+            return frame.cfa
+                ? {kind: 'memory', expr: {kind: 'cfa', offset: total}}
+                : {kind: 'memory', expr: {kind: 'reg', reg: frame.reg, offset: total}}
+        }
+        if (opcode >= OP_BREG0 && opcode <= OP_BREG31) {
+            return {kind: 'memory', expr: {kind: 'reg', reg: opcode - OP_BREG0, offset: reader.sleb()}}
+        }
+        if (opcode === OP_BREGX) {
+            const reg = reader.uleb()
+            return {kind: 'memory', expr: {kind: 'reg', reg, offset: reader.sleb()}}
+        }
+        if (opcode >= OP_REG0 && opcode <= OP_REG31) {
+            return {kind: 'register', register: opcode - OP_REG0}
+        }
+        if (opcode === OP_REGX) {
+            return {kind: 'register', register: reader.uleb()}
+        }
+        return {kind: 'unsupported', reason: `unsupported location opcode 0x${opcode.toString(16)}`}
+    } catch {
+        return {kind: 'unsupported', reason: 'malformed location expression'}
+    }
+}
+
+/** 沿 spec/origin 链找第一个可用 location（定义缺失时继承声明位置）。 */
+function chainParsedLocation(ctx: Ctx, chain: readonly Die[]): ParsedLocation {
+    let unsupported: ParsedLocation | null = null
+    for (const candidate of chain) {
+        const attr = candidate.attrs.get(AT_LOCATION)
+        if (!attr) continue
+        const parsed = parseLocationExpr(ctx, candidate, attr)
+        if (parsed.kind === 'fixed' || parsed.kind === 'memory' || parsed.kind === 'register') return parsed
+        if (parsed.kind === 'unsupported' && !unsupported) unsupported = parsed
+    }
+    return unsupported ?? {kind: 'none'}
 }
 
 /** 解析简单 DWARF 表达式里的常量偏移（成员偏移/位域用）。 */
@@ -1359,36 +1510,95 @@ function makeLeaf(type: TypeInfo, address: number, bitOffset = 0, bitSize = 0): 
 
 let nodeBudget = 0
 
-function buildNode(name: string, type: TypeInfo, address: number, depth: number, bitOffset = 0, bitSize = 0): VariableNode {
+/**
+ * 节点位置：固定地址（实时静态展开）或调试位置表达式（帧/寄存器/指针链）。
+ * payloadInRegister=true 表示 expr 的值本身就是变量值（DW_OP_reg），
+ * 指针展开时不再从内存读取指针。
+ */
+interface BaseLocation {
+    address: number | null
+    expr: AddressExpr | null
+    payloadInRegister?: boolean
+}
+
+function baseExprOf(base: BaseLocation): AddressExpr {
+    if (base.expr) return base.expr
+    return {kind: 'addr', address: base.address ?? 0}
+}
+
+function offsetBase(base: BaseLocation, offset: number): BaseLocation {
+    if (base.address !== null) return {address: (base.address + offset) >>> 0, expr: null}
+    return {address: null, expr: {kind: 'add', inner: baseExprOf(base), offset}, payloadInRegister: base.payloadInRegister}
+}
+
+/** 指针值所在位置的表达式：内存变量先读 u32 指针；寄存器变量直接用寄存器值。 */
+function pointeeBase(base: BaseLocation, memberOffset: number): BaseLocation {
+    if (base.payloadInRegister) {
+        const expr = base.expr
+        if (expr && expr.kind === 'reg') {
+            return {address: null, expr: {kind: 'reg', reg: expr.reg, offset: expr.offset + memberOffset}, payloadInRegister: true}
+        }
+        return {address: null, expr: {kind: 'add', inner: baseExprOf(base), offset: memberOffset}, payloadInRegister: true}
+    }
+    return {address: null, expr: {kind: 'deref', inner: baseExprOf(base), offset: memberOffset}}
+}
+
+function buildNode(
+    name: string,
+    type: TypeInfo,
+    base: BaseLocation,
+    depth: number,
+    bitOffset = 0,
+    bitSize = 0,
+    pointerDepth = 0,
+): VariableNode {
     const node: VariableNode = {
         name,
         typeName: type.display,
-        address: address >>> 0,
+        address: base.address !== null ? base.address >>> 0 : 0,
         size: type.size,
     }
-    if (bitOffset > 0 || bitSize > 0) {
-        node.sample = makeLeaf(type, address, bitOffset, bitSize)
+    if (base.address !== null) {
+        node.sample = bitOffset > 0 || bitSize > 0
+            ? makeLeaf(type, base.address, bitOffset, bitSize)
+            : makeLeaf(type, base.address)
+        node.sampleable = !!node.sample
+        node.liveSamplable = node.sampleable
+        node.samplingMode = 'live'
+    } else if (base.expr) {
+        node.location = base.expr
+        node.sample = makeLeaf(type, 0, bitOffset, bitSize)
+        if (node.sample) {
+            node.sample.address = 0
+            if (base.payloadInRegister && base.expr.kind === 'reg') node.sample.register = base.expr.reg
+            else node.sample.location = base.expr
+        }
+        node.sampleable = !!node.sample
+        node.liveSamplable = node.sampleable && addressExprIsLive(base.expr)
+        node.samplingMode = node.liveSamplable ? 'live' : 'halt'
     } else {
-        node.sample = makeLeaf(type, address)
+        node.sampleable = false
     }
-    node.sampleable = !!node.sample
+    if (pointerDepth > 0) node.pointerDepth = pointerDepth
     const resolved = unwrapType(type)
     if (resolved.kind === 'struct' || resolved.kind === 'union' || resolved.kind === 'array') {
-        node.children = buildChildren(resolved, address, depth + 1)
+        node.children = buildChildren(resolved, base, depth + 1)
+    } else if (resolved.kind === 'pointer' && resolved.element) {
+        node.children = buildPointeeChildren(resolved, base, depth + 1)
     }
     return node
 }
 
-function buildChildren(type: TypeInfo, baseAddress: number, depth: number): VariableNode[] | undefined {
+function buildChildren(type: TypeInfo, base: BaseLocation, depth: number): VariableNode[] | undefined {
     type = unwrapType(type)
     if (depth > MAX_EXPAND_DEPTH || nodeBudget <= 0) return undefined
     const children: VariableNode[] = []
     if (type.kind === 'struct' || type.kind === 'union') {
         for (const member of type.members ?? []) {
             if (children.length >= MAX_CHILDREN || nodeBudget <= 0) break
-            const memberAddress = (baseAddress + member.byteOffset) >>> 0
+            const memberBase = offsetBase(base, member.byteOffset)
             if (member.anonymous) {
-                const nested = buildChildren(member.type, memberAddress, depth)
+                const nested = buildChildren(member.type, memberBase, depth)
                 if (nested) {
                     for (const child of nested) {
                         if (children.length >= MAX_CHILDREN) break
@@ -1398,8 +1608,7 @@ function buildChildren(type: TypeInfo, baseAddress: number, depth: number): Vari
                 }
                 continue
             }
-            const node = buildNode(`.${member.name}`, member.type, memberAddress, depth, member.bitOffset, member.bitSize)
-            children.push(node)
+            children.push(buildNode(`.${member.name}`, member.type, memberBase, depth, member.bitOffset, member.bitSize))
             nodeBudget -= 1
         }
         return children.length > 0 ? children : undefined
@@ -1412,13 +1621,56 @@ function buildChildren(type: TypeInfo, baseAddress: number, depth: number): Vari
         const limit = Math.min(count, MAX_CHILDREN)
         for (let i = 0; i < limit; i++) {
             if (nodeBudget <= 0) break
-            const node = buildNode(`[${i}]`, element, (baseAddress + i * stride) >>> 0, depth)
-            children.push(node)
+            children.push(buildNode(`[${i}]`, element, offsetBase(base, i * stride), depth))
             nodeBudget -= 1
         }
         return children.length > 0 ? children : undefined
     }
     return undefined
+}
+
+/** 指针节点：展开被指向的 struct/union 成员或数组元素（名字 `->member` / `->[i]`）。 */
+function buildPointeeChildren(pointerType: TypeInfo, base: BaseLocation, depth: number, pointerDepth = 1): VariableNode[] | undefined {
+    if (depth > MAX_EXPAND_DEPTH + 1 || nodeBudget <= 0) return undefined
+    const pointee = unwrapType(pointerType.element ?? UNKNOWN_TYPE)
+    if (pointee.kind !== 'struct' && pointee.kind !== 'union' && pointee.kind !== 'array') return undefined
+    const children: VariableNode[] = []
+    if (pointee.kind === 'struct' || pointee.kind === 'union') {
+        for (const member of pointee.members ?? []) {
+            if (children.length >= MAX_CHILDREN || nodeBudget <= 0) break
+            if (member.anonymous) {
+                const nested = buildChildren(member.type, pointeeBase(base, member.byteOffset), depth)
+                if (nested) {
+                    for (const child of nested) {
+                        if (children.length >= MAX_CHILDREN) break
+                        children.push({...child, name: child.name.startsWith('.') ? `->${child.name.slice(1)}` : child.name})
+                        nodeBudget -= 1
+                    }
+                }
+                continue
+            }
+            children.push(buildNode(`->${member.name}`, member.type, pointeeBase(base, member.byteOffset), depth, 0, 0, pointerDepth))
+            nodeBudget -= 1
+        }
+        return children.length > 0 ? children : undefined
+    }
+    const element = pointee.element
+    const count = pointee.dimensions && pointee.dimensions.length > 0 ? pointee.dimensions[0] : null
+    const stride = pointee.elementSize ?? element?.size ?? 0
+    if (!element || count === null || count === undefined || count <= 0 || stride <= 0) return undefined
+    for (let i = 0; i < Math.min(count, MAX_CHILDREN); i++) {
+        if (nodeBudget <= 0) break
+        children.push(buildNode(`->[${i}]`, element, pointeeBase(base, i * stride), depth, 0, 0, pointerDepth))
+        nodeBudget -= 1
+    }
+    return children.length > 0 ? children : undefined
+}
+
+/** 统计指针展开出的可采样节点数量。 */
+function countPointerNodes(node: VariableNode): number {
+    let count = node.pointerDepth && node.sampleable ? 1 : 0
+    for (const child of node.children ?? []) count += countPointerNodes(child)
+    return count
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,16 +1718,6 @@ function chainTypeRef(chain: readonly Die[]): number | null {
  * address !== null = 固定地址；hasLocation=true 但 address=null = 寄存器/栈/loclist
  * （可列出但不可采样）。
  */
-function chainLocation(ctx: Ctx, chain: readonly Die[]): {address: number | null; hasLocation: boolean} {
-    for (const die of chain) {
-        const attr = die.attrs.get(AT_LOCATION)
-        if (!attr) continue
-        const address = locationFixedAddress(ctx, die.unit, attr)
-        return {address: address === null ? null : address >>> 0, hasLocation: true}
-    }
-    return {address: null, hasLocation: false}
-}
-
 /** decl_file/line：定义 DIE 自身（含父作用域继承）优先，其次沿 spec/origin 链。 */
 function chainDecl(ctx: Ctx, chain: readonly Die[]): {fileIndex?: number; unit?: Unit; line?: number} {
     for (const die of chain) {
@@ -1639,6 +1881,10 @@ interface DwarfCollectResult {
     dwarfNamed: number
     dwarfWithAddress: number
     dwarfSkipped: number
+    dwarfLiveSamplable: number
+    dwarfHaltSamplable: number
+    dwarfPointerExpanded: number
+    dwarfNoLocation: number
     units: number
     warnings: string[]
 }
@@ -1659,6 +1905,10 @@ export function extractDwarfVariables(
             dwarfNamed: 0,
             dwarfWithAddress: 0,
             dwarfSkipped: 0,
+            dwarfLiveSamplable: 0,
+            dwarfHaltSamplable: 0,
+            dwarfPointerExpanded: 0,
+            dwarfNoLocation: 0,
             units: 0,
             warnings: ['DWARF: missing .debug_info/.debug_abbrev/.debug_str'],
         }
@@ -1701,11 +1951,20 @@ export function extractDwarfVariables(
     let dwarfNamed = 0
     let dwarfWithAddress = 0
     let dwarfSkipped = 0
+    let dwarfLiveSamplable = 0
+    let dwarfHaltSamplable = 0
+    let dwarfPointerExpanded = 0
+    let dwarfNoLocation = 0
 
     /** 去重：同一变量可能同时存在声明/定义 DIE（spec 链）与内联副本。 */
     const byPlace = new Map<string, number>()
     const insertVariable = (node: VariableNode) => {
-        const place = `${node.shortName ?? node.name}|${node.relativeFile ?? node.file ?? ''}|${node.line ?? ''}`
+        // 调试帧变量要按限定名（含函数作用域）区分，避免同文件同行的不同函数局部变量被合并；
+        // 固定地址/全局变量沿用短名键，保持与旧版列表数量一致。
+        const nameKey = node.samplingMode === 'halt' && !node.liveSamplable
+            ? node.qualifiedName ?? node.name
+            : node.shortName ?? node.name
+        const place = `${nameKey}|${node.relativeFile ?? node.file ?? ''}|${node.line ?? ''}`
         const existingIndex = byPlace.get(place)
         if (existingIndex !== undefined) {
             const existing = variables[existingIndex]
@@ -1728,38 +1987,52 @@ export function extractDwarfVariables(
             }
             dwarfNamed += 1
             const chain = referenceChain(ctx, die)
-            const location = chainLocation(ctx, chain)
-            if (location.address !== null) dwarfWithAddress += 1
+            const location = chainParsedLocation(ctx, chain)
+            if (location.kind === 'fixed') dwarfWithAddress += 1
             const type = resolveType(ctx, chainTypeRef(chain))
             const decl = chainDecl(ctx, chain)
             let file: string | undefined
             if (decl.fileIndex !== undefined && decl.unit) {
                 file = resolveDeclFile(ctx, decl.unit, decl.fileIndex)
             }
-            const address = location.address
-            const sampleable = address !== null && address !== 0 && isPlausibleTargetAddress(address)
-            const node: VariableNode = {
-                name: identity.qualifiedName,
-                shortName: identity.shortName,
-                qualifiedName: identity.qualifiedName,
-                mangledName: identity.mangledName || undefined,
-                typeName: type.display,
-                address: sampleable ? address >>> 0 : 0,
-                size: type.size,
-                file,
-                relativeFile: file ? stripCompDirPrefix(file, decl.unit?.compDir) ?? undefined : undefined,
-                line: decl.line,
-                sampleable,
-            }
-            if (sampleable) {
-                node.sample = makeLeaf(type, address >>> 0)
-                nodeBudget = MAX_NODES_PER_VARIABLE
-                const resolvedType = unwrapType(type)
-                if (resolvedType.kind === 'struct' || resolvedType.kind === 'union' || resolvedType.kind === 'array') {
-                    node.children = buildChildren(resolvedType, address >>> 0, 1)
+            let base: BaseLocation | null = null
+            if (location.kind === 'fixed' && location.address !== undefined) {
+                const address = location.address >>> 0
+                if (address !== 0 && isPlausibleTargetAddress(address)) {
+                    base = {address, expr: null}
                 }
-                nodeBudget = 0
+            } else if (location.kind === 'memory' && location.expr) {
+                base = {address: null, expr: location.expr}
+            } else if (location.kind === 'register' && location.register !== undefined) {
+                base = {address: null, expr: {kind: 'reg', reg: location.register, offset: 0}, payloadInRegister: true}
             }
+            let node: VariableNode
+            if (base) {
+                nodeBudget = MAX_NODES_PER_VARIABLE
+                node = buildNode(identity.qualifiedName, type, base, 0)
+                nodeBudget = 0
+            } else {
+                node = {
+                    name: identity.qualifiedName,
+                    typeName: type.display,
+                    address: 0,
+                    size: type.size,
+                    sampleable: false,
+                }
+            }
+            node.shortName = identity.shortName
+            node.qualifiedName = identity.qualifiedName
+            node.mangledName = identity.mangledName || undefined
+            node.file = file
+            node.relativeFile = file ? stripCompDirPrefix(file, decl.unit?.compDir) ?? undefined : undefined
+            node.line = decl.line
+            if (node.sampleable) {
+                if (node.liveSamplable) dwarfLiveSamplable += 1
+                else dwarfHaltSamplable += 1
+            } else {
+                dwarfNoLocation += 1
+            }
+            dwarfPointerExpanded += countPointerNodes(node)
             insertVariable(node)
         }
     }
@@ -1768,7 +2041,9 @@ export function extractDwarfVariables(
     postProcessRelativeFiles(variables)
 
     variables.sort((left, right) => {
-        if (left.sampleable !== right.sampleable) return left.sampleable ? -1 : 1
+        const rank = (node: VariableNode) => (node.sampleable ? (node.liveSamplable ? 0 : 1) : 2)
+        const delta = rank(left) - rank(right)
+        if (delta !== 0) return delta
         return left.name.localeCompare(right.name) || left.address - right.address
     })
 
@@ -1778,6 +2053,10 @@ export function extractDwarfVariables(
         dwarfNamed,
         dwarfWithAddress,
         dwarfSkipped,
+        dwarfLiveSamplable,
+        dwarfHaltSamplable,
+        dwarfPointerExpanded,
+        dwarfNoLocation,
         units: units.length,
         warnings,
     }

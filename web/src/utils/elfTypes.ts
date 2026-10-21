@@ -8,6 +8,25 @@
 /** 采样值在图表/读数中的语义（由 DWARF 类型推导）。 */
 export type ValueKind = 'uint' | 'int' | 'float32' | 'float64' | 'bool' | 'enum' | 'raw'
 
+/**
+ * 调试采样定位表达式：目标暂停时，由核心寄存器/帧基址/指针解引用计算地址。
+ *
+ * - addr：固定绝对地址（静态变量/全局变量）；
+ * - reg：核心寄存器值 + offset（DW_OP_bregN / DW_OP_fbreg 展开后的帧基址）；
+ * - cfa：近似 CFA（用 SP=r13 代替，DW_OP_call_frame_cfa）；
+ * - add：内部地址加偏移（struct 成员 / 数组元素）；
+ * - deref：读取 inner 地址处的 u32 指针值再加 offset（指针成员 / 指针链）。
+ *
+ * live 采样（不暂停目标）只能使用 addr/add/deref；含 reg/cfa 的表达式必须
+ * 在调试模式（halt 后读寄存器）使用。
+ */
+export type AddressExpr =
+    | {kind: 'addr'; address: number}
+    | {kind: 'reg'; reg: number; offset: number}
+    | {kind: 'cfa'; offset: number}
+    | {kind: 'add'; inner: AddressExpr; offset: number}
+    | {kind: 'deref'; inner: AddressExpr; offset: number}
+
 /** 用户可选的显示格式；auto = 按 DWARF 类型解码。 */
 export type DisplayFormat = 'auto' | 'u32' | 'i32' | 'f32'
 
@@ -29,6 +48,10 @@ export interface SampleLeaf {
     signed: boolean
     /** enum 值 -> 名称（按值升序），仅 kind==='enum' 时存在 */
     enumValues?: Array<[number, string]>
+    /** 调试采样读取位置（存在时 address 不可用，需暂停目标后按表达式取地址） */
+    location?: AddressExpr
+    /** 值直接来自核心寄存器（DW_OP_regN；调试采样读取该寄存器） */
+    register?: number
 }
 
 /** 变量浏览树的一个节点（根变量或 struct 成员 / 数组成员）。 */
@@ -49,8 +72,16 @@ export interface VariableNode {
     /** 相对源文件路径（去掉项目/构建根前缀，如 src/system/FreeRTOS/db.cpp） */
     relativeFile?: string
     line?: number
-    /** 是否有固定地址（false = 不可采样：寄存器/栈/被优化/地址无效） */
+    /** 是否可采样（固定地址 / 调试帧位置 / 指针成员任意一种） */
     sampleable?: boolean
+    /** live = 实时固定地址；halt = 需暂停目标读帧/寄存器/指针 */
+    samplingMode?: 'live' | 'halt'
+    /** 调试/指针采样定位表达式（不暂停的 live 指针链也使用） */
+    location?: AddressExpr
+    /** 该节点是否可在实时（不暂停）模式采样；固定地址/仅含 addr 的指针链为 true */
+    liveSamplable?: boolean
+    /** 指针解引用层数（0/undefined = 非指针链节点） */
+    pointerDepth?: number
     /** 可采样叶子；聚合节点（struct/array）没有 */
     sample?: SampleLeaf
     /** struct/union 成员或数组成员（展开深度有限） */
@@ -82,6 +113,14 @@ export interface ElfVariablesResult {
     dwarfWithAddress: number
     /** 固定地址但被过滤（地址范围/对齐/无名字/解析失败）的数量 */
     dwarfSkipped: number
+    /** 根变量中可在实时模式采样的数量（固定地址 / 无寄存器的指针链） */
+    dwarfLiveSamplable: number
+    /** 根变量中需调试模式（暂停读帧/寄存器）采样的数量 */
+    dwarfHaltSamplable: number
+    /** 因指针解引用而展开出的可采样节点数量 */
+    dwarfPointerExpanded: number
+    /** 有名字但完全没有可用位置（寄存器/栈/被优化/loclist 不支持）的根变量数量 */
+    dwarfNoLocation: number
     /** 解析到的 CU 数 */
     dwarfUnits: number
     /** 非致命问题（页面可展示为提示） */
