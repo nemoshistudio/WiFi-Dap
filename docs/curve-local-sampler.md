@@ -243,3 +243,11 @@ Phase 1：
 - 注意：快照源码在 reference firmware 工作树（未 commit）；构建用的 `-O0`/cap cutoff/
   timer stack 补丁只在手工固件中，原始构建配置已恢复。
 
+### 7.1 1 ms 间隔说明
+
+固件 API 允许 `halt=false` 的 periodic 采样最小 1000 µs（实测后端可达 ~1000 Hz），
+但 Web 每 30 ms 轮询 HTTP 的吞吐/主线程在 1 kHz 下会落后：
+3 路 1 ms 采样实测页面 ~288 Hz、overwritten 快速累积；5 ms（200 Hz）稳定且
+overwritten=0。因此 Web UI 仍只暴露 5/10/20/50 ms 本地间隔，1 ms 仅供 API/后续
+流式传输优化使用。
+

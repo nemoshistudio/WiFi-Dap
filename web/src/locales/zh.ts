@@ -516,6 +516,7 @@ export default {
         localBreakpointHint: '断点触发在目标执行到该地址时采样；可填函数入口或初始化之后的指令地址（可从 ELF 符号/反汇编获得）。函数入口处的局部变量可能尚未初始化；FPB 硬件断点与其它调试器互斥。',
         localBreakpointRequired: '断点模式需要填写 Flash 地址',
         localBreakpointInvalid: '断点地址无效（Flash 0x08000000–0x08FFFFFF，半字对齐）',
+        localHaltIntervalTooFast: '需要 halt 的栈帧/寄存器变量最小间隔为 5 ms；请用 5/10/20/50 ms，固定地址/指针表达式才可用 1–2 ms。',
         localHits: '命中',
         localSampled: '已采样',
         localFunction: '函数',

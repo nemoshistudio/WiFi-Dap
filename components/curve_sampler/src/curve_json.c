@@ -285,6 +285,15 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         cfg->halt = cJSON_IsTrue(item) ? true : false;
     }
 
+    /* Periodic + halt: a debug tick costs ~1-3 ms; below 5 ms the target would
+     * be halted nearly continuously. Only the no-halt fast path accepts 1 ms. */
+    if (cfg->trigger == (uint8_t)CURVE_TRIGGER_PERIODIC && cfg->halt &&
+        cfg->interval_us < 5000U) {
+        result = curve_parse_fail(err, err_len,
+                                  "interval_us must be >=5000 when halt=true");
+        goto out;
+    }
+
     series = cJSON_GetObjectItemCaseSensitive(root, "series");
     if (!cJSON_IsArray(series)) {
         result = curve_parse_fail(err, err_len, "series must be an array");

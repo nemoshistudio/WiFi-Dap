@@ -512,6 +512,7 @@ export default {
         localBreakpointHint: 'Breakpoint trigger samples when the target reaches this address. Use a function entry or an instruction after initialization (from ELF symbols/disassembly). Locals may be uninitialized at entry; FPB breakpoints are exclusive with other debuggers.',
         localBreakpointRequired: 'Breakpoint address is required',
         localBreakpointInvalid: 'Invalid breakpoint address (Flash 0x08000000–0x08FFFFFF, halfword aligned)',
+        localHaltIntervalTooFast: 'Halt-based frame sampling needs at least 5 ms; use 5/10/20/50 ms or switch to fixed/pointer expressions for 1–2 ms.',
         localHits: 'Hits',
         localSampled: 'Sampled',
         localFunction: 'Function',

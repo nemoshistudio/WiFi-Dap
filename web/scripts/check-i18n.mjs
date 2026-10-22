@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 439
+const EXPECTED_TOTAL = 440
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 291
+const EXPECTED_ADDED = 292
 
 const errors = []
 const warnings = []
@@ -159,7 +159,7 @@ const ADDED_KEYS = [
         'samplingSource', 'samplingSourceWeb', 'samplingSourceLocal', 'localInterval', 'localModeHint',
         'localRegisterUnsupported', 'localRegisterShort', 'localStartFailed', 'localStopFailed', 'localPollFailed',
         'localFrames', 'localInvalid', 'localOverwritten', 'localStatus', 'localRunning', 'localStopped',
-        'localSeriesRemoved', 'localSeriesLocked', 'localSeriesLimit',
+        'localSeriesRemoved', 'localSeriesLocked', 'localSeriesLimit', 'localHaltIntervalTooFast',
         // 设备本地 Phase 2：断点触发
         'localTrigger', 'localTriggerPeriodic', 'localTriggerBreakpoint', 'localMinInterval',
         'localBreakpoint', 'localBreakpointHint', 'localBreakpointRequired', 'localBreakpointInvalid',

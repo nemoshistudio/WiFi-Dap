@@ -1324,6 +1324,10 @@ async function startLocalSampling(): Promise<void> {
     }
     breakpointAddress = resolution.address
   }
+  if (needsHalt && localIntervalMs.value < 5) {
+    notice.value = {type: 'error', title: translate('curve.localHaltIntervalTooFast')}
+    return
+  }
   try {
     await startLocalCurve({
       intervalUs: localIntervalMs.value * 1000,

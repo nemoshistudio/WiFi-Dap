@@ -23,7 +23,7 @@ export const CURVE_LOCAL_MIN_SERIES = 1
 export const CURVE_LOCAL_MAX_SERIES = 16
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
-export const CURVE_LOCAL_MIN_INTERVAL_US = 5000
+export const CURVE_LOCAL_MIN_INTERVAL_US = 1000
 export const CURVE_LOCAL_MAX_INTERVAL_US = 200000
 /** breakpoint 触发时 interval_us 是节流下限，契约允许 5 ms..1 s。 */
 export const CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT = 1000000
@@ -187,8 +187,9 @@ export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
     const {intervalUs, series} = options
     const trigger = options.trigger ?? 'periodic'
     const maxInterval = trigger === 'breakpoint' ? CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT : CURVE_LOCAL_MAX_INTERVAL_US
-    if (!Number.isInteger(intervalUs) || intervalUs < CURVE_LOCAL_MIN_INTERVAL_US || intervalUs > maxInterval) {
-        throw new CurveLocalError(`interval_us must be ${CURVE_LOCAL_MIN_INTERVAL_US}..${maxInterval} for trigger=${trigger}`)
+    const minInterval = trigger === 'breakpoint' ? 5000 : CURVE_LOCAL_MIN_INTERVAL_US
+    if (!Number.isInteger(intervalUs) || intervalUs < minInterval || intervalUs > maxInterval) {
+        throw new CurveLocalError(`interval_us must be ${minInterval}..${maxInterval} for trigger=${trigger}`)
     }
     if (trigger === 'breakpoint') {
         if (typeof options.breakpointAddress !== 'number' || !Number.isInteger(options.breakpointAddress)) {
