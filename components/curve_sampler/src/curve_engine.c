@@ -314,7 +314,7 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
         s_engine.ring_capacity = 0U;
         block = NULL;
         attempt_capacity = capacity;
-        while (attempt_capacity >= 32U) {
+        while (attempt_capacity >= 8U) {
             seq_bytes = sizeof(uint32_t) * (size_t)attempt_capacity;
             ts_bytes = sizeof(uint64_t) * (size_t)attempt_capacity;
             group_bytes = sizeof(uint8_t) * (size_t)attempt_capacity;
@@ -1454,6 +1454,25 @@ esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_le
         rc = ESP_FAIL;
     }
     return rc;
+}
+
+void curve_engine_release_ring(void)
+{
+    if (curve_engine_init() != ESP_OK) {
+        return;
+    }
+    engine_lock();
+    free(s_engine.ring_block);
+    s_engine.ring_block = NULL;
+    s_engine.ring_seq = NULL;
+    s_engine.ring_ts = NULL;
+    s_engine.ring_payload = NULL;
+    s_engine.ring_group = NULL;
+    s_engine.ring_len = NULL;
+    s_engine.ring_frame_bytes = 0U;
+    s_engine.ring_capacity = 0U;
+    memset(&s_engine.ring, 0, sizeof(s_engine.ring));
+    engine_unlock();
 }
 
 esp_err_t curve_engine_stop(uint32_t timeout_ms, char *err, size_t err_len)

@@ -31,6 +31,8 @@
 #include <esp_err.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "web_host_guard.h"
 #include "web_uri_module.h"
@@ -258,6 +260,10 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
                                 "{\"ok\":false,\"err\":\"busy\"}");
     }
 
+    /* Free the previous session's ring before parsing: a large ring can eat
+     * the heap headroom cJSON needs, especially while the browser keeps its
+     * global WebSocket alive. */
+    curve_engine_release_ring();
     err = curve_config_parse(s_body, body_len, &s_http_cfg, err_msg, sizeof(err_msg));
     if (err != ESP_OK) {
         return curve_send_error(req, curve_http_status(err),
@@ -355,7 +361,7 @@ static esp_err_t curve_handle_frames(httpd_req_t *req)
 /* URI dispatch                                                              */
 /* ------------------------------------------------------------------------- */
 
-static esp_err_t curve_post_handler(httpd_req_t *req)
+static esp_err_t curve_post_handler_impl(httpd_req_t *req)
 {
     const char *uri = req->uri;
 
@@ -391,7 +397,7 @@ static esp_err_t curve_post_handler(httpd_req_t *req)
                             "{\"ok\":false,\"err\":\"unknown /api/curve action\"}");
 }
 
-static esp_err_t curve_get_handler(httpd_req_t *req)
+static esp_err_t curve_get_handler_impl(httpd_req_t *req)
 {
     const char *uri = req->uri;
 
@@ -410,6 +416,47 @@ static esp_err_t curve_get_handler(httpd_req_t *req)
     }
     return curve_send_error(req, "404 Not Found",
                             "{\"ok\":false,\"err\":\"unknown /api/curve action\"}");
+}
+
+/* Shared static s_body / s_http_cfg: serialize handlers.  Even though the
+ * current web_server uses one httpd task, requests can arrive through more
+ * than one server instance in future and the ESP HTTP stack may dispatch
+ * handlers concurrently; an overwritten body buffer would otherwise surface as
+ * a spurious "invalid JSON object" while a browser polls status/frames. */
+static SemaphoreHandle_t s_curve_http_lock;
+
+static SemaphoreHandle_t curve_http_lock(void)
+{
+    if (s_curve_http_lock == NULL) {
+        s_curve_http_lock = xSemaphoreCreateMutex();
+    }
+    return s_curve_http_lock;
+}
+
+static esp_err_t curve_post_handler(httpd_req_t *req)
+{
+    SemaphoreHandle_t lock = curve_http_lock();
+    if (lock != NULL) {
+        (void)xSemaphoreTake(lock, portMAX_DELAY);
+    }
+    esp_err_t err = curve_post_handler_impl(req);
+    if (lock != NULL) {
+        (void)xSemaphoreGive(lock);
+    }
+    return err;
+}
+
+static esp_err_t curve_get_handler(httpd_req_t *req)
+{
+    SemaphoreHandle_t lock = curve_http_lock();
+    if (lock != NULL) {
+        (void)xSemaphoreTake(lock, portMAX_DELAY);
+    }
+    esp_err_t err = curve_get_handler_impl(req);
+    if (lock != NULL) {
+        (void)xSemaphoreGive(lock);
+    }
+    return err;
 }
 
 /* ------------------------------------------------------------------------- */

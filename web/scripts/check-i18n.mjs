@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 450
+const EXPECTED_TOTAL = 526
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 302
+const EXPECTED_ADDED = 378
 
 const errors = []
 const warnings = []
@@ -173,6 +173,25 @@ const ADDED_KEYS = [
         'loclistMultiShort', 'loclistMultiHint',
         // v2 多组轮转
         'localGroups', 'localCurrentGroup', 'localGroupRate', 'localGroupLimit',
+        // 性能 / 选择 UX / B-A 渲染
+        'emptyElfState', 'selectAllVisible', 'selectAllSampleable', 'clearSelection', 'selectionLimitReached',
+        'showMoreVariables', 'localSelectHint', 'selectedExpand', 'selectedCollapse',
+        'rendering', 'renderModeA', 'drawCap', 'hiddenByCap', 'renderAllHint', 'legendShowMore', 'legendCollapse',
+        // SourceBrowser 源码视图（task-26）：视图切换 + labels 全字段 + 选择提示
+        'sourceViewVariables', 'sourceViewSource', 'sourceSelectUnsamplable', 'sourceAlreadySelected',
+        'sourceOpenProject', 'sourceChangeFolder', 'sourceChooseElf', 'sourceSecureContextHint', 'sourcePrivacyNote',
+        'sourceProjectRoot', 'sourceFilesCount', 'sourceMatchedSummary', 'sourceUnmatchedSummary', 'sourceAmbiguousSummary',
+        'sourceScanProgress', 'sourceLimitsHint', 'sourceLimitsHintDefault',
+        'sourceElfDetected', 'sourceElfTime', 'sourceUseElf', 'sourceElfNone', 'sourceElfReadFailed', 'sourceElfMissing',
+        'sourceProjectError', 'sourceNoProjectTitle', 'sourceNoProjectBody', 'sourceNoSourceFiles', 'sourceNoSourceFilesHint',
+        'sourceSearchPlaceholder', 'sourceNoSearchResults', 'sourceSearchResultsCount',
+        'sourceUnmatchedTitle', 'sourceUnmatchedHint', 'sourceShowMore', 'sourceShowLess',
+        'sourceFileVariables', 'sourceSelectFileTitle', 'sourceSelectFileHint', 'sourceReadingFile', 'sourceNoMatchInFile',
+        'sourceReadFailed', 'sourceRetryRead', 'sourceJumpToVariable', 'sourcePrevVariable', 'sourceNextVariable',
+        'sourceCandidateTitle', 'sourceCandidateLine', 'sourceCandidateFile', 'sourceCandidateProject',
+        'sourceSampleable', 'sourceUnsampleable', 'sourceTypeLabel', 'sourceFileLine', 'sourceHoverMore',
+        'sourceNoVariables', 'sourceNoVariablesHint', 'sourceLoading', 'sourceOpenProjectFallback',
+        'sourceLineLabel', 'sourceClose',
     ]),
     ...keys('page', ['debugCurve']),
 ]
@@ -181,7 +200,11 @@ const EXPECTED_KEYS = [...BASELINE_KEYS, ...ADDED_KEYS]
 const EXPECTED_SET = new Set(EXPECTED_KEYS)
 const BASELINE_SET = new Set(BASELINE_KEYS)
 const ADDED_SET_RE = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/
-const ALLOWED_PLACEHOLDERS = new Set(['err', 'max', 'size', 'code', 'web', 'fw', 'count', 'ssid', 'fixed'])
+// SourceBrowser labels 引入的占位符（name/matched/total/maxFiles/maxBytes/time/type/file/line/shown）。
+const ALLOWED_PLACEHOLDERS = new Set([
+    'err', 'max', 'size', 'code', 'web', 'fw', 'count', 'ssid', 'fixed',
+    'name', 'matched', 'total', 'maxFiles', 'maxBytes', 'time', 'type', 'file', 'line', 'shown',
+])
 
 function selfCheckContract() {
     const problems = []

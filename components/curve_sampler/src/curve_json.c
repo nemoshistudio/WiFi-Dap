@@ -81,6 +81,97 @@ static bool json_i32(const cJSON *item, int32_t min_v, int32_t max_v, int32_t *o
     return true;
 }
 
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool read_hex_u32(const char **cursor, uint32_t *out, uint32_t digits)
+{
+    uint32_t value = 0U;
+    const char *p = *cursor;
+    for (uint32_t i = 0U; i < digits; i++) {
+        int n = hex_nibble(p[i]);
+        if (n < 0) return false;
+        value = (value << 4U) | (uint32_t)n;
+    }
+    *cursor = p + digits;
+    *out = value;
+    return true;
+}
+
+/** Compact prefix expression (v3): A<addr8> R<reg2><off8> C<off8>
+ *  +<off8><inner> D<off8><inner>.  Fixed-width hex keeps the HTTP body small
+ *  and, more importantly, keeps cJSON's allocation count low on ESP32. */
+static esp_err_t parse_expr_compact(const char **cursor, curve_config_t *cfg,
+                                    uint16_t *out_index, uint32_t depth,
+                                    char *err, size_t err_len)
+{
+    curve_expr_t *node;
+    const char *p = *cursor;
+    uint16_t index;
+    uint32_t value;
+    uint32_t reg;
+    int32_t offset;
+
+    if (depth > CURVE_MAX_EXPR_DEPTH) {
+        return curve_parse_fail(err, err_len, "expr depth > %u",
+                                (unsigned)CURVE_MAX_EXPR_DEPTH);
+    }
+    if (p == NULL || *p == '\0') {
+        return curve_parse_fail(err, err_len, "empty compact expr");
+    }
+    if (cfg->pool_used >= CURVE_EXPR_POOL_SIZE) {
+        return curve_parse_fail(err, err_len, "too many expr nodes");
+    }
+    index = cfg->pool_used;
+    node = &cfg->pool[cfg->pool_used++];
+    memset(node, 0, sizeof(*node));
+    node->inner = CURVE_EXPR_NONE;
+
+    switch (*p++) {
+    case 'A':
+        node->kind = CURVE_EXPR_ADDR;
+        if (!read_hex_u32(&p, &value, 8U)) goto bad;
+        node->address = value;
+        break;
+    case 'R':
+        node->kind = CURVE_EXPR_REG;
+        if (!read_hex_u32(&p, &reg, 2U) || reg >= CURVE_MAX_CORE_REGS) goto bad;
+        if (!read_hex_u32(&p, &value, 8U)) goto bad;
+        node->reg = (uint8_t)reg;
+        node->offset = (int32_t)value;
+        break;
+    case 'C':
+        node->kind = CURVE_EXPR_CFA;
+        if (!read_hex_u32(&p, &value, 8U)) goto bad;
+        node->offset = (int32_t)value;
+        break;
+    case '+':
+    case 'D':
+        node->kind = (* (p - 1) == '+') ? CURVE_EXPR_ADD : CURVE_EXPR_DEREF;
+        if (!read_hex_u32(&p, &value, 8U)) goto bad;
+        node->offset = (int32_t)value;
+        {
+            esp_err_t e = parse_expr_compact(&p, cfg, &node->inner, depth + 1U, err, err_len);
+            if (e != ESP_OK) return e;
+        }
+        break;
+    default:
+        goto bad;
+    }
+    *cursor = p;
+    *out_index = index;
+    return ESP_OK;
+
+bad:
+    cfg->pool_used = index;
+    return curve_parse_fail(err, err_len, "bad compact expr");
+}
+
 static esp_err_t parse_expr(const cJSON *item, curve_config_t *cfg,
                             uint16_t *out_index, uint32_t depth,
                             char *err, size_t err_len)
@@ -312,15 +403,30 @@ static esp_err_t parse_variants(const cJSON *series_item, curve_config_t *cfg,
                                     (unsigned)dst->variant_count);
         }
         expr_item = cJSON_GetObjectItemCaseSensitive(variant, "expr");
-        if (expr_item == NULL || !cJSON_IsObject(expr_item)) {
-            return curve_parse_fail(err, err_len,
-                                    "series[%u].variants[%u].expr missing",
-                                    (unsigned)series_index,
-                                    (unsigned)dst->variant_count);
-        }
-        e = parse_expr(expr_item, cfg, &expr_index, 1U, err, err_len);
-        if (e != ESP_OK) {
-            return e;
+        if (expr_item != NULL && cJSON_IsObject(expr_item)) {
+            e = parse_expr(expr_item, cfg, &expr_index, 1U, err, err_len);
+            if (e != ESP_OK) {
+                return e;
+            }
+        } else {
+            const cJSON *compact = cJSON_GetObjectItemCaseSensitive(variant, "expr_s");
+            if (!cJSON_IsString(compact) || compact->valuestring == NULL) {
+                return curve_parse_fail(err, err_len,
+                                        "series[%u].variants[%u].expr missing",
+                                        (unsigned)series_index,
+                                        (unsigned)dst->variant_count);
+            }
+            const char *cursor = compact->valuestring;
+            e = parse_expr_compact(&cursor, cfg, &expr_index, 1U, err, err_len);
+            if (e != ESP_OK) {
+                return e;
+            }
+            if (*cursor != '\0') {
+                return curve_parse_fail(err, err_len,
+                                        "series[%u].variants[%u].expr_s trailing bytes",
+                                        (unsigned)series_index,
+                                        (unsigned)dst->variant_count);
+            }
         }
         memset(slot, 0, sizeof(*slot));
         slot->pc_low = low_norm;
@@ -374,6 +480,20 @@ static esp_err_t parse_series(const cJSON *item, curve_config_t *cfg,
             return e;
         }
         dst->expr = expr_index;
+    } else {
+        const cJSON *compact = cJSON_GetObjectItemCaseSensitive(item, "expr_s");
+        if (cJSON_IsString(compact) && compact->valuestring != NULL) {
+            const char *cursor = compact->valuestring;
+            e = parse_expr_compact(&cursor, cfg, &expr_index, 1U, err, err_len);
+            if (e != ESP_OK) {
+                return e;
+            }
+            if (*cursor != '\0') {
+                return curve_parse_fail(err, err_len, "series[%u].expr_s trailing bytes",
+                                        (unsigned)global_index);
+            }
+            dst->expr = expr_index;
+        }
     }
     e = parse_variants(item, cfg, global_index, dst, err, err_len);
     if (e != ESP_OK) {

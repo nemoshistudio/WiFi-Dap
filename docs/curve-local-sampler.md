@@ -337,3 +337,16 @@ frames[count]:
 - 多组（如 2 组）总 series >32（例如 40/64）可启动；页面按 group 映射；每组刷新率约 interval×组数。
 - 多段 loclist 变量在覆盖当前 PC 的变体下采样值与调试器一致；无覆盖时 out_of_scope，不画假数据。
 - 旧单组客户端行为不变；reference firmware 不改。
+
+### 9.6 v3 compact expression / 内存
+
+- Start 请求的 series/variants 可发 `expr_s`（紧凑前缀字符串）代替嵌套 `expr`：
+  `A<addr8> R<reg2><off8> C<off8> +<off8><inner> D<off8><inner>`（固定宽度 hex）。
+  Web 对每个表达式统一发送 `expr_s`；固件 v3 同时兼容旧 `expr`。
+- 目的：40 路深指针请求从 ~7 KiB/数百个 cJSON 节点降到 ~2.9 KiB/几十个节点，
+  避免 ESP32 堆碎片导致 start 解析失败；256 路也可控。
+- 帧 ring 预算降为 **8 KiB**（`CURVE_RING_BYTES_BUDGET`，cap 128..512），
+  大 payload 时容量自动降；start 前会释放上一次 ring 再解析请求，进一步降低堆压力。
+- 真机：40+1 路/2 组 20 ms 启动成功，总 50 Hz、Groups 2、Group rate 25 Hz；
+  单组固定变量仍 50 Hz Halt OFF。
+

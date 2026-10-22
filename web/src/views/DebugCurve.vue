@@ -35,6 +35,9 @@
         show-icon
     />
 
+    <!-- SourceBrowser/左侧 tab 扩展位：源码 tab 由独立任务接入，本任务保留布局挂点。 -->
+    <div class="curve-workbench">
+      <div class="curve-workbench-main">
     <!-- 连接 / 采样控制 -->
     <section class="curve-card">
       <div class="flex flex-wrap items-center gap-2">
@@ -208,7 +211,7 @@
           ? (localTrigger === 'breakpoint' ? translate('curve.localBreakpointHint') : translate('curve.localModeHint'))
           : (isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint')) }}
       </div>
-      <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs" style="color: #dc2626">
+      <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs curve-field-error">
         {{ localBreakpointError }}
       </div>
       <div v-if="isLocalSource && localOutOfScopeCount > 0" class="mt-1 text-xs opacity-70">
@@ -223,10 +226,12 @@
     <section class="curve-card">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <h2 class="text-lg font-bold">{{ translate('curve.elfUpload') }}</h2>
+        <el-segmented v-model="elfView" :options="elfViewOptions" size="small" class="elf-view-switch"/>
         <el-button :loading="elfParsing" :disabled="isLocalSource && sampling" @click="openElfDialog">{{ translate('curve.elfUpload') }}</el-button>
         <input ref="elfInputRef" type="file" accept=".elf,.out" class="hidden" @change="onElfSelected"/>
       </div>
       <p class="mt-1 text-xs opacity-70">{{ translate('curve.elfHint') }}</p>
+      <p v-if="!elfInfo" class="mt-1 text-xs opacity-70">{{ translate('curve.emptyElfState') }}</p>
 
       <div v-if="elfInfo" class="mt-2">
         <p v-if="elfInfo.source === 'dwarf'" class="text-sm">
@@ -260,14 +265,17 @@
       <el-alert v-if="elfError" class="mt-2" type="error" :title="elfError" :closable="false" show-icon/>
       <el-alert v-if="addressError" class="mt-2" type="warning" :title="addressError" :closable="false" show-icon/>
 
+      <!-- Variables：原有变量树/搜索/批量选择/手动地址（保持全部现有逻辑） -->
+      <div v-show="elfView === 'variables'">
       <template v-if="elfInfo && elfInfo.variables.length > 0">
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <el-input
-              v-model="variableSearch"
+              v-model="variableSearchInput"
               size="small"
               clearable
               class="variable-search"
               :placeholder="translate('curve.searchPlaceholder')"
+              @input="onVariableSearchInput"
           />
           <el-checkbox v-model="onlySampleable" size="small">{{ translate('curve.onlySampleable') }}</el-checkbox>
           <label class="flex items-center gap-1 text-xs">
@@ -279,6 +287,11 @@
           <el-button size="small" @click="expandAll">{{ translate('curve.expandAll') }}</el-button>
           <el-button size="small" @click="collapseAll">{{ translate('curve.collapseAll') }}</el-button>
           <span class="ml-auto text-xs opacity-70">{{ translate('curve.variables') }}: {{ visibleVariableCount }}</span>
+          <span class="w-full"></span>
+          <el-button size="small" :disabled="bulkSelectDisabled" @click="selectAllVisible">{{ translate('curve.selectAllVisible') }}</el-button>
+          <el-button size="small" :disabled="bulkSelectDisabled" @click="selectAllSampleable">{{ translate('curve.selectAllSampleable') }}</el-button>
+          <el-button size="small" :disabled="(isLocalSource && sampling) || seriesList.length === 0" @click="clearSelection">{{ translate('curve.clearSelection') }}</el-button>
+          <span class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }}/{{ selectionLimitForSource() }}</span>
         </div>
 
         <div class="var-table mt-2" :key="variableListEpoch">
@@ -291,7 +304,7 @@
             <span>{{ translate('curve.colSource') }}</span>
           </div>
           <div class="var-list">
-            <template v-for="row in variableRows" :key="row.key">
+            <template v-for="row in shownVariableRows" :key="row.key">
               <div v-if="row.kind === 'group'" class="var-group-row">
                 <span class="truncate font-semibold" :title="row.groupLabel">{{ row.groupLabel }}</span>
                 <span class="opacity-60">({{ row.groupCount }})</span>
@@ -299,9 +312,10 @@
               <div
                   v-else
                   class="var-row"
-                  :class="{selected: isRowSelected(row), unsampleable: !row.node.sampleable}"
+                  :class="{selected: isRowSelected(row), unsampleable: !row.node.sampleable, selectable: nodeSelectable(row.node)}"
+                  @click="nodeSelectable(row.node) ? toggleRow(row) : undefined"
               >
-                <span class="var-check">
+                <span class="var-check" @click.stop>
                   <el-checkbox
                       v-if="nodeSelectable(row.node)"
                       :model-value="isRowSelected(row)"
@@ -347,6 +361,12 @@
               {{ translate('curve.noSymbols') }}
             </div>
           </div>
+          <div v-if="remainingVariableRows > 0" class="show-more-row">
+            <el-button size="small" @click="showMoreVariables">
+              {{ translate('curve.showMoreVariables', {count: remainingVariableRows}) }}
+            </el-button>
+            <span class="text-xs opacity-70">{{ shownVariableRows.length }} / {{ variableRows.length }}</span>
+          </div>
         </div>
       </template>
 
@@ -361,21 +381,52 @@
         />
         <el-button size="small" @click="addManualAddress">{{ translate('curve.addAddress') }}</el-button>
       </div>
+      <p v-if="isLocalSource && seriesList.length === 0" class="mt-2 text-xs opacity-70">{{ translate('curve.localSelectHint') }}</p>
+      </div>
+
+      <!-- Source：本地项目源码浏览 + 点击变量直接加入曲线（SourceBrowser 独立组件，labels 由页面 i18n 注入） -->
+      <div v-if="sourceViewEverOpened" v-show="elfView === 'source'" class="source-view">
+        <SourceBrowser
+            :project="sourceProject"
+            :variables="elfInfo?.variables ?? []"
+            :selected-keys="sourceSelectedKeys"
+            :labels="sourceBrowserLabels"
+            @project-loaded="onSourceProjectLoaded"
+            @select-variable="onSourceVariableSelected"
+            @elf-file="onSourceElfFile"
+        />
+      </div>
     </section>
 
     <!-- 已选曲线 -->
     <section v-if="seriesList.length > 0" class="curve-card">
-      <div class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }} / {{ seriesLimit }}</div>
-      <div class="selected-list mt-1">
-        <div v-for="item in seriesList" :key="item.id" class="selected-row">
-          <span class="series-dot" :style="{background: item.color}"></span>
+      <div class="flex flex-wrap items-center gap-2 text-xs opacity-70">
+        <span>{{ translate('curve.selected') }}: {{ seriesList.length }} / {{ seriesLimit }}</span>
+        <el-button size="small" link @click="selectedCollapsed = !selectedCollapsed">
+          {{ selectedCollapsed ? translate('curve.selectedExpand') : translate('curve.selectedCollapse') }}
+        </el-button>
+        <el-button size="small" type="danger" link :disabled="isLocalSource && sampling" @click="clearSelection">{{ translate('curve.clearSelection') }}</el-button>
+      </div>
+      <div v-if="!selectedCollapsed" class="selected-list mt-1">
+        <div
+            v-for="item in shownSelectedSeries"
+            :key="item.id"
+            class="selected-row"
+        >
+          <el-checkbox :model-value="item.visible" size="small" @change="toggleVisible(item)"/>
+          <span class="series-dot" :style="{background: seriesDisplayColor(item.color)}"></span>
           <span class="truncate" :title="item.name">{{ item.name }}</span>
           <span class="truncate text-xs opacity-70" :title="item.typeName">{{ item.typeName || translate('curve.unknownType') }}</span>
           <span class="font-mono text-xs opacity-70" :title="item.location ? addressExprText(item.location) : ''">{{ item.location ? addressExprText(item.location) : formatHex32(item.address) }}</span>
-          <el-select v-model="item.format" size="small" style="width: 5.5rem">
+          <el-select v-model="item.format" size="small" style="width: 5.5rem" @change="onSeriesFormatChange(item)">
             <el-option v-for="format in FORMATS" :key="format" :value="format" :label="format"/>
           </el-select>
           <el-button type="danger" link size="small" @click="removeSeries(item.id)">×</el-button>
+        </div>
+        <div v-if="remainingSelected > 0" class="show-more-row">
+          <el-button size="small" @click="selectedShowAll = true">
+            {{ translate('curve.legendShowMore', {count: remainingSelected}) }}
+          </el-button>
         </div>
       </div>
     </section>
@@ -394,8 +445,25 @@
         </div>
       </div>
 
+      <div class="render-bar mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span>{{ translate('curve.rendering') }}: <b>{{ renderingLabel }}</b></span>
+        <label class="flex items-center gap-1">
+          <el-switch v-model="renderAll" size="small"/>
+          <span>{{ translate('curve.renderModeA') }}</span>
+        </label>
+        <label v-if="!renderAll" class="flex items-center gap-1">
+          <span>{{ translate('curve.drawCap') }}</span>
+          <el-select v-model="drawCap" size="small" style="width: 4.5rem">
+            <el-option v-for="cap in DRAW_CAP_OPTIONS" :key="cap" :value="cap" :label="String(cap)"/>
+          </el-select>
+        </label>
+        <span v-if="hiddenByCapCount > 0" class="render-warning">{{ translate('curve.hiddenByCap', {count: hiddenByCapCount}) }}</span>
+        <span v-if="renderAll" class="render-warning">{{ translate('curve.renderAllHint') }}</span>
+      </div>
+
       <div ref="chartWrapRef" class="chart-wrap">
         <canvas ref="canvasRef" @mousemove="onCanvasMove" @mouseleave="onCanvasLeave"></canvas>
+        <canvas ref="hoverCanvasRef" class="chart-overlay"></canvas>
         <div v-if="sampleCount === 0" class="chart-empty">{{ translate('curve.noData') }}</div>
         <div v-if="hover" class="chart-tooltip" :style="hoverStyle">
           <div class="font-mono">{{ hover.time.toFixed(3) }} s</div>
@@ -409,7 +477,7 @@
 
       <div v-if="seriesList.length > 0" class="legend">
         <button
-            v-for="item in seriesList"
+            v-for="item in legendItems"
             :key="item.id"
             type="button"
             class="legend-item"
@@ -417,21 +485,39 @@
             :title="legendLabel(item)"
             @click="toggleVisible(item)"
         >
-          <span class="series-dot" :style="{background: item.color}"></span>
+          <span class="series-dot" :style="{background: seriesDisplayColor(item.color)}"></span>
           <span class="truncate">{{ item.name }}</span>
           <span v-if="item.typeName" class="truncate text-xs opacity-60">[{{ item.typeName }}]</span>
           <span class="font-mono text-xs opacity-60">{{ latestText(item) }}</span>
         </button>
+        <button
+            v-if="legendMoreCount > 0"
+            type="button"
+            class="legend-more"
+            @click="legendExpanded = true"
+        >{{ translate('curve.legendShowMore', {count: legendMoreCount}) }}</button>
+        <button
+            v-if="legendExpanded && seriesList.length > 24"
+            type="button"
+            class="legend-more"
+            @click="legendExpanded = false"
+        >{{ translate('curve.legendCollapse') }}</button>
       </div>
     </section>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import {computed, onBeforeUnmount, onMounted, ref, shallowRef} from 'vue'
+import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import {ElMessageBox} from 'element-plus'
-import {translate} from '@/locales'
+import {translate, translateRaw, type TranslationKeys} from '@/locales'
 import {globalNotify} from '@/composables/notification'
+import SourceBrowser from '@/components/source/SourceBrowser.vue'
+import type {SourceBrowserLabels} from '@/components/source/labels'
+import type {SourceProject} from '@/components/source/projectLoader'
+import type {SourceVariableSelectionPayload} from '@/utils/sourceProject'
 import {CmsisDapClient, DapError, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} from '@/api/wsDap'
 import {kickDapSession} from '@/api/apiDap'
 import {
@@ -488,11 +574,34 @@ const DEFAULT_DEBUG_INTERVAL_MS = 50
 /** 采样来源：Web DAP（WiFi 往返）或设备本地（ESP32 SWD 闭环，Phase 1）。 */
 type SamplingSource = 'web' | 'local'
 const SAMPLING_SOURCES: SamplingSource[] = ['web', 'local']
+/** ELF 卡片视图：Variables（原有变量树/手动地址）/ Source（SourceBrowser 源码浏览）。 */
+type ElfView = 'variables' | 'source'
 /** 设备本地采样间隔（ms）；固件契约 5..200 ms。 */
 const LOCAL_INTERVALS = [5, 10, 20, 50]
-const DEFAULT_LOCAL_INTERVAL_MS = 10
+/** 新用户默认 20 ms（50 Hz）本地采样；保留 10 ms 选项。 */
+const DEFAULT_LOCAL_INTERVAL_MS = 20
+/** B 模式默认绘制上限；可在 32/64/128 间配置（A 模式忽略此上限）。 */
+const DEFAULT_DRAW_CAP = 64
+const DRAW_CAP_OPTIONS = [32, 64, 128]
+/** Canvas 绘制节流：约 30fps；数据仍按采样率进入 ring。 */
+const DRAW_INTERVAL_MS = 30
+/** Y 自动缩放扫描预算：每帧/缓存刷新最多抽样 20k 个值（大数组时降采样）。 */
+const Y_SCAN_BUDGET = 20000
+const Y_RANGE_TTL_MS = 250
+/** 图例默认展示上限，超过后折叠为 +N more。 */
+const LEGEND_LIMIT = 24
+/** 变量树首屏渲染上限（Show more 增量），避免一次性创建数千 DOM 行。 */
+const VARIABLE_PAGE_SIZE = 300
+/** 搜索时首屏更小（100），让过滤结果更快上屏（debounce 150ms + 渲染 <200ms）。 */
+const SEARCH_PAGE_SIZE = 100
+/** 已选面板默认只渲染前 64 行（批量选择 256 时避免挂载数百个 Element 组件），可 Show all。 */
+const SELECTED_RENDER_LIMIT = 64
+/** 采样统计 UI 刷新间隔（数据仍按采样率入 ring）；降低 Vue 全页 rerender 频率。 */
+const STATS_FLUSH_MS = 500
+/** 本地采样计数器（frames/current group 等）UI 刷新间隔。 */
+const LOCAL_UI_FLUSH_MS = 400
 /** 本地帧轮询周期（契约要求 20–50 ms）。 */
-const LOCAL_POLL_MS = 30
+const LOCAL_POLL_MS = 20
 const LOCAL_POLL_MAX_FRAMES = 32
 /** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
 const PIPELINE_DEPTH = 8
@@ -500,8 +609,12 @@ const AUTO_MIN_RATE = 10
 const AUTO_MAX_RATE = 100
 /** Auto 自适应窗口（毫秒）。 */
 const AUTO_RATE_WINDOW_MS = 2500
-/** 环形缓冲总点数（约 10 分钟 @100Hz）。 */
-const MAX_POINTS = 60000
+/**
+ * 环形缓冲总点数：曲线窗口仅 20s；多路本地 v2（≤256 系列）下每系列 lo/hi/values
+ * 三个数组的内存 = points × 16B。6000 点 @100Hz ≈ 60s（本地 50Hz ≈ 120s），
+ * 既覆盖图表窗口/CSV 导出，也把 256 路内存从 ~245MB 降到 ~24MB，减少 GC 卡顿。
+ */
+const MAX_POINTS = 6000
 /** 曲线窗口（秒）：X 轴显示最近 20 秒，自动滚动。 */
 const WINDOW_SECONDS = 20
 const COLORS = [
@@ -510,6 +623,24 @@ const COLORS = [
   '#b91c1c', '#047857', '#a16207', '#1d4ed8', '#c026d3', '#475569',
   '#15803d', '#be123c', '#4338ca', '#0f766e', '#a21caf', '#92400e',
 ]
+
+/**
+ * 深色主题曲线显示色：把浅色调色板与白色混合提亮，保证曲线在近黑 canvas
+ * 上可读。仅用于"显示"（canvas/图例/悬浮点），不改 series.color 状态与导出。
+ */
+const DARK_COLORS = COLORS.map((hex) => mixHexWithWhite(hex, 0.34))
+const DARK_COLOR_BY_BASE = new Map(COLORS.map((color, index) => [color, DARK_COLORS[index]]))
+
+function mixHexWithWhite(hex: string, ratio: number): string {
+  const value = hex.replace('#', '')
+  if (value.length !== 6) return hex
+  const channel = (offset: number) => {
+    const base = Number.parseInt(value.slice(offset, offset + 2), 16)
+    const mixed = Math.round(base + (255 - base) * ratio)
+    return Math.min(255, Math.max(0, mixed)).toString(16).padStart(2, '0')
+  }
+  return `#${channel(0)}${channel(2)}${channel(4)}`
+}
 
 interface CurveSeries {
   id: number
@@ -571,7 +702,7 @@ const samplingMode = ref<'live' | 'debug'>('live')
 const debugIntervalMs = ref(DEFAULT_DEBUG_INTERVAL_MS)
 const isDebugMode = computed(() => samplingMode.value === 'debug')
 /** 采样来源：web=现有 WebSocket-DAP 路径；local=ESP32 本地 halt→读→resume 闭环。 */
-const samplingSource = ref<SamplingSource>('web')
+const samplingSource = ref<SamplingSource>('local')
 const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 /** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
@@ -585,6 +716,24 @@ const localGroupRefreshRate = computed(() => {
   if (groups <= 0 || localIntervalMs.value <= 0) return 0
   return 1000 / (groups * localIntervalMs.value)
 })
+/** 可见曲线（勾选 legend/selected 的 visible）与 B 模式实际绘制列表。 */
+const visibleSeriesList = computed(() => seriesList.value.filter((item) => item.visible))
+const drawnSeriesList = computed(() => (renderAll.value
+  ? visibleSeriesList.value
+  : visibleSeriesList.value.slice(0, drawCap.value)))
+const hiddenByCapCount = computed(() => Math.max(0, visibleSeriesList.value.length - drawnSeriesList.value.length))
+const renderingLabel = computed(() => `${drawnSeriesList.value.length}/${visibleSeriesList.value.length}`)
+/** 图例：默认 24 条，展开后全部。 */
+const legendItems = computed(() => (legendExpanded.value ? seriesList.value : seriesList.value.slice(0, LEGEND_LIMIT)))
+const legendMoreCount = computed(() => Math.max(0, seriesList.value.length - legendItems.value.length))
+const shownSelectedSeries = computed(() => (selectedShowAll.value
+  ? seriesList.value
+  : seriesList.value.slice(0, SELECTED_RENDER_LIMIT)))
+const remainingSelected = computed(() => Math.max(0, seriesList.value.length - shownSelectedSeries.value.length))
+/** 变量树首屏行数（Show more 增量），避免数千行 DOM 一次性渲染。 */
+const shownVariableRows = computed(() => variableRows.value.slice(0, variableDisplayLimit.value))
+const remainingVariableRows = computed(() => Math.max(0, variableRows.value.length - shownVariableRows.value.length))
+
 /** Phase 2 触发方式：periodic（周期）或 breakpoint（FPB 命中触发）。 */
 const localTrigger = ref<CurveLocalTrigger>('periodic')
 /** 断点地址输入（十六进制，可带/不带 0x；Thumb bit0 忽略）。 */
@@ -636,8 +785,18 @@ const localSeriesLimit = CURVE_LOCAL_MAX_TOTAL_SERIES
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<DisplayFormat>('auto')
+/** B/A 渲染模式：B（默认）只绘制前 drawCap 条可见曲线；A 绘制全部可见（降采样）。 */
+const renderAll = ref(false)
+const drawCap = ref(DEFAULT_DRAW_CAP)
+const legendExpanded = ref(false)
+const selectedCollapsed = ref(false)
+const selectedShowAll = ref(false)
 const seriesList = ref<CurveSeries[]>([])
 const variableSearch = ref('')
+/** 搜索框输入值；经 150ms debounce 后才驱动变量树过滤。 */
+const variableSearchInput = ref('')
+/** 变量树首屏/Show more 行数上限（过滤条件变化时重置为 300）。 */
+const variableDisplayLimit = ref(VARIABLE_PAGE_SIZE)
 /** 默认只看可采样变量；关闭后列出寄存器/栈/被优化掉的命名变量（标记不可采样）。 */
 const onlySampleable = ref(true)
 const groupBy = ref<GroupMode>('none')
@@ -650,6 +809,89 @@ const elfParsing = ref(false)
 const elfInfo = shallowRef<ElfVariablesResult | null>(null)
 const elfError = ref('')
 const elfInputRef = ref<HTMLInputElement | null>(null)
+/** ELF 卡片视图：Variables（原有变量树）或 Source（本地项目源码浏览）。 */
+const elfView = ref<ElfView>('variables')
+const elfViewOptions = computed(() => [
+  {label: translate('curve.sourceViewVariables'), value: 'variables'},
+  {label: translate('curve.sourceViewSource'), value: 'source'},
+])
+/** 源码项目：SourceBrowser 首次选目录后由 @project-loaded 回传；切换视图复用，不重复选目录。 */
+const sourceProject = shallowRef<SourceProject | null>(null)
+/**
+ * SourceBrowser labels：组件本身不 import i18n（避免契约冲突），页面把全部字段按当前语言注入。
+ * 注意：必须保持与 `SourceBrowserLabels`（components/source/labels.ts）字段一字不差；
+ * 这里使用显式 key（契约 §2.2 禁止动态拼接/变量 key），由 vue-tsc 的 Record 类型兜底。
+ */
+const sourceBrowserLabels = computed<SourceBrowserLabels>(() => ({
+  openProject: translateRaw('curve.sourceOpenProject'),
+  changeFolder: translateRaw('curve.sourceChangeFolder'),
+  chooseElf: translateRaw('curve.sourceChooseElf'),
+  secureContextHint: translateRaw('curve.sourceSecureContextHint'),
+  privacyNote: translateRaw('curve.sourcePrivacyNote'),
+  projectRoot: translateRaw('curve.sourceProjectRoot'),
+  filesCount: translateRaw('curve.sourceFilesCount'),
+  matchedSummary: translateRaw('curve.sourceMatchedSummary'),
+  unmatchedSummary: translateRaw('curve.sourceUnmatchedSummary'),
+  ambiguousSummary: translateRaw('curve.sourceAmbiguousSummary'),
+  scanProgress: translateRaw('curve.sourceScanProgress'),
+  limitsHint: translateRaw('curve.sourceLimitsHint'),
+  limitsHintDefault: translateRaw('curve.sourceLimitsHintDefault'),
+  elfDetected: translateRaw('curve.sourceElfDetected'),
+  elfTime: translateRaw('curve.sourceElfTime'),
+  useElf: translateRaw('curve.sourceUseElf'),
+  elfNone: translateRaw('curve.sourceElfNone'),
+  elfReadFailed: translateRaw('curve.sourceElfReadFailed'),
+  elfMissing: translateRaw('curve.sourceElfMissing'),
+  projectError: translateRaw('curve.sourceProjectError'),
+  noProjectTitle: translateRaw('curve.sourceNoProjectTitle'),
+  noProjectBody: translateRaw('curve.sourceNoProjectBody'),
+  noSourceFiles: translateRaw('curve.sourceNoSourceFiles'),
+  noSourceFilesHint: translateRaw('curve.sourceNoSourceFilesHint'),
+  searchPlaceholder: translateRaw('curve.sourceSearchPlaceholder'),
+  noSearchResults: translateRaw('curve.sourceNoSearchResults'),
+  searchResultsCount: translateRaw('curve.sourceSearchResultsCount'),
+  unmatchedTitle: translateRaw('curve.sourceUnmatchedTitle'),
+  unmatchedHint: translateRaw('curve.sourceUnmatchedHint'),
+  showMore: translateRaw('curve.sourceShowMore'),
+  showLess: translateRaw('curve.sourceShowLess'),
+  fileVariables: translateRaw('curve.sourceFileVariables'),
+  selectFileTitle: translateRaw('curve.sourceSelectFileTitle'),
+  selectFileHint: translateRaw('curve.sourceSelectFileHint'),
+  readingFile: translateRaw('curve.sourceReadingFile'),
+  noMatchInFile: translateRaw('curve.sourceNoMatchInFile'),
+  readFailed: translateRaw('curve.sourceReadFailed'),
+  retryRead: translateRaw('curve.sourceRetryRead'),
+  jumpToVariable: translateRaw('curve.sourceJumpToVariable'),
+  prevVariable: translateRaw('curve.sourcePrevVariable'),
+  nextVariable: translateRaw('curve.sourceNextVariable'),
+  candidateTitle: translateRaw('curve.sourceCandidateTitle'),
+  candidateLine: translateRaw('curve.sourceCandidateLine'),
+  candidateFile: translateRaw('curve.sourceCandidateFile'),
+  candidateProject: translateRaw('curve.sourceCandidateProject'),
+  sampleable: translateRaw('curve.sourceSampleable'),
+  unsampleable: translateRaw('curve.sourceUnsampleable'),
+  typeLabel: translateRaw('curve.sourceTypeLabel'),
+  fileLine: translateRaw('curve.sourceFileLine'),
+  hoverMore: translateRaw('curve.sourceHoverMore'),
+  noVariables: translateRaw('curve.sourceNoVariables'),
+  noVariablesHint: translateRaw('curve.sourceNoVariablesHint'),
+  loading: translateRaw('curve.sourceLoading'),
+  openProjectFallback: translateRaw('curve.sourceOpenProjectFallback'),
+  lineLabel: translateRaw('curve.sourceLineLabel'),
+  close: translateRaw('curve.sourceClose'),
+}))
+
+
+/** 源码视图中高亮已选变量：key 与 CurveSeries.key 同语义（path@address）。 */
+const sourceSelectedKeys = computed<string[]>(() => seriesList.value.map((item) => item.key))
+/**
+ * Source 视图是否曾打开：首次切换到 Source 时才挂载 SourceBrowser（减少无关 DOM/文件输入，
+ * 也避免影响只做变量选择的既有流程）；挂载后保持（v-show），切换视图不丢浏览状态。
+ */
+const sourceViewEverOpened = ref(false)
+watch(elfView, (view) => {
+  if (view === 'source') sourceViewEverOpened.value = true
+}, {immediate: true})
 const connecting = ref(false)
 const connected = ref(false)
 const sampling = ref(false)
@@ -670,6 +912,15 @@ const autoRateDisplay = computed(() => Math.round(autoRate.value))
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const chartWrapRef = ref<HTMLDivElement | null>(null)
 const hover = ref<{ index: number; x: number; y: number; time: number; entries: Array<{ name: string; color: string; text: string }> } | null>(null)
+
+/**
+ * 深色主题状态（纯视觉）：主题切换只改 <html class/data-theme>，由 MutationObserver
+ * 同步本 ref 并触发 canvas 调色板失效 + 重绘；同时让图例/工具底色点响应式更新。
+ */
+const darkTheme = ref(document.documentElement.classList.contains('dark'))
+/** Canvas 调色板缓存：只在主题切换时失效，避免每帧 getComputedStyle。 */
+let chartPaletteCache: { bg: string; grid: string; text: string; axis: string } | null = null
+let themeObserver: MutationObserver | null = null
 
 let client: CmsisDapClient | null = null
 let transport: WsDapTransport | null = null
@@ -716,11 +967,35 @@ let constantReference: Uint8Array[] | null = null
 let constantSamples = 0
 let resizeObserver: ResizeObserver | null = null
 let drawPending = false
+let lastDrawAt = 0
+let chartDirty = true
+let searchTimer = 0
+let hoverDrawPending = false
+/** 可选 debug 计数：window.__curveDebug()，供 E2E 性能断言。 */
+const perfCounter = {draws: 0, lastDrawMs: 0, drawMsTotal: 0, hiddenPauses: 0}
+/** Y 范围缓存 + dirty flag（避免每帧全量扫描）。 */
+let yRangeCache = {min: 0, max: 1, updatedAt: 0, seriesCount: -1, dirty: true}
+/** 最近一次绘制几何，供 hover overlay 使用（不重建 canvas/不重绘主图）。 */
+let lastGeometry: {
+  padding: {left: number; right: number; top: number; bottom: number}
+  plotWidth: number; plotHeight: number
+  xMin: number; xMax: number
+  minValue: number; maxValue: number
+  width: number; height: number
+} | null = null
+let hoverCanvasRef = ref<HTMLCanvasElement | null>(null)
 /** 采样统计的 UI 刷新节流：采样本身在 100Hz 完成，但 Vue 响应式/DOM 更新不必
  *  每个点都触发（否则主线程频繁重渲染会造成采样节拍抖动和管线积压）。 */
 let statsTimer = 0
 let lastStatsAt = 0
 let droppedPending = 0
+// 本地采样 UI 计数器节流：poll 里先累积，每 200ms 一次性写入 reactive refs，
+// 避免 30~50Hz 的 frames/currentGroup 更新触发整个页面（300 变量行+100 已选行）rerender。
+let localUiTimer = 0
+let localPendingFrames = 0
+let localPendingInvalid = 0
+let localPendingOverwritten = 0
+let localPendingGroup: number | null = null
 
 // 环形缓冲：timestamps/slotSeq 按写入顺序共享；每个曲线存 64-bit 原始值的
 // 低/高 32-bit（支持 DWARF 的 1/2/4/8 字节 + 位域）。
@@ -728,6 +1003,8 @@ const timestamps = new Float64Array(MAX_POINTS)
 const slotSeq = new Float64Array(MAX_POINTS)
 const seriesLo = new Map<number, Uint32Array>()
 const seriesHi = new Map<number, Uint32Array>()
+/** 每系列解码后的数值缓存（Float64Array），绘制/缩放直接读，避免每帧重复 decode。 */
+const seriesValues = new Map<number, Float64Array>()
 let ringHead = 0
 let ringCount = 0
 
@@ -975,11 +1252,26 @@ function maybeAdjustAutoRate(now: number): void {
 function scheduleStatsFlush(): void {
   if (statsTimer) return
   const now = performance.now()
-  const remain = Math.max(0, 120 - (now - lastStatsAt))
+  const remain = Math.max(0, STATS_FLUSH_MS - (now - lastStatsAt))
   statsTimer = window.setTimeout(() => {
     statsTimer = 0
     flushStats()
   }, remain)
+}
+
+function scheduleLocalUiFlush(): void {
+  if (localUiTimer) return
+  localUiTimer = window.setTimeout(() => {
+    localUiTimer = 0
+    if (localPendingFrames > 0) localFramesReceived.value += localPendingFrames
+    if (localPendingInvalid > 0) localInvalidCount.value += localPendingInvalid
+    if (localPendingOverwritten > 0) localOverwrittenCount.value += localPendingOverwritten
+    if (localPendingGroup !== null) localCurrentGroup.value = localPendingGroup
+    localPendingFrames = 0
+    localPendingInvalid = 0
+    localPendingOverwritten = 0
+    localPendingGroup = null
+  }, LOCAL_UI_FLUSH_MS)
 }
 
 function flushStats(): void {
@@ -1431,15 +1723,30 @@ async function startLocalSampling(): Promise<void> {
     halt: trigger === 'periodic' ? (hasVariants ? true : needsHalt) : undefined,
   }
   let started
-  try {
+  const startOnce = () => (groupSpecs.length === 1 && !hasVariants
     // 单组且无 variants：旧 root-series 请求（兼容旧固件）；多组/variants：v2 groups 请求。
-    started = groupSpecs.length === 1 && !hasVariants
-      ? await startLocalCurve({...requestBase, series: groupSpecs[0].series})
-      : await startLocalCurve({...requestBase, groups: groupSpecs})
+    ? startLocalCurve({...requestBase, series: groupSpecs[0].series})
+    : startLocalCurve({...requestBase, groups: groupSpecs}))
+  try {
+    started = await startOnce()
   } catch (error) {
-    statusError.value = true
-    notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
-    return
+    // ESP32 在刚 OTA/WebSocket 缓冲紧张时偶发 cJSON 解析失败（invalid JSON object）；
+    // 短暂让出后重试一次，避免用户看到无意义的 400。
+    const transient = /invalid JSON object|HTTP 5\d\d/i.test(localErrorText(error))
+    if (transient) {
+      await new Promise((resolve) => window.setTimeout(resolve, 350))
+      try {
+        started = await startOnce()
+      } catch (retryError) {
+        statusError.value = true
+        notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(retryError)})}
+        return
+      }
+    } else {
+      statusError.value = true
+      notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
+      return
+    }
   }
   // 设备时间戳与既有 ring 时间轴不同源：清空旧数据，按帧时间戳重新累积。
   clearData()
@@ -1457,6 +1764,11 @@ async function startLocalSampling(): Promise<void> {
   localFramesReceived.value = 0
   localInvalidCount.value = 0
   localOverwrittenCount.value = 0
+  localPendingFrames = 0
+  localPendingInvalid = 0
+  localPendingOverwritten = 0
+  localPendingGroup = null
+  if (localUiTimer) { window.clearTimeout(localUiTimer); localUiTimer = 0 }
   localHits.value = null
   localSampled.value = null
   localOutOfScopeCount.value = 0
@@ -1479,6 +1791,7 @@ function scheduleLocalPoll(runId: number, delay = LOCAL_POLL_MS): void {
 /** 轮询 /api/curve/frames（20–50ms），把 ESP32 微秒时间戳写入现有 ring。 */
 async function localPollTick(runId: number): Promise<void> {
   localTimer = 0
+  const pollStartedAt = performance.now()
   if (!sampling.value || runId !== localRunId || !localActive.value) return
   if (localPollInFlight) {
     scheduleLocalPoll(runId)
@@ -1498,13 +1811,13 @@ async function localPollTick(runId: number): Promise<void> {
         const groupIndex = page.version >= 2 ? frame.group : 0
         const groupEntries = localGroupEntries[groupIndex]
         if (!groupEntries) {
-          localInvalidCount.value += 1
+          localPendingInvalid += 1
           localSince = frame.seq
           continue
         }
         const parts = splitPayloadBytes(frame.payload, groupEntries.map((entry) => entry.size))
         if (!parts) {
-          localInvalidCount.value += 1
+          localPendingInvalid += 1
           localSince = frame.seq
           continue
         }
@@ -1520,18 +1833,18 @@ async function localPollTick(runId: number): Promise<void> {
         pushSample(seconds, rawValues, localSeriesOrder)
         localRateTimestamps.push(seconds)
         trimLocalRateWindow(seconds)
-        localCurrentGroup.value = groupIndex
+        localPendingGroup = groupIndex
         localSince = frame.seq
         applied += 1
       }
       if (applied > 0) {
-        localFramesReceived.value += applied
-        effectiveRate.value = localRateTimestamps.length
+        localPendingFrames += applied
+        scheduleLocalUiFlush()
         scheduleDraw()
       }
     }
     localPollCounter += 1
-    if (localPollCounter % 10 === 0 || localStatusInfo.value === null) {
+    if (localPollCounter % 25 === 0 || localStatusInfo.value === null) {
       await refreshLocalStatus()
     }
     localLastPollAt = performance.now()
@@ -1544,7 +1857,11 @@ async function localPollTick(runId: number): Promise<void> {
   } finally {
     localPollInFlight = false
   }
-  if (sampling.value && runId === localRunId) scheduleLocalPoll(runId)
+  if (sampling.value && runId === localRunId) {
+    // 扣掉本次请求耗时，保持 ~20ms 轮询节拍（契约 20–50ms），提升 50Hz 帧的绘制率。
+    const elapsed = performance.now() - pollStartedAt
+    scheduleLocalPoll(runId, Math.max(0, LOCAL_POLL_MS - elapsed))
+  }
 }
 
 /** 切换采样来源：本地方案不建立 WS-DAP；从 Web 切到本地时先断开 DAP。 */
@@ -1787,6 +2104,9 @@ function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly Cu
     const bits = extractSampleBits(rawValues[i] ?? new Uint8Array(item.sample.size), item.sample)
     loBuffer[slot] = bits.lo
     hiBuffer[slot] = bits.hi
+    // 数据写入时解码一次缓存到 Float64Array；绘制/缩放不再每帧 decode。
+    const values = seriesValues.get(item.id)
+    if (values) values[slot] = decodeNumber(item, bits.lo, bits.hi)
   }
   ringHead = (ringHead + 1) % MAX_POINTS
   if (ringCount < MAX_POINTS) ringCount += 1
@@ -1808,6 +2128,7 @@ function clearData(): void {
   statusError.value = false
   recentCompletions = []
   hover.value = null
+  invalidateYRange()
   resetConstantTracking()
   for (const item of seriesList.value) item.startSeq = 0
   scheduleDraw()
@@ -1877,10 +2198,13 @@ function pathOf(depth: number, parentPath: string, node: VariableNode): string {
   return depth === 0 ? node.name : parentPath + node.name
 }
 
-function nodeMatches(node: VariableNode, path: string, query: string): boolean {
-  const needle = query.toLowerCase()
+/** 每个变量节点的一次性小写搜索索引（避免每次搜索对 10 个字段重复 toLowerCase）。 */
+const nodeSearchIndex = new WeakMap<VariableNode, string>()
+
+function nodeSearchText(node: VariableNode): string {
+  let text = nodeSearchIndex.get(node)
+  if (text !== undefined) return text
   const fields = [
-    path,
     node.name,
     node.shortName,
     node.qualifiedName,
@@ -1892,7 +2216,22 @@ function nodeMatches(node: VariableNode, path: string, query: string): boolean {
     node.sample?.register !== undefined ? `r${node.sample.register}` : '',
     node.location ? addressExprText(node.location) : '',
   ]
-  return fields.some((value) => !!value && String(value).toLowerCase().includes(needle))
+  text = fields.filter((value) => !!value).join('\n').toLowerCase()
+  nodeSearchIndex.set(node, text)
+  return text
+}
+
+function prewarmSearchNode(node: VariableNode): void {
+  nodeSearchText(node)
+  if (node.children) for (const child of node.children) prewarmSearchNode(child)
+}
+
+/** ELF 解析完成后空闲预热搜索索引，避免第一次输入时对 2 万+节点现建缓存。 */
+function prewarmSearchIndex(info: ElfVariablesResult): void {
+  window.setTimeout(() => {
+    if (elfInfo.value !== info) return
+    for (const node of info.variables) prewarmSearchNode(node)
+  }, 0)
 }
 
 function groupLabel(mode: GroupMode): string {
@@ -1918,10 +2257,10 @@ function groupKeyOf(node: VariableNode, mode: GroupMode): string {
   return ''
 }
 
-function nodeMatchesDeep(node: VariableNode, path: string, query: string): boolean {
-  if (nodeMatches(node, path, query)) return true
+function nodeMatchesDeep(node: VariableNode, needle: string): boolean {
+  if (nodeSearchText(node).includes(needle)) return true
   if (!node.children) return false
-  return node.children.some((child) => nodeMatchesDeep(child, path + child.name, query))
+  return node.children.some((child) => nodeMatchesDeep(child, needle))
 }
 
 /** 当前采样模式下该节点是否可选（实时：固定地址/无寄存器指针；调试：含帧/寄存器位置）。 */
@@ -1971,17 +2310,19 @@ function isLocalRegisterValue(node: VariableNode): boolean {
 const variableRows = computed<VariableRow[]>(() => {
   const info = elfInfo.value
   if (!info) return []
-  const query = variableSearch.value.trim()
+  const query = variableSearch.value.trim().toLowerCase()
   const rows: VariableRow[] = []
-  const visit = (node: VariableNode, depth: number, parentPath: string, bucket: VariableRow[]) => {
+  const visit = (node: VariableNode, depth: number, parentPath: string, bucket: VariableRow[], ancestorMatched: boolean) => {
     const path = depth === 0 ? node.name : parentPath + node.name
-    if (query && !nodeMatchesDeep(node, path, query)) return
+    const selfMatch = query === '' || nodeSearchText(node).includes(query)
+    if (query && !selfMatch && !ancestorMatched && !nodeMatchesDeep(node, query)) return
     const key = nodeKey(path, node)
     const hasChildren = !!node.children && node.children.length > 0
     const expanded = hasChildren && (query !== '' || expandedKeys.value.has(key))
     bucket.push({kind: 'variable', key, node, depth, path, hasChildren, expanded})
     if (hasChildren && expanded) {
-      for (const child of node.children ?? []) visit(child, depth + 1, path, bucket)
+      // 名称自身命中时展示完整子树（保持旧路径搜索行为）；仅后代命中时继续过滤。
+      for (const child of node.children ?? []) visit(child, depth + 1, path, bucket, ancestorMatched || selfMatch)
     }
   }
 
@@ -1992,7 +2333,7 @@ const variableRows = computed<VariableRow[]>(() => {
     return samplingMode.value === 'debug' ? node.sampleable : node.liveSamplable
   })
   if (groupBy.value === 'none') {
-    for (const node of base) visit(node, 0, '', rows)
+    for (const node of base) visit(node, 0, '', rows, false)
     return rows
   }
   const groups = new Map<string, VariableNode[]>()
@@ -2016,7 +2357,7 @@ const variableRows = computed<VariableRow[]>(() => {
       groupLabel: label,
       groupCount: bucket.length,
     })
-    for (const node of bucket) visit(node, 0, '', rows)
+    for (const node of bucket) visit(node, 0, '', rows, false)
   }
   return rows
 })
@@ -2059,20 +2400,12 @@ function collapseAll(): void {
   expandedKeys.value = new Set()
 }
 
-function newSeries(name: string, key: string, typeName: string, node: VariableNode): CurveSeries | null {
+/** 构建曲线对象（不修改 seriesList；批量选择时先构建后一次性赋值）。 */
+function makeSeries(name: string, key: string, typeName: string, node: VariableNode): CurveSeries | null {
   if (!node.sample && !node.location) return null
   const location = node.sample?.location ?? node.location
   const register = node.sample?.register
   if (isLocalSource.value && !localExprForNode(node)) return null
-  if (seriesList.value.some((item) => item.key === key)) return null
-  if (isLocalSource.value && seriesList.value.length >= CURVE_LOCAL_MAX_TOTAL_SERIES) {
-    globalNotify(translate('curve.localSeriesLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES}), 'warning')
-    return null
-  }
-  if (!isLocalSource.value && seriesList.value.length >= MAX_CURVE_SERIES) {
-    globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
-    return null
-  }
   const series: CurveSeries = {
     id: nextSeriesId++,
     name,
@@ -2093,9 +2426,31 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
       ? {pcVariants: node.locationVariants.map((variant) => ({pcLow: variant.pcLow, pcHigh: variant.pcHigh, expr: variant.expr}))}
       : (validPcRange(node.pcLow, node.pcHigh) ?? {})),
   }
+  return series
+}
+
+/** 注册曲线到 ring 缓冲 + seriesList（单个/批量共用；批量只触发一次响应式更新）。 */
+function registerSeries(series: CurveSeries): void {
   seriesLo.set(series.id, new Uint32Array(MAX_POINTS))
   seriesHi.set(series.id, new Uint32Array(MAX_POINTS))
+  seriesValues.set(series.id, new Float64Array(MAX_POINTS))
+}
+
+function newSeries(name: string, key: string, typeName: string, node: VariableNode): CurveSeries | null {
+  if (seriesList.value.some((item) => item.key === key)) return null
+  if (isLocalSource.value && seriesList.value.length >= CURVE_LOCAL_MAX_TOTAL_SERIES) {
+    globalNotify(translate('curve.localSeriesLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES}), 'warning')
+    return null
+  }
+  if (!isLocalSource.value && seriesList.value.length >= MAX_CURVE_SERIES) {
+    globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
+    return null
+  }
+  const series = makeSeries(name, key, typeName, node)
+  if (!series) return null
+  registerSeries(series)
   seriesList.value = [...seriesList.value, series]
+  invalidateYRange()
   scheduleDraw()
   return series
 }
@@ -2116,8 +2471,10 @@ function toggleRow(row: VariableRow): void {
 function removeSeries(id: number): void {
   seriesLo.delete(id)
   seriesHi.delete(id)
+  seriesValues.delete(id)
   seriesList.value = seriesList.value.filter((item) => item.id !== id)
   hover.value = null
+  invalidateYRange()
   scheduleDraw()
 }
 
@@ -2128,12 +2485,144 @@ function removeSeriesByKey(key: string): void {
 
 function toggleVisible(item: CurveSeries): void {
   item.visible = !item.visible
+  invalidateYRange()
   scheduleDraw()
 }
 
-function applyGlobalFormat(): void {
-  for (const item of seriesList.value) item.format = globalFormat.value
+/** 搜索框 150ms debounce：输入期间不重算变量树/重建 DOM。 */
+function onVariableSearchInput(): void {
+  if (searchTimer) window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    searchTimer = 0
+    variableSearch.value = variableSearchInput.value
+    variableDisplayLimit.value = variableSearch.value ? SEARCH_PAGE_SIZE : VARIABLE_PAGE_SIZE
+  }, 150)
+}
+
+function showMoreVariables(): void {
+  const increment = variableSearch.value ? SEARCH_PAGE_SIZE : VARIABLE_PAGE_SIZE
+  variableDisplayLimit.value = Math.min(variableRows.value.length, variableDisplayLimit.value + increment)
+}
+
+function selectionLimitForSource(): number {
+  return isLocalSource.value ? localSeriesLimit : MAX_CURVE_SERIES
+}
+
+/** 批量选择（一次操作只提示一次上限）：仍复用 newSeries 的采样表达式/PC/variants 构建。 */
+function addSelectedRowsBulk(rows: Array<{name: string; key: string; node: VariableNode}>): void {
+  if (isLocalSource.value && sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
+  const limit = selectionLimitForSource()
+  const existing = new Set(seriesList.value.map((item) => item.key))
+  const created: CurveSeries[] = []
+  for (const row of rows) {
+    if (seriesList.value.length + created.length >= limit) break
+    if (existing.has(row.key)) continue
+    const series = makeSeries(row.name, row.key, row.node.typeName, row.node)
+    if (!series) continue
+    registerSeries(series)
+    existing.add(row.key)
+    created.push(series)
+  }
+  if (created.length > 0) {
+    // 一次性替换数组：避免批量选择时 256 次 reactive 更新/重绘。
+    seriesList.value = [...seriesList.value, ...created]
+    // 大批量选择时先折叠已选面板，避免首次挂载数百个 Element 组件阻塞交互。
+    if (seriesList.value.length > SELECTED_RENDER_LIMIT) selectedCollapsed.value = true
+    invalidateYRange()
+    scheduleDraw()
+  }
+}
+
+/** 选择当前变量树中可见/可选的变量（受搜索与分组过滤）。 */
+function selectAllVisible(): void {
+  const rows = variableRows.value
+    .filter((row) => row.kind === 'variable' && nodeSelectable(row.node) && !isRowSelected(row))
+    .map((row) => ({name: row.path, key: row.key, node: row.node}))
+  if (rows.length === 0) return
+  const remaining = selectionLimitForSource() - seriesList.value.length
+  const picked = rows.slice(0, Math.max(0, remaining))
+  addSelectedRowsBulk(picked)
+  if (rows.length > picked.length) {
+    globalNotify(translate('curve.selectionLimitReached', {max: selectionLimitForSource()}), 'warning')
+  }
+}
+
+/** 选择当前 ELF 中全部可采样根变量（受采样来源上限约束）。 */
+function selectAllSampleable(): void {
+  const info = elfInfo.value
+  if (!info) return
+  const rows = info.variables
+    .filter((node) => nodeSelectable(node))
+    .map((node) => ({name: node.name, key: nodeKey(node.name, node), node}))
+  const remaining = selectionLimitForSource() - seriesList.value.length
+  const picked = rows.slice(0, Math.max(0, remaining))
+  addSelectedRowsBulk(picked)
+  if (rows.length > picked.length) {
+    globalNotify(translate('curve.selectionLimitReached', {max: selectionLimitForSource()}), 'warning')
+  }
+}
+
+function clearSelection(): void {
+  if (isLocalSource.value && sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
+  for (const item of seriesList.value) {
+    seriesLo.delete(item.id)
+    seriesHi.delete(item.id)
+    seriesValues.delete(item.id)
+  }
+  seriesList.value = []
+  hover.value = null
+  invalidateYRange()
   scheduleDraw()
+}
+
+const bulkSelectDisabled = computed(() => (isLocalSource.value && sampling.value)
+  || !elfInfo.value || (elfInfo.value?.variables.length ?? 0) === 0)
+
+// 过滤/来源变化时重置“Show more”分页，避免搜索结果被旧 limit 截断。
+watch([variableSearch, onlySampleable, groupBy, elfInfo, samplingSource], () => {
+  variableDisplayLimit.value = variableSearch.value ? SEARCH_PAGE_SIZE : VARIABLE_PAGE_SIZE
+  invalidateYRange()
+})
+watch([renderAll, drawCap], () => {
+  invalidateYRange()
+  scheduleDraw()
+})
+
+function applyGlobalFormat(): void {
+  for (const item of seriesList.value) {
+    item.format = globalFormat.value
+    recomputeSeriesValues(item)
+  }
+  invalidateYRange()
+  scheduleDraw()
+}
+
+/** 单条曲线切换显示格式：重算缓存值（历史 ring 也需要按新格式解释）。 */
+function onSeriesFormatChange(item: CurveSeries): void {
+  recomputeSeriesValues(item)
+  invalidateYRange()
+  scheduleDraw()
+}
+
+function recomputeSeriesValues(item: CurveSeries): void {
+  const values = seriesValues.get(item.id)
+  const loBuffer = seriesLo.get(item.id)
+  const hiBuffer = seriesHi.get(item.id)
+  if (!values || !loBuffer || !hiBuffer) return
+  for (let order = 0; order < ringCount; order++) {
+    const slot = ringSlot(order)
+    values[slot] = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
+  }
+}
+
+function invalidateYRange(): void {
+  yRangeCache.dirty = true
 }
 
 const wideHint = computed(() => seriesList.value.some((item) => item.sample.size > 4 || item.sample.bitSize > 32))
@@ -2160,17 +2649,18 @@ function openElfDialog(): void {
   elfInputRef.value?.click()
 }
 
-async function onElfSelected(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+/**
+ * 解析 ELF：手工上传、SourceBrowser 项目内自动发现/手工选择共用同一流程。
+ * 成功后刷新变量树、函数符号、搜索索引与选中状态。
+ */
+async function parseElfFile(file: File): Promise<void> {
   elfParsing.value = true
   elfError.value = ''
   try {
     const buffer = await file.arrayBuffer()
     const result = parseElfVariables(buffer)
     elfInfo.value = result
+    prewarmSearchIndex(result)
     try {
       elfFunctionSymbols.value = buildFunctionSymbols(parseElf32Symbols(buffer).symbols)
     } catch {
@@ -2179,6 +2669,8 @@ async function onElfSelected(event: Event): Promise<void> {
     selectedFunctionAddress.value = null
     variableListEpoch.value += 1
     variableSearch.value = ''
+    variableSearchInput.value = ''
+    if (searchTimer) { window.clearTimeout(searchTimer); searchTimer = 0 }
     expandedKeys.value = new Set()
     if (result.variables.length === 0) {
       elfError.value = translate('curve.noSymbols')
@@ -2192,6 +2684,49 @@ async function onElfSelected(event: Event): Promise<void> {
   } finally {
     elfParsing.value = false
   }
+}
+
+async function onElfSelected(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  await parseElfFile(file)
+}
+
+// ---- Source 视图（SourceBrowser）与 Variables 视图联动 ---------------------
+/** SourceBrowser 选好项目目录后保存：切换 Variables/Source 视图时不丢项目（无需重新选目录）。 */
+function onSourceProjectLoaded(project: SourceProject): void {
+  sourceProject.value = project
+}
+
+/** SourceBrowser 自动发现/手工选择的 ELF：与 ELF 卡片上传走同一解析流程。 */
+async function onSourceElfFile(file: File): Promise<void> {
+  await parseElfFile(file)
+}
+
+/**
+ * 源码中点击变量：语义与变量树勾选一致。
+ *  - 本地采样运行中锁定（现有曲线不允许中途改）；
+ *  - 当前采样模式不可采样 -> 提示；
+ *  - 已选（key 相同）-> 去重提示，不重复添加；
+ *  - 其余复用 newSeries（系列上限/重复/通知均由现有逻辑处理）。
+ */
+function onSourceVariableSelected(payload: SourceVariableSelectionPayload<VariableNode>): void {
+  if (isLocalSource.value && sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
+  const node = payload.variable
+  if (!nodeSelectable(node)) {
+    globalNotify(translate('curve.sourceSelectUnsamplable'), 'warning')
+    return
+  }
+  if (seriesList.value.some((item) => item.key === payload.key)) {
+    globalNotify(translate('curve.sourceAlreadySelected'), 'info')
+    return
+  }
+  newSeries(payload.path, payload.key, node.typeName, node)
 }
 
 function parseAddressToken(token: string): number | null {
@@ -2365,22 +2900,40 @@ function lowerBoundTime(time: number): number {
 }
 
 // ---- Canvas 绘图 ----------------------------------------------------------
+/** 列缓冲复用：min/max 降采样时避免每帧分配大数组。 */
+let columnMin = new Float32Array(0)
+let columnMax = new Float32Array(0)
+let hoverMovePending = false
+let pendingMove: MouseEvent | null = null
+
 function scheduleDraw(): void {
+  chartDirty = true
+  // document.hidden 时暂停绘制；visibilitychange 恢复后补一次。
+  if (document.hidden) {
+    perfCounter.hiddenPauses += 1
+    return
+  }
   if (drawPending) return
   drawPending = true
-  window.requestAnimationFrame(() => {
-    drawPending = false
-    drawChart()
-  })
+  window.requestAnimationFrame(drawFrame)
 }
 
-function drawChart(): void {
-  const canvas = canvasRef.value
-  const wrap = chartWrapRef.value
-  if (!canvas || !wrap) return
-  const width = Math.max(1, Math.floor(wrap.clientWidth))
-  const height = Math.max(1, Math.floor(wrap.clientHeight))
-  const dpr = window.devicePixelRatio || 1
+/** 约 30fps 节流：数据进入 ring 的频率可以更高，但主线程绘制降到 ~30fps。 */
+function drawFrame(now: number): void {
+  drawPending = false
+  if (document.hidden) return
+  if (!chartDirty) return
+  if (now - lastDrawAt < DRAW_INTERVAL_MS) {
+    drawPending = true
+    window.requestAnimationFrame(drawFrame)
+    return
+  }
+  lastDrawAt = now
+  chartDirty = false
+  drawChart(now)
+}
+
+function prepareCanvas(canvas: HTMLCanvasElement, width: number, height: number, dpr: number): CanvasRenderingContext2D | null {
   const pixelWidth = Math.max(1, Math.round(width * dpr))
   const pixelHeight = Math.max(1, Math.round(height * dpr))
   if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
@@ -2388,51 +2941,35 @@ function drawChart(): void {
     canvas.height = pixelHeight
   }
   const context = canvas.getContext('2d')
-  if (!context) return
+  if (!context) return null
   context.setTransform(dpr, 0, 0, dpr, 0, 0)
   context.clearRect(0, 0, width, height)
-  context.fillStyle = '#ffffff'
-  context.fillRect(0, 0, width, height)
+  return context
+}
 
-  const padding = {left: 58, right: 14, top: 12, bottom: 26}
-  const plotWidth = width - padding.left - padding.right
-  const plotHeight = height - padding.top - padding.bottom
-  if (plotWidth < 20 || plotHeight < 20) return
-
-  const visible = seriesList.value.filter((item) => item.visible)
-  if (ringCount === 0 || visible.length === 0) {
-    context.fillStyle = '#9ca3af'
-    context.font = '12px system-ui, sans-serif'
-    context.textAlign = 'center'
-    context.textBaseline = 'middle'
-    if (ringCount === 0) return
-    context.fillText(translate('curve.noData'), width / 2, height / 2)
-    return
+/** Y 自动缩放：TTL 缓存 + 抽样预算（20k 值），曲线很多时不逐点全扫。 */
+function updateYRange(drawn: readonly CurveSeries[], startOrder: number, now: number): {min: number; max: number} | null {
+  if (!yRangeCache.dirty && now - yRangeCache.updatedAt < Y_RANGE_TTL_MS
+    && yRangeCache.seriesCount === drawn.length) {
+    return {min: yRangeCache.min, max: yRangeCache.max}
   }
-
-  const lastTime = timestamps[ringSlot(ringCount - 1)]
-  const xMax = Math.max(lastTime, 5)
-  const xMin = Math.max(0, xMax - WINDOW_SECONDS)
-  const startOrder = lowerBoundTime(xMin)
-  if (startOrder >= ringCount) return
-
-  // Y 自动缩放：只统计窗口内、且在该曲线创建之后的点。
+  const total = Math.max(1, (ringCount - startOrder) * Math.max(1, drawn.length))
+  const stride = Math.max(1, Math.ceil(total / Y_SCAN_BUDGET))
   let minValue = Number.POSITIVE_INFINITY
   let maxValue = Number.NEGATIVE_INFINITY
-  for (let order = startOrder; order < ringCount; order++) {
-    const slot = ringSlot(order)
-    for (const item of visible) {
+  for (const item of drawn) {
+    const values = seriesValues.get(item.id)
+    if (!values) continue
+    for (let order = startOrder; order < ringCount; order += stride) {
+      const slot = ringSlot(order)
       if (slotSeq[slot] < item.startSeq) continue
-      const loBuffer = seriesLo.get(item.id)
-      const hiBuffer = seriesHi.get(item.id)
-      if (!loBuffer || !hiBuffer) continue
-      const value = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
+      const value = values[slot]
       if (!Number.isFinite(value)) continue
       if (value < minValue) minValue = value
       if (value > maxValue) maxValue = value
     }
   }
-  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null
   if (maxValue - minValue < 1e-9) {
     minValue -= 1
     maxValue += 1
@@ -2441,6 +2978,88 @@ function drawChart(): void {
     minValue -= span * 0.08
     maxValue += span * 0.08
   }
+  yRangeCache = {min: minValue, max: maxValue, updatedAt: now, seriesCount: drawn.length, dirty: false}
+  return {min: minValue, max: maxValue}
+}
+
+/** Canvas 颜色统一从 design-tokens 读取（--bb-chart-*），主题切换后缓存失效。 */
+function chartPalette(): { bg: string; grid: string; text: string; axis: string } {
+  if (chartPaletteCache) return chartPaletteCache
+  const style = getComputedStyle(document.documentElement)
+  const dark = darkTheme.value
+  const read = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback
+  chartPaletteCache = {
+    bg: read('--bb-chart-bg', dark ? '#0f1216' : '#ffffff'),
+    grid: read('--bb-chart-grid', dark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(16, 24, 40, 0.08)'),
+    text: read('--bb-chart-text', dark ? '#7d8795' : '#69727f'),
+    axis: read('--bb-chart-axis', dark ? '#3a4350' : '#c3c9d3'),
+  }
+  return chartPaletteCache
+}
+
+/** 曲线显示色：浅色主题用原调色板；深色主题用提亮版本（不改 series.color 状态/导出）。 */
+function seriesDisplayColor(color: string): string {
+  return darkTheme.value ? (DARK_COLOR_BY_BASE.get(color) ?? color) : color
+}
+
+function drawChart(now = performance.now()): void {
+  const drawStart = performance.now()
+  const canvas = canvasRef.value
+  const wrap = chartWrapRef.value
+  if (!canvas || !wrap) return
+  const width = Math.max(1, Math.floor(wrap.clientWidth))
+  const height = Math.max(1, Math.floor(wrap.clientHeight))
+  // DPR 上限 2：高 DPI 屏幕上避免 3x/4x 像素带来的 2~4 倍填充成本。
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  const context = prepareCanvas(canvas, width, height, dpr)
+  if (!context) return
+  const palette = chartPalette()
+  context.fillStyle = palette.bg
+  context.fillRect(0, 0, width, height)
+
+  const padding = {left: 58, right: 14, top: 12, bottom: 26}
+  const plotWidth = width - padding.left - padding.right
+  const plotHeight = height - padding.top - padding.bottom
+  if (plotWidth < 20 || plotHeight < 20) {
+    lastGeometry = null
+    drawHoverOverlay()
+    return
+  }
+
+  const visible = visibleSeriesList.value
+  const drawn = drawnSeriesList.value
+  if (ringCount === 0 || visible.length === 0) {
+    lastGeometry = null
+    if (ringCount === 0) {
+      // 空状态由模板 chart-empty 提示；这里只清背景。
+    } else {
+      context.fillStyle = palette.text
+      context.font = '12px system-ui, sans-serif'
+      context.textAlign = 'center'
+      context.textBaseline = 'middle'
+      context.fillText(translate('curve.noData'), width / 2, height / 2)
+    }
+    drawHoverOverlay()
+    perfCounter.lastDrawMs = performance.now() - drawStart
+    return
+  }
+
+  const lastTime = timestamps[ringSlot(ringCount - 1)]
+  const xMax = Math.max(lastTime, 5)
+  const xMin = Math.max(0, xMax - WINDOW_SECONDS)
+  const startOrder = lowerBoundTime(xMin)
+  if (startOrder >= ringCount) {
+    lastGeometry = null
+    drawHoverOverlay()
+    return
+  }
+  const range = updateYRange(drawn, startOrder, now)
+  if (!range) {
+    lastGeometry = null
+    drawHoverOverlay()
+    return
+  }
+  const {min: minValue, max: maxValue} = range
 
   const toX = (time: number) => padding.left + ((time - xMin) / (xMax - xMin)) * plotWidth
   const toY = (value: number) => padding.top + (1 - (value - minValue) / (maxValue - minValue)) * plotHeight
@@ -2454,12 +3073,12 @@ function drawChart(): void {
   for (let step = 0; step <= ySteps; step++) {
     const value = minValue + ((maxValue - minValue) * step) / ySteps
     const y = toY(value)
-    context.strokeStyle = step === 0 || step === ySteps ? '#d1d5db' : '#eef0f3'
+    context.strokeStyle = step === 0 || step === ySteps ? palette.axis : palette.grid
     context.beginPath()
     context.moveTo(padding.left, y)
     context.lineTo(padding.left + plotWidth, y)
     context.stroke()
-    context.fillStyle = '#6b7280'
+    context.fillStyle = palette.text
     context.fillText(formatAxisValue(value), padding.left - 6, y)
   }
 
@@ -2470,75 +3089,92 @@ function drawChart(): void {
   const firstTick = Math.ceil(xMin / timeStep) * timeStep
   for (let time = firstTick; time <= xMax + 1e-9; time += timeStep) {
     const x = toX(time)
-    context.strokeStyle = '#eef0f3'
+    context.strokeStyle = palette.grid
     context.beginPath()
     context.moveTo(x, padding.top)
     context.lineTo(x, padding.top + plotHeight)
     context.stroke()
-    context.fillStyle = '#6b7280'
+    context.fillStyle = palette.text
     context.fillText(`${time.toFixed(0)}s`, x, padding.top + plotHeight + 6)
   }
 
-  // 数据曲线（窗口内最多约 20s * 100Hz = 2000 点，无需降采样）
-  for (const item of visible) {
-    const loBuffer = seriesLo.get(item.id)
-    const hiBuffer = seriesHi.get(item.id)
-    if (!loBuffer || !hiBuffer) continue
-    context.strokeStyle = item.color
-    context.lineWidth = 1.5
-    context.beginPath()
-    let started = false
+  // 数据曲线：每像素列 min/max 降采样（点数 > 列数时），否则直接画折线。
+  const plotColumns = Math.max(1, Math.floor(plotWidth))
+  if (columnMin.length < plotColumns) {
+    columnMin = new Float32Array(plotColumns)
+    columnMax = new Float32Array(plotColumns)
+  }
+  context.lineWidth = 1.5
+  for (const item of drawn) {
+    const values = seriesValues.get(item.id)
+    if (!values) continue
+    let pointCount = 0
     for (let order = startOrder; order < ringCount; order++) {
       const slot = ringSlot(order)
-      if (slotSeq[slot] < item.startSeq) {
-        started = false
-        continue
+      if (slotSeq[slot] >= item.startSeq && Number.isFinite(values[slot])) pointCount += 1
+    }
+    if (pointCount === 0) continue
+    context.strokeStyle = seriesDisplayColor(item.color)
+    context.beginPath()
+    if (pointCount <= plotWidth * 1.5) {
+      let started = false
+      for (let order = startOrder; order < ringCount; order++) {
+        const slot = ringSlot(order)
+        if (slotSeq[slot] < item.startSeq) {
+          started = false
+          continue
+        }
+        const value = values[slot]
+        if (!Number.isFinite(value)) {
+          started = false
+          continue
+        }
+        const x = toX(timestamps[slot])
+        const y = toY(value)
+        if (!started) {
+          context.moveTo(x, y)
+          started = true
+        } else {
+          context.lineTo(x, y)
+        }
       }
-      const value = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
-      if (!Number.isFinite(value)) {
-        started = false
-        continue
+    } else {
+      // 像素列 min/max 包络：20s 窗口每列只保留最小/最大 Y，逐点 lineTo 成本降为列数级。
+      const minBuf = columnMin
+      const maxBuf = columnMax
+      for (let column = 0; column < plotColumns; column++) {
+        minBuf[column] = Number.POSITIVE_INFINITY
+        maxBuf[column] = Number.NEGATIVE_INFINITY
       }
-      const x = toX(timestamps[slot])
-      const y = toY(value)
-      if (!started) {
-        context.moveTo(x, y)
-        started = true
-      } else {
-        context.lineTo(x, y)
+      for (let order = startOrder; order < ringCount; order++) {
+        const slot = ringSlot(order)
+        if (slotSeq[slot] < item.startSeq) continue
+        const value = values[slot]
+        if (!Number.isFinite(value)) continue
+        const column = Math.min(plotColumns - 1, Math.max(0, Math.floor(toX(timestamps[slot]) - padding.left)))
+        if (value < minBuf[column]) minBuf[column] = value
+        if (value > maxBuf[column]) maxBuf[column] = value
+      }
+      let previousColumn = -2
+      for (let column = 0; column < plotColumns; column++) {
+        if (!Number.isFinite(minBuf[column])) continue
+        const x = padding.left + column + 0.5
+        const yTop = toY(maxBuf[column])
+        const yBottom = toY(minBuf[column])
+        if (column !== previousColumn + 1) context.moveTo(x, yTop)
+        else context.lineTo(x, yTop)
+        context.lineTo(x, yBottom)
+        previousColumn = column
       }
     }
     context.stroke()
   }
 
-  // 悬停十字线 + 各曲线当前点
-  const hoverState = hover.value
-  if (hoverState) {
-    const order = hoverState.index
-    if (order >= 0 && order < ringCount) {
-      const slot = ringSlot(order)
-      const x = toX(timestamps[slot])
-      context.strokeStyle = '#94a3b8'
-      context.lineWidth = 1
-      context.setLineDash([4, 3])
-      context.beginPath()
-      context.moveTo(x, padding.top)
-      context.lineTo(x, padding.top + plotHeight)
-      context.stroke()
-      context.setLineDash([])
-      for (const item of visible) {
-        const loBuffer = seriesLo.get(item.id)
-        const hiBuffer = seriesHi.get(item.id)
-        if (!loBuffer || !hiBuffer || slotSeq[slot] < item.startSeq) continue
-        const value = decodeNumber(item, loBuffer[slot], hiBuffer[slot])
-        if (!Number.isFinite(value)) continue
-        context.fillStyle = item.color
-        context.beginPath()
-        context.arc(x, toY(value), 3, 0, Math.PI * 2)
-        context.fill()
-      }
-    }
-  }
+  lastGeometry = {padding, plotWidth, plotHeight, xMin, xMax, minValue, maxValue, width, height}
+  drawHoverOverlay()
+  perfCounter.draws += 1
+  perfCounter.lastDrawMs = performance.now() - drawStart
+  perfCounter.drawMsTotal += perfCounter.lastDrawMs
 }
 
 function niceTimeStep(span: number): number {
@@ -2551,7 +3187,53 @@ function niceTimeStep(span: number): number {
   return 10 * magnitude
 }
 
-function onCanvasMove(event: MouseEvent): void {
+/** hover 独立 overlay：鼠标移动只重绘 overlay，不重绘主曲线/不重建 canvas。 */
+function drawHoverOverlay(): void {
+  const overlay = hoverCanvasRef.value
+  const wrap = chartWrapRef.value
+  const geometry = lastGeometry
+  if (!overlay || !wrap) return
+  const width = Math.max(1, Math.floor(wrap.clientWidth))
+  const height = Math.max(1, Math.floor(wrap.clientHeight))
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  const context = prepareCanvas(overlay, width, height, dpr)
+  if (!context) return
+  const palette = chartPalette()
+  const hoverState = hover.value
+  if (!hoverState || !geometry || ringCount === 0) return
+  const x = geometry.padding.left + ((hoverState.time - geometry.xMin) / (geometry.xMax - geometry.xMin)) * geometry.plotWidth
+  context.strokeStyle = palette.text
+  context.lineWidth = 1
+  context.setLineDash([4, 3])
+  context.beginPath()
+  context.moveTo(x, geometry.padding.top)
+  context.lineTo(x, geometry.padding.top + geometry.plotHeight)
+  context.stroke()
+  context.setLineDash([])
+  const slot = ringSlot(Math.min(Math.max(hoverState.index, 0), ringCount - 1))
+  for (const item of drawnSeriesList.value) {
+    const values = seriesValues.get(item.id)
+    if (!values || slotSeq[slot] < item.startSeq) continue
+    const value = values[slot]
+    if (!Number.isFinite(value)) continue
+    const y = geometry.padding.top + (1 - (value - geometry.minValue) / (geometry.maxValue - geometry.minValue)) * geometry.plotHeight
+    context.fillStyle = seriesDisplayColor(item.color)
+    context.beginPath()
+    context.arc(x, y, 3, 0, Math.PI * 2)
+    context.fill()
+  }
+}
+
+function scheduleHoverDraw(): void {
+  if (hoverDrawPending) return
+  hoverDrawPending = true
+  window.requestAnimationFrame(() => {
+    hoverDrawPending = false
+    drawHoverOverlay()
+  })
+}
+
+function processCanvasMove(event: MouseEvent): void {
   const canvas = canvasRef.value
   if (!canvas || ringCount === 0 || seriesList.value.length === 0) return
   const rect = canvas.getBoundingClientRect()
@@ -2560,8 +3242,10 @@ function onCanvasMove(event: MouseEvent): void {
   const padding = {left: 58, right: 14, top: 12, bottom: 26}
   const plotWidth = rect.width - padding.left - padding.right
   if (plotWidth <= 0 || x < padding.left || x > rect.width - padding.right) {
-    hover.value = null
-    scheduleDraw()
+    if (hover.value) {
+      hover.value = null
+      scheduleHoverDraw()
+    }
     return
   }
   const lastTime = timestamps[ringSlot(ringCount - 1)]
@@ -2572,21 +3256,38 @@ function onCanvasMove(event: MouseEvent): void {
   const order = Math.min(Math.max(lowerBoundTime(time), startOrder), ringCount - 1)
   const slot = ringSlot(order)
   const entries: Array<{name: string; color: string; text: string}> = []
-  for (const item of seriesList.value) {
+  const drawn = drawnSeriesList.value
+  for (const item of drawn) {
     if (!item.visible || slotSeq[slot] < item.startSeq) continue
     const loBuffer = seriesLo.get(item.id)
     const hiBuffer = seriesHi.get(item.id)
     if (!loBuffer || !hiBuffer) continue
-    entries.push({name: item.name, color: item.color, text: decodeText(item, loBuffer[slot], hiBuffer[slot])})
+    entries.push({name: item.name, color: seriesDisplayColor(item.color), text: decodeText(item, loBuffer[slot], hiBuffer[slot])})
+    if (entries.length >= 16) break
   }
   hover.value = {index: order, x, y, time: timestamps[slot], entries}
-  scheduleDraw()
+  scheduleHoverDraw()
+}
+
+function onCanvasMove(event: MouseEvent): void {
+  pendingMove = event
+  if (hoverMovePending) return
+  hoverMovePending = true
+  window.requestAnimationFrame(() => {
+    hoverMovePending = false
+    if (pendingMove) {
+      const move = pendingMove
+      pendingMove = null
+      processCanvasMove(move)
+    }
+  })
 }
 
 function onCanvasLeave(): void {
+  pendingMove = null
   if (!hover.value) return
   hover.value = null
-  scheduleDraw()
+  scheduleHoverDraw()
 }
 
 const hoverStyle = computed(() => {
@@ -2666,14 +3367,60 @@ function exportPng(): void {
 }
 
 // ---- 生命周期 -------------------------------------------------------------
+function onVisibilityChange(): void {
+  if (document.hidden) {
+    perfCounter.hiddenPauses += 1
+    return
+  }
+  // 页面回到前台：数据可能已积压，强制补一次绘制。
+  invalidateYRange()
+  scheduleDraw()
+}
+
+/** 可选 debug 快照，供 fake-DAP/Playwright 性能断言（不影响生产逻辑）。 */
+function installDebugSnapshot(): void {
+  ;(window as unknown as {__curveDebug?: () => Record<string, unknown>}).__curveDebug = () => ({
+    draws: perfCounter.draws,
+    lastDrawMs: Math.round(perfCounter.lastDrawMs * 100) / 100,
+    avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
+    drawn: drawnSeriesList.value.length,
+    visible: visibleSeriesList.value.length,
+    selected: seriesList.value.length,
+    renderAll: renderAll.value,
+    drawCap: drawCap.value,
+    ringCount,
+    hiddenPauses: perfCounter.hiddenPauses,
+    variableRows: variableRows.value.length,
+    renderedVariableRows: shownVariableRows.value.length,
+    search: variableSearch.value,
+    legendItems: legendItems.value.length,
+  })
+}
+
 onMounted(() => {
   resizeObserver = new ResizeObserver(() => scheduleDraw())
   if (chartWrapRef.value) resizeObserver.observe(chartWrapRef.value)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  installDebugSnapshot()
+  // 主题切换（html class/data-theme）后失效 canvas 调色板并重绘（纯视觉）。
+  darkTheme.value = document.documentElement.classList.contains('dark')
+  themeObserver = new MutationObserver(() => {
+    const next = document.documentElement.classList.contains('dark')
+    chartPaletteCache = null
+    if (darkTheme.value !== next) darkTheme.value = next
+    scheduleDraw()
+  })
+  themeObserver.observe(document.documentElement, {attributes: true, attributeFilter: ['class', 'data-theme']})
   scheduleDraw()
 })
 
 onBeforeUnmount(() => {
   stopSampling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  themeObserver?.disconnect()
+  themeObserver = null
+  chartPaletteCache = null
+  delete (window as unknown as {__curveDebug?: () => Record<string, unknown>}).__curveDebug
   if (transport) transport.close('page unmount')
   transport = null
   client = null
@@ -2685,20 +3432,68 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ==========================================================================
+ * 曲线页视觉：全部颜色走 design-tokens.css（深色优先，浅色自动切回）。
+ * 布局/尺寸/交互逻辑保持原样（本文件只做视觉迁移）。
+ * ======================================================================== */
 .curve-layout {
-  @apply mx-auto w-full max-w-6xl px-2 pb-8;
+  @apply mx-auto w-full max-w-7xl px-2 pb-8;
+  color: var(--bb-text, #151a21);
 }
 
+/* 预留 SourceBrowser 左侧 tab/selected rail：后续任务把 aside 放进 grid 第一列即可。 */
+.curve-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.curve-workbench-main {
+  min-width: 0;
+}
+
+/* 面板 / 卡片 ------------------------------------------------------------- */
 .curve-card {
-  @apply my-3 rounded-lg border border-gray-200 p-3;
+  @apply my-3 rounded-lg border p-3;
+  background: var(--bb-panel-bg, #ffffff);
+  border-color: var(--bb-panel-border, #dde1e8);
+  border-radius: var(--bb-panel-radius, 10px);
+  box-shadow: var(--bb-shadow-sm, 0 1px 2px rgba(16, 24, 40, 0.08));
+  color: var(--bb-text, #151a21);
 }
 
 .variable-search {
   @apply min-w-56 flex-1;
 }
 
+/* ELF 卡片内 Variables / Source 视图切换（SourceBrowser 源码浏览） */
+.elf-view-switch {
+  @apply mx-2;
+}
+
+.source-view {
+  display: flex;
+  height: 560px;
+  min-height: 360px;
+  margin-top: 0.5rem;
+}
+
+.source-view > * {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 表单校验错误（断点地址等） */
+.curve-field-error {
+  color: var(--bb-danger, #b91c1c);
+}
+
+/* 变量表 ----------------------------------------------------------------- */
 .var-table {
-  @apply overflow-hidden rounded border border-gray-200;
+  @apply overflow-hidden rounded border;
+  background: var(--bb-surface, #ffffff);
+  border-color: var(--bb-border, #dde1e8);
+  color: var(--bb-text, #151a21);
 }
 
 .var-head,
@@ -2711,8 +3506,11 @@ onBeforeUnmount(() => {
 }
 
 .var-head {
-  @apply sticky top-0 z-10 border-b border-gray-200 bg-gray-50 text-xs font-semibold text-gray-600;
+  @apply sticky top-0 z-10 border-b text-xs font-semibold;
   height: 1.75rem;
+  background: var(--bb-surface-inset, #eef0f4);
+  border-color: var(--bb-border, #dde1e8);
+  color: var(--bb-text-secondary, #3d4552);
 }
 
 .var-list {
@@ -2722,46 +3520,60 @@ onBeforeUnmount(() => {
 
 .var-row {
   height: 1.75rem;
-  border-bottom: 1px solid #f3f4f6;
+  border-bottom: 1px solid var(--bb-border-subtle, #e9ecf1);
   font-size: 0.75rem;
+  color: var(--bb-text, #151a21);
 }
 
 .var-row:hover {
-  background-color: var(--el-color-primary-light-9);
+  background-color: var(--bb-nav-link-hover-bg, rgba(16, 24, 40, 0.05));
 }
 
 .var-row.selected {
-  background-color: var(--el-color-primary-light-8);
+  background-color: var(--bb-accent-soft, rgba(31, 111, 235, 0.1));
+  box-shadow: inset 2px 0 0 var(--bb-accent, #1f6feb);
 }
 
 .var-row.unsampleable {
   opacity: 0.62;
 }
 
+.var-row.selectable {
+  cursor: pointer;
+}
+
 .unsampleable-text {
   font-size: 0.7rem;
-  color: #9ca3af;
+  color: var(--bb-text-muted, #69727f);
+}
+
+/* .var-addr 的基色优先，但不可采样占位文案用弱化色 */
+.var-addr.unsampleable-text {
+  color: var(--bb-text-muted, #69727f);
 }
 
 .breakpoint-input.is-invalid :deep(.el-input__wrapper) {
-  box-shadow: 0 0 0 1px #dc2626 inset;
+  box-shadow: 0 0 0 1px var(--bb-danger, #b91c1c) inset;
 }
 
 .loclist-badge {
-  background-color: #fef3c7;
-  color: #92400e;
+  background-color: var(--bb-warning-soft, rgba(180, 83, 9, 0.12));
+  color: var(--bb-warning, #b45309);
 }
 
 .mode-badge {
   @apply inline-flex items-center rounded px-1 text-[0.6rem] font-semibold;
-  background-color: #e0f2fe;
-  color: #0369a1;
+  background-color: var(--bb-info-soft, rgba(29, 78, 216, 0.1));
+  color: var(--bb-info, #1d4ed8);
   white-space: nowrap;
 }
 
 .var-group-row {
-  @apply flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-2 text-xs font-semibold text-gray-700;
+  @apply flex items-center gap-2 border-b px-2 text-xs font-semibold;
   height: 1.5rem;
+  background: var(--bb-surface-inset, #eef0f4);
+  border-color: var(--bb-border, #dde1e8);
+  color: var(--bb-text-secondary, #3d4552);
 }
 
 .var-check {
@@ -2774,17 +3586,27 @@ onBeforeUnmount(() => {
 
 .var-type,
 .var-src {
-  @apply min-w-0 overflow-hidden text-gray-600;
+  @apply min-w-0 overflow-hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--bb-text-muted, #69727f);
 }
 
 .var-addr {
-  @apply text-gray-700;
+  color: var(--bb-text-secondary, #3d4552);
+}
+
+.var-size {
+  color: inherit;
 }
 
 .tree-arrow {
-  @apply flex h-4 w-4 shrink-0 items-center justify-center text-xs text-gray-500;
+  @apply flex h-4 w-4 shrink-0 items-center justify-center text-xs;
+  color: var(--bb-text-muted, #69727f);
+}
+
+.tree-arrow:hover {
+  color: var(--bb-text, #151a21);
 }
 
 .tree-arrow-spacer {
@@ -2798,11 +3620,12 @@ onBeforeUnmount(() => {
 
 .selected-row {
   display: grid;
-  grid-template-columns: 0.75rem minmax(0, 1.5fr) minmax(0, 1fr) 6.5rem 5.5rem 1.5rem;
+  grid-template-columns: 1.5rem 0.75rem minmax(0, 1.5fr) minmax(0, 1fr) 6.5rem 5.5rem 1.5rem;
   align-items: center;
   gap: 0.375rem;
   font-size: 0.75rem;
   padding: 0.125rem 0;
+  color: var(--bb-text, #151a21);
 }
 
 .series-dot {
@@ -2813,21 +3636,58 @@ onBeforeUnmount(() => {
   @apply min-w-64 flex-1;
 }
 
+/* 图表 ------------------------------------------------------------------- */
 .chart-wrap {
   position: relative;
-  @apply mt-2 h-80 w-full overflow-hidden rounded border border-gray-200;
+  @apply mt-2 h-80 w-full overflow-hidden rounded border;
+  border-color: var(--bb-border, #dde1e8);
+  background: var(--bb-chart-bg, #ffffff);
 }
 
 .chart-wrap canvas {
   @apply block h-full w-full;
 }
 
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.render-bar {
+  color: var(--bb-text-muted, #69727f);
+}
+
+.render-warning {
+  color: var(--bb-warning, #b45309);
+}
+
+.show-more-row {
+  @apply flex items-center justify-center gap-2 border-t py-1;
+  border-color: var(--bb-border, #dde1e8);
+}
+
+.legend-more {
+  @apply rounded border border-dashed px-2 py-1 text-xs;
+  border-color: var(--bb-border-strong, #c3c9d3);
+  color: var(--bb-text-secondary, #3d4552);
+}
+
+.legend-more:hover {
+  background-color: var(--bb-nav-link-hover-bg, rgba(16, 24, 40, 0.05));
+}
+
 .chart-empty {
-  @apply pointer-events-none absolute inset-0 flex items-center justify-center text-gray-400;
+  @apply pointer-events-none absolute inset-0 flex items-center justify-center;
+  color: var(--bb-text-muted, #69727f);
 }
 
 .chart-tooltip {
-  @apply pointer-events-none absolute max-w-72 rounded border border-gray-200 bg-white px-2 py-1 text-xs shadow;
+  @apply pointer-events-none absolute max-w-72 rounded border px-2 py-1 text-xs;
+  background: var(--bb-surface-raised, #ffffff);
+  border-color: var(--bb-border, #dde1e8);
+  color: var(--bb-text, #151a21);
+  box-shadow: var(--bb-shadow-md, 0 10px 28px rgba(16, 24, 40, 0.1));
 }
 
 .legend {
@@ -2835,11 +3695,13 @@ onBeforeUnmount(() => {
 }
 
 .legend-item {
-  @apply flex max-w-96 items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs;
+  @apply flex max-w-96 items-center gap-1 rounded border px-2 py-1 text-xs;
+  border-color: var(--bb-border, #dde1e8);
+  color: var(--bb-text-secondary, #3d4552);
 }
 
 .legend-item:hover {
-  background-color: var(--el-color-primary-light-9);
+  background-color: var(--bb-nav-link-hover-bg, rgba(16, 24, 40, 0.05));
 }
 
 .legend-item.off {

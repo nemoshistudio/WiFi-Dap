@@ -22,3 +22,16 @@ export type TranslationKeys = NestedKeyOf<typeof zh>;
 export function translate(key: TranslationKeys, named?: Record<string, unknown>): string {
     return named ? i18n.global.t(key, named) : i18n.global.t(key);
 }
+
+/**
+ * 取**未插值**的原始文案（占位符保持 `{name}` 形式，随 locale 响应式更新）。
+ *
+ * 用于把文案交给不依赖 i18n 的组件、由其自行格式化占位符的场景：
+ * SourceBrowser labels 由页面注入，组件侧 `formatSourceBrowserLabel()` 负责
+ * `{name}/{count}/...` 替换。直接用 `translate()` 会被 vue-i18n 当作命名插值，
+ * 未传参时占位符被替换为空串。
+ */
+export function translateRaw(key: TranslationKeys): string {
+    const message = i18n.global.tm(key) as unknown;
+    return typeof message === 'string' ? message : key;
+}

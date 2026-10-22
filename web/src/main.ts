@@ -7,6 +7,11 @@ import '@/assets/base-globals.css'
 // Full Element Plus stylesheet (kept as-is; the on-demand per-component variant
 // was evaluated but is not adopted).
 import 'element-plus/dist/index.css';
+// Element Plus dark theme variables (html.dark). Kept before design-tokens.css
+// so the token file can override the shell-relevant values.
+import 'element-plus/theme-chalk/dark/css-vars.css';
+// WiFi Dap design tokens + app shell base styles. MUST stay last.
+import '@/assets/design-tokens.css';
 
 // Vuetify runtime is kept only because TextDataViewer's <v-virtual-scroll>
 // (text-data-viewer page) relies on Vuetify's defaults context. The global
@@ -46,6 +51,27 @@ window.__BIRDIEBOT_WEB__ = Object.freeze({
 if (import.meta.env.VITE_APP_MODE === 'dev') {
   console.info('[WiFi Dap]', window.__BIRDIEBOT_WEB__)
 }
+
+/**
+ * Theme bootstrap (dark-first). The static `class="dark"` on <html> covers the
+ * very first paint; this applies the user's persisted choice before mount so
+ * the light theme does not flash dark. Keep the storage key in sync with
+ * src/views/navigation/NavBar.vue (the toggle lives there).
+ */
+const THEME_STORAGE_KEY = 'birdiebot.theme'
+const theme: 'dark' | 'light' = (() => {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'
+  } catch {
+    // localStorage 不可用（隐私模式）时使用默认深色
+    return 'dark'
+  }
+})()
+
+document.documentElement.classList.toggle('dark', theme === 'dark')
+document.documentElement.dataset.theme = theme
+document.querySelector('meta[name="theme-color"]')
+  ?.setAttribute('content', theme === 'dark' ? '#0a0b0d' : '#f4f5f7')
 
 const app = createApp(App)
 

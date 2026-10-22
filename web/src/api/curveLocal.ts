@@ -261,6 +261,31 @@ function seriesSize(item: CurveLocalSeriesSpec): number {
     return Number.isInteger(item.size) ? Math.max(1, Math.min(8, item.size)) : 1
 }
 
+/**
+ * 把 AddressExpr 编码为固件 v3 compact 字符串（固定宽度十六进制前缀）：
+ *   A<addr8> R<reg2><off8> C<off8> +<off8><inner> D<off8><inner>
+ *
+ * 它替代嵌套 JSON expr，把 40 路深指针请求从 ~7 KiB/数百个 cJSON 节点
+ * 降到 ~1–2 KiB/几十个节点，避免 ESP32 堆碎片导致 start 解析失败。
+ */
+export function encodeAddressExprCompact(expr: AddressExpr): string {
+    const off = (value: number) => (value >>> 0).toString(16).padStart(8, '0')
+    switch (expr.kind) {
+        case 'addr':
+            return 'A' + (expr.address >>> 0).toString(16).padStart(8, '0')
+        case 'reg':
+            return 'R' + (expr.reg & 0xff).toString(16).padStart(2, '0') + off(expr.offset)
+        case 'cfa':
+            return 'C' + off(expr.offset)
+        case 'add':
+            return '+' + off(expr.offset) + encodeAddressExprCompact(expr.inner)
+        case 'deref':
+            return 'D' + off(expr.offset) + encodeAddressExprCompact(expr.inner)
+        default:
+            throw new CurveLocalError('unsupported address expression kind')
+    }
+}
+
 /** 本地校验 series 的 expr/variants 结构（loclist 多段 variants 需 1..16 且 PC 区间有效）。 */
 function validateSeriesLocation(series: CurveLocalSeriesSpec, label: string): void {
     const variants = series.variants ?? []
@@ -425,10 +450,11 @@ function serializeSeriesSpec(item: CurveLocalSeriesSpec): Record<string, unknown
         spec.variants = variants.map((variant) => ({
             pc_low: variant.pcLow >>> 0,
             pc_high: variant.pcHigh >>> 0,
-            expr: variant.expr,
+            expr_s: encodeAddressExprCompact(variant.expr),
         }))
     } else {
-        spec.expr = item.expr
+        if (!item.expr) throw new CurveLocalError('expr is required when variants are absent')
+        spec.expr_s = encodeAddressExprCompact(item.expr)
         if (item.pcLow !== undefined && item.pcHigh !== undefined) {
             spec.pc_low = item.pcLow >>> 0
             spec.pc_high = item.pcHigh >>> 0

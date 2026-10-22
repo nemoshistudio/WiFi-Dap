@@ -295,12 +295,12 @@ static void test_eval(void)
 
 static void test_ring_capacity(void)
 {
-    /* capacity = clamp(32 KiB / (12 + frame_bytes), 128, 512) */
-    CHECK(curve_ring_capacity_for(16U) == 512U);
-    CHECK(curve_ring_capacity_for(28U) == 512U); /* 32768 / 43 = 762 -> 512 */
-    CHECK(curve_ring_capacity_for(64U) == 414U);  /* 32768 / 79 */
-    CHECK(curve_ring_capacity_for(128U) == 229U); /* 32768 / 143 */
-    CHECK(curve_ring_capacity_for(256U) == 128U); /* 122 -> clamp to 128 */
+    /* capacity = clamp(8 KiB / (15 + frame_bytes), 128, 512) */
+    CHECK(curve_ring_capacity_for(16U) == 264U);  /* 8192 / 31 */
+    CHECK(curve_ring_capacity_for(28U) == 190U);  /* 8192 / 43 */
+    CHECK(curve_ring_capacity_for(64U) == 128U);  /* 107 -> clamp to 128 */
+    CHECK(curve_ring_capacity_for(128U) == 128U); /* 58 -> clamp to 128 */
+    CHECK(curve_ring_capacity_for(256U) == 128U); /* 30 -> clamp to 128 */
     CHECK(curve_ring_capacity_for(0U) == 0U);
     CHECK(curve_ring_capacity_for(CURVE_MAX_SAMPLE_BYTES + 1U) == 0U);
 }
@@ -750,7 +750,7 @@ static void test_pc_scope_parse(void)
         CHECK(cfg.sample_bytes == 64U);
         CHECK(cfg.pc_gate_count == 32U);
         CHECK(cfg.pool_used == 32U);
-        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 414U);
+        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 128U);
         (void)p;
     }
 }

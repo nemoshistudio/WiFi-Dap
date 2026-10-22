@@ -1,0 +1,427 @@
+/* ==========================================================================
+ * WiFi Dap - global design tokens & base shell styles
+ * --------------------------------------------------------------------------
+ * Single source of truth for the Web UI visual language:
+ * a dark-first "debug workbench" (near-black chrome, white brand logo, clear
+ * status colors) with a fully supported light theme.
+ *
+ * Import order (web/src/main.ts): this file MUST stay last so that its
+ * Element Plus variable bridge wins over element-plus/index.css and
+ * element-plus/theme-chalk/dark/css-vars.css.
+ *
+ * Theme switch contract:
+ *   <html class="dark" data-theme="dark">   -> dark  (default, dark-first)
+ *   <html data-theme="light">               -> light
+ * The class is set statically in index.html for a dark first paint and
+ * re-applied from localStorage ("birdiebot.theme") in main.ts / NavBar.vue.
+ *
+ * Consuming pages (incl. DebugCurve.vue, owned by another workstream) should
+ * read the --bb-* variables below instead of hard-coded colors. The
+ * "legacy Tailwind color compatibility" section at the bottom is a
+ * transitional shim for pages that still hard-code light-only utilities; it
+ * can be deleted page-by-page as they migrate to tokens.
+ * ========================================================================== */
+
+/* --------------------------------------------------------------------------
+ * 1. Tokens - dark (default)
+ * ------------------------------------------------------------------------ */
+:root {
+  color-scheme: dark;
+
+  /* Typography */
+  --bb-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --bb-font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo,
+    Consolas, "Liberation Mono", monospace;
+  --bb-font-size-xs: 11px;
+  --bb-font-size-sm: 12px;
+  --bb-font-size-md: 13px;
+  --bb-font-size-lg: 15px;
+  --bb-font-size-xl: 19px;
+  --bb-line-height: 1.5;
+
+  /* Spacing scale (4px base) */
+  --bb-space-1: 4px;
+  --bb-space-2: 8px;
+  --bb-space-3: 12px;
+  --bb-space-4: 16px;
+  --bb-space-5: 24px;
+  --bb-space-6: 32px;
+  --bb-space-7: 48px;
+  --bb-space-8: 64px;
+
+  /* Radii */
+  --bb-radius-xs: 4px;
+  --bb-radius-sm: 6px;
+  --bb-radius-md: 10px;
+  --bb-radius-lg: 14px;
+  --bb-radius-pill: 999px;
+
+  /* Elevation */
+  --bb-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
+  --bb-shadow-md: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --bb-shadow-lg: 0 18px 52px rgba(0, 0, 0, 0.6);
+
+  /* Motion (short, functional; no animation library) */
+  --bb-duration-fast: 120ms;
+  --bb-duration-base: 180ms;
+  --bb-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+
+  /* Layout */
+  --bb-header-height: 56px;
+  --bb-z-header: 100;
+
+  /* Surfaces */
+  --bb-bg: #0a0b0d;
+  --bb-bg-elevated: #0e1014;
+  --bb-surface: #14171c;
+  --bb-surface-raised: #1a1f26;
+  --bb-surface-inset: #0d0f13;
+  --bb-border-subtle: #1f242c;
+  --bb-border: #29303a;
+  --bb-border-strong: #3a4350;
+
+  /* Text */
+  --bb-text: #e8ebf0;
+  --bb-text-secondary: #b3bac6;
+  --bb-text-muted: #7d8795;
+  --bb-text-faint: #5c6675;
+  --bb-text-inverse: #0a0b0d;
+
+  /* Accent / status */
+  --bb-accent: #4da3ff;
+  --bb-accent-strong: #7cbcff;
+  --bb-accent-contrast: #071018;
+  --bb-accent-soft: rgba(77, 163, 255, 0.14);
+  --bb-success: #3ddc84;
+  --bb-success-soft: rgba(61, 220, 132, 0.14);
+  --bb-warning: #fbbf24;
+  --bb-warning-soft: rgba(251, 191, 36, 0.14);
+  --bb-danger: #ff6b6b;
+  --bb-danger-soft: rgba(255, 107, 107, 0.14);
+  --bb-info: #60a5fa;
+  --bb-info-soft: rgba(96, 165, 250, 0.14);
+  /* stronger accent tint (selected rows / source lines) */
+  --bb-accent-soft-strong: rgba(77, 163, 255, 0.24);
+
+  /* Syntax highlight (source browser / code views) */
+  --bb-syntax-keyword: #c4b5fd;
+  --bb-syntax-string: #6ee7b7;
+  --bb-syntax-number: #fcd34d;
+  --bb-syntax-comment: #9aa4b2;
+  --bb-syntax-preprocessor: #f9a8d4;
+
+  /* Chrome (header / nav) */
+  --bb-header-bg: rgba(10, 11, 13, 0.82);
+  --bb-header-border: var(--bb-border);
+  --bb-header-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
+  --bb-nav-link: var(--bb-text-secondary);
+  --bb-nav-link-hover-bg: rgba(255, 255, 255, 0.06);
+  --bb-nav-link-active-bg: var(--bb-accent-soft);
+  --bb-nav-link-active: var(--bb-accent-strong);
+
+  /* Page background artwork (cheap static gradients, no images) */
+  --bb-bg-image: radial-gradient(
+      1100px 420px at 50% -160px,
+      rgba(77, 163, 255, 0.1),
+      transparent 70%
+    ),
+    linear-gradient(180deg, #0c0e12 0%, var(--bb-bg) 320px);
+
+  /* Chart tokens (consumed by the curve page once it migrates) */
+  --bb-chart-bg: #0f1216;
+  --bb-chart-grid: rgba(255, 255, 255, 0.07);
+  --bb-chart-text: var(--bb-text-muted);
+  --bb-chart-axis: var(--bb-border-strong);
+
+  /* Page/panel aliases (stable names for page-level integration) */
+  --bb-page-bg: var(--bb-bg);
+  --bb-panel-bg: var(--bb-surface);
+  --bb-panel-border: var(--bb-border);
+  --bb-panel-radius: var(--bb-radius-md);
+  --bb-text-primary: var(--bb-text);
+
+  /* Focus ring */
+  --bb-focus-ring: 0 0 0 2px var(--bb-bg), 0 0 0 4px var(--bb-accent);
+}
+
+/* --------------------------------------------------------------------------
+ * 2. Tokens - light (compatibility theme; same names, same semantics)
+ * ------------------------------------------------------------------------ */
+html:not(.dark) {
+  color-scheme: light;
+
+  --bb-bg: #f4f5f7;
+  --bb-bg-elevated: #ffffff;
+  --bb-surface: #ffffff;
+  --bb-surface-raised: #ffffff;
+  --bb-surface-inset: #eef0f4;
+  --bb-border-subtle: #e9ecf1;
+  --bb-border: #dde1e8;
+  --bb-border-strong: #c3c9d3;
+
+  --bb-text: #151a21;
+  --bb-text-secondary: #3d4552;
+  --bb-text-muted: #69727f;
+  --bb-text-faint: #98a1ad;
+  --bb-text-inverse: #ffffff;
+
+  --bb-accent: #1f6feb;
+  --bb-accent-strong: #1a5fd0;
+  --bb-accent-contrast: #ffffff;
+  --bb-accent-soft: rgba(31, 111, 235, 0.1);
+  --bb-success: #15803d;
+  --bb-success-soft: rgba(21, 128, 61, 0.1);
+  --bb-warning: #b45309;
+  --bb-warning-soft: rgba(180, 83, 9, 0.12);
+  --bb-danger: #b91c1c;
+  --bb-danger-soft: rgba(185, 28, 28, 0.1);
+  --bb-info: #1d4ed8;
+  --bb-info-soft: rgba(29, 78, 216, 0.1);
+  --bb-accent-soft-strong: rgba(31, 111, 235, 0.18);
+
+  --bb-syntax-keyword: #7c3aed;
+  --bb-syntax-string: #15803d;
+  --bb-syntax-number: #b45309;
+  --bb-syntax-comment: #6b7280;
+  --bb-syntax-preprocessor: #be185d;
+
+  --bb-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.08);
+  --bb-shadow-md: 0 10px 28px rgba(16, 24, 40, 0.1);
+  --bb-shadow-lg: 0 18px 52px rgba(16, 24, 40, 0.16);
+
+  --bb-header-bg: rgba(255, 255, 255, 0.86);
+  --bb-header-border: var(--bb-border);
+  --bb-header-shadow: 0 1px 0 rgba(16, 24, 40, 0.04);
+  --bb-nav-link: var(--bb-text-secondary);
+  --bb-nav-link-hover-bg: rgba(16, 24, 40, 0.05);
+  --bb-nav-link-active-bg: var(--bb-accent-soft);
+  --bb-nav-link-active: var(--bb-accent);
+
+  --bb-bg-image: radial-gradient(
+      1100px 420px at 50% -160px,
+      rgba(31, 111, 235, 0.08),
+      transparent 70%
+    ),
+    linear-gradient(180deg, #f8f9fb 0%, var(--bb-bg) 320px);
+
+  --bb-chart-bg: #ffffff;
+  --bb-chart-grid: rgba(16, 24, 40, 0.08);
+  --bb-chart-text: var(--bb-text-muted);
+  --bb-chart-axis: var(--bb-border-strong);
+
+  --bb-focus-ring: 0 0 0 2px var(--bb-bg), 0 0 0 4px var(--bb-accent);
+}
+
+/* --------------------------------------------------------------------------
+ * 3. Element Plus variable bridge (dark default; light inherits EP defaults
+ *    plus a light palette alignment so EP chrome matches the shell).
+ * ------------------------------------------------------------------------ */
+html.dark {
+  --el-color-primary: var(--bb-accent);
+  --el-color-primary-light-3: #6db4ff;
+  --el-color-primary-light-5: #8cc4ff;
+  --el-color-primary-light-7: #2c4a66;
+  --el-color-primary-light-8: #20364b;
+  --el-color-primary-light-9: #182733;
+  --el-color-primary-dark-2: var(--bb-accent-strong);
+
+  --el-bg-color: var(--bb-surface);
+  --el-bg-color-page: var(--bb-bg);
+  --el-bg-color-overlay: var(--bb-surface-raised);
+  --el-text-color-primary: var(--bb-text);
+  --el-text-color-regular: var(--bb-text-secondary);
+  --el-text-color-secondary: var(--bb-text-muted);
+  --el-text-color-placeholder: var(--bb-text-faint);
+  --el-text-color-disabled: var(--bb-text-faint);
+  --el-border-color: var(--bb-border);
+  --el-border-color-light: var(--bb-border);
+  --el-border-color-lighter: var(--bb-border-subtle);
+  --el-border-color-extra-light: var(--bb-border-subtle);
+  --el-border-color-dark: var(--bb-border-strong);
+  --el-border-color-darker: var(--bb-border-strong);
+  --el-fill-color: var(--bb-surface-raised);
+  --el-fill-color-light: var(--bb-surface-raised);
+  --el-fill-color-lighter: var(--bb-surface);
+  --el-fill-color-extra-light: var(--bb-surface);
+  --el-fill-color-dark: var(--bb-border-subtle);
+  --el-fill-color-darker: var(--bb-border);
+  --el-fill-color-blank: var(--bb-surface);
+  --el-disabled-bg-color: var(--bb-surface-inset);
+  --el-disabled-border-color: var(--bb-border);
+  --el-mask-color: rgba(4, 5, 7, 0.76);
+  --el-mask-color-extra-light: rgba(4, 5, 7, 0.22);
+  --el-box-shadow: var(--bb-shadow-md);
+  --el-box-shadow-light: var(--bb-shadow-sm);
+  --el-box-shadow-lighter: var(--bb-shadow-sm);
+  --el-box-shadow-dark: var(--bb-shadow-lg);
+
+  --el-border-radius-base: var(--bb-radius-sm);
+  --el-border-radius-small: var(--bb-radius-xs);
+  --el-transition-duration: var(--bb-duration-base);
+  --el-transition-duration-fast: var(--bb-duration-fast);
+  --el-transition-function-ease-in-out-bezier: var(--bb-ease);
+  --el-font-family: var(--bb-font-sans);
+}
+
+html:not(.dark) {
+  --el-color-primary: var(--bb-accent);
+  --el-color-primary-light-3: #5a95f2;
+  --el-color-primary-light-5: #8ab4f6;
+  --el-color-primary-light-7: #b9d4fa;
+  --el-color-primary-light-8: #d5e5fc;
+  --el-color-primary-light-9: #edf4fe;
+  --el-color-primary-dark-2: var(--bb-accent-strong);
+
+  --el-bg-color: var(--bb-surface);
+  --el-bg-color-page: var(--bb-bg);
+  --el-bg-color-overlay: var(--bb-surface-raised);
+  --el-text-color-primary: var(--bb-text);
+  --el-text-color-regular: var(--bb-text-secondary);
+  --el-text-color-secondary: var(--bb-text-muted);
+  --el-border-color: var(--bb-border);
+  --el-border-color-light: var(--bb-border-subtle);
+  --el-border-color-lighter: var(--bb-border-subtle);
+  --el-fill-color-blank: var(--bb-surface);
+  --el-font-family: var(--bb-font-sans);
+  --el-border-radius-base: var(--bb-radius-sm);
+  --el-border-radius-small: var(--bb-radius-xs);
+}
+
+/* Element Plus dark stylesheet keeps the page/panel/table surfaces a touch
+ * lighter than our tokens; align the few high-impact ones with the shell. */
+html.dark .el-card {
+  --el-card-bg-color: var(--bb-surface);
+}
+html.dark .el-alert {
+  color: var(--bb-text);
+}
+html.dark .el-descriptions {
+  --el-descriptions-table-border: 1px solid var(--bb-border);
+}
+
+/* --------------------------------------------------------------------------
+ * 4. Base document / app shell
+ * ------------------------------------------------------------------------ */
+html {
+  background-color: var(--bb-bg);
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--bb-font-sans);
+  font-size: 1rem;
+  line-height: var(--bb-line-height);
+  color: var(--bb-text);
+  background-color: var(--bb-bg);
+  background-image: var(--bb-bg-image);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  transition: background-color var(--bb-duration-base) var(--bb-ease),
+    color var(--bb-duration-base) var(--bb-ease);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* App shell (App.vue) */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--bb-z-header);
+  flex: 0 0 auto;
+  height: var(--bb-header-height);
+  background: var(--bb-header-bg);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15);
+  backdrop-filter: blur(12px) saturate(1.15);
+  border-bottom: 1px solid var(--bb-header-border);
+  box-shadow: var(--bb-header-shadow);
+}
+
+.app-banner {
+  flex: 0 0 auto;
+  margin: var(--bb-space-2) var(--bb-space-3) 0;
+}
+
+.app-main {
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Keep code/debug surfaces monospace and selection readable in both themes. */
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--bb-font-mono);
+}
+
+::selection {
+  background: var(--bb-accent-soft);
+  color: var(--bb-text);
+}
+
+/* Scrollbars (progressive enhancement; layout unaffected) */
+@supports (scrollbar-color: auto) {
+  html {
+    scrollbar-color: var(--bb-border-strong) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * 5. Transitional dark-mode compatibility for legacy Tailwind color
+ *    utilities (pages not yet migrated to --bb-* tokens).
+ *
+ *    Only neutral grays that read as "light theme chrome" are remapped, and
+ *    only while the dark theme is active; brand/status colors are untouched.
+ *    Scoped CSS @apply output in page components is NOT affected by this
+ *    section (those compile to component-scoped selectors).
+ * ------------------------------------------------------------------------ */
+html.dark .bg-white {
+  background-color: var(--bb-surface) !important;
+}
+html.dark .bg-gray-50 {
+  background-color: var(--bb-surface) !important;
+}
+html.dark .bg-gray-100 {
+  background-color: var(--bb-surface-inset) !important;
+}
+html.dark .bg-gray-200 {
+  background-color: var(--bb-surface-raised) !important;
+}
+html.dark .text-gray-300,
+html.dark .text-gray-400 {
+  color: var(--bb-text-faint) !important;
+}
+html.dark .text-gray-500 {
+  color: var(--bb-text-muted) !important;
+}
+html.dark .text-gray-600,
+html.dark .text-gray-700 {
+  color: var(--bb-text-secondary) !important;
+}
+html.dark .text-gray-800,
+html.dark .text-gray-900 {
+  color: var(--bb-text) !important;
+}
+html.dark .border-gray-200 {
+  border-color: var(--bb-border) !important;
+}
+html.dark .border-gray-300 {
+  border-color: var(--bb-border-strong) !important;
+}

@@ -126,25 +126,26 @@ const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; des
 </script>
 
 <template>
-  <div class="flex flex-col wt-h-100">
-    <header>
+  <!--
+    App shell: dark-first debug workbench chrome.
+    Layout/colors live in assets/design-tokens.css (`.app-shell`, `.app-header`,
+    `.app-banner`, `.app-main`) so pages can reuse the same tokens.
+  -->
+  <div class="app-shell">
+    <header class="app-header">
       <nav-bar />
     </header>
     <el-alert
         v-if="banner"
-        class="mx-2 mt-2"
+        class="app-banner"
         :type="banner.type"
         :title="banner.title"
         :description="banner.description"
         :closable="false"
         show-icon
     />
-    <RouterView />
+    <main id="main-content" class="app-main">
+      <RouterView />
+    </main>
   </div>
 </template>
-
-<style>
-.wt-h-100 {
-  height: 100vh;
-}
-</style>

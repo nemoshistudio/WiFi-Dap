@@ -67,7 +67,7 @@ extern "C" {
  * Allocated lazily on the first start and reused across sessions. */
 #define CURVE_RING_FRAMES_MIN       128U
 #define CURVE_RING_FRAMES_MAX       512U
-#define CURVE_RING_BYTES_BUDGET     (32U * 1024U)
+#define CURVE_RING_BYTES_BUDGET     (8U * 1024U)
 /* Protocol v2 ring/CVF2 per-frame metadata: seq (u32) + timestamp_us (u64) +
  * group (u8) + payload_len (u16) = 15 B.  The ring slot also reserves the
  * maximum group payload (frame_bytes) after that. */
@@ -413,6 +413,12 @@ esp_err_t curve_engine_init(void);
  *        by the HTTP layer and only referenced by the engine while running).
  */
 bool curve_engine_is_idle(void);
+
+/** Release the retained frame ring while idle.  The ring can be tens of KiB
+ *  after a large group session; freeing it before parsing the next start
+ *  request preserves heap headroom for the cJSON parse (which otherwise can
+ *  fail with "invalid JSON object" while the browser keeps a WebSocket open). */
+void curve_engine_release_ring(void);
 
 esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_len);
 

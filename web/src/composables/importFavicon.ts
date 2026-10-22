@@ -1,20 +1,18 @@
-import {h, render} from "vue";
-import MYSVG from "@/assets/icon/favicon.svg";
+import { FAVICON_32 } from "@/assets/brand/brand-assets";
 
+/**
+ * Apply the WiFi Dap brand favicon at runtime.
+ *
+ * The favicon is already inlined in web/index.html for the first paint (the
+ * firmware serves a single self-contained index.html, so it cannot be an
+ * external file). This keeps the historical `changeFavicon()` hook working and
+ * gives future dynamic favicons (e.g. status-colored) one place to change it.
+ */
 export function changeFavicon() {
-    const SVGComponent = MYSVG;
-    const container = document.createElement('div');
-    render(h(SVGComponent), container);
-
-    const svgElement = container.innerHTML;
-    const svgEncoded = encodeURIComponent(svgElement)
-        .replace(/'/g, '%27')
-        .replace(/"/g, '%22');
-
     const link = document.getElementById('favicon');
-    if (link instanceof HTMLLinkElement) {
-        link.href = `data:image/svg+xml,${svgEncoded}`;
+    if (!(link instanceof HTMLLinkElement)) {
+        return;
     }
+    link.type = 'image/png';
+    link.href = FAVICON_32;
 }
-
-
