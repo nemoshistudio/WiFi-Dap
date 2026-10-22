@@ -350,3 +350,10 @@ frames[count]:
 - 真机：40+1 路/2 组 20 ms 启动成功，总 50 Hz、Groups 2、Group rate 25 Hz；
   单组固定变量仍 50 Hz Halt OFF。
 
+### 9.7 ring 8 KiB 硬预算 / group weight
+
+- `capacity = clamp(8192 / (15 + frame_bytes), 16, 512)`，ring bytes 恒 ≤8 KiB；
+  16B→264 帧、64B→103、128B→57、256B→30 帧；malloc 仍失败时逐次减半到 8 帧。
+- groups[] 可带 `weight` 1..8（默认1），采样调度表 sum(weight)≤64；全 1 等价旧轮转。
+- status.ring_frames 为实值；host test 3343 checks。
+
