@@ -24,6 +24,7 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
     }
     return snprintf(buf, buf_len,
                     "{\"ok\":true,\"running\":%s,\"trigger\":\"%s\","
+                    "\"group_count\":%u,\"current_group\":%u,"
                     "\"breakpoint_address\":%u,\"hits\":%u,\"sampled\":%u,"
                     "\"throttled\":%u,\"interval_us\":%u,\"frames\":%u,"
                     "\"overwritten\":%u,\"invalid\":%u,\"out_of_scope\":%u,"
@@ -34,6 +35,8 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     "\"last_err\":\"%s\",\"message\":\"%s\"}",
                     status->running ? "true" : "false",
                     curve_trigger_name(status->trigger),
+                    (unsigned)status->group_count,
+                    (unsigned)status->current_group,
                     (unsigned)status->breakpoint_address, (unsigned)status->hits,
                     (unsigned)status->sampled, (unsigned)status->throttled,
                     (unsigned)status->interval_us, (unsigned)status->frames,

@@ -23,18 +23,36 @@ extern "C" {
 
 #define CURVE_TAG "curve_sampler"
 
-/* ---- contract limits (docs/curve-local-sampler.md §1.1) ------------------ */
-/* Phase 2.5: up to 32 series (sum(size)<=256).  Config is static (not on a
- * task stack); the HTTP parser, CVF1 frame header (u16 frame_bytes) and the
- * frame ring all handle this size. */
-#define CURVE_MAX_SERIES            32U
+/* ---- contract limits (docs/curve-local-sampler.md §1.1 + §9 protocol v2) - */
+/* Multi-group sampling (protocol v2): up to 8 groups, 32 series per group and
+ * 256 series total, each group payload <= 256 B.  Everything is static memory
+ * (not on a task stack): the HTTP parser owns one static curve_config_t and the
+ * engine only keeps a pointer to it while a session runs.
+ *
+ * Actual static-memory caps (reported to the Lead, not all in the Web API):
+ *   CURVE_MAX_GROUPS              8
+ *   CURVE_MAX_SERIES_PER_GROUP   32 (Web API limit)
+ *   CURVE_MAX_SERIES            256 (total across groups)
+ *   CURVE_MAX_VARIANTS_PER_SERIES 16
+ *   CURVE_MAX_VARIANTS          256 (total loclist variant pool)
+ *   CURVE_EXPR_POOL_MAX         768 expression nodes (12 B each, ~9 KiB);
+ *                                   every expr chain node (single expr or
+ *                                   variant expr, depth <= 8) comes from here.
+ * A request that exceeds the variant/expr pool is rejected with a clear parse
+ * error (groups/series limits themselves follow the contract exactly). */
+#define CURVE_MAX_GROUPS            8U
+#define CURVE_MAX_SERIES_PER_GROUP  32U
+#define CURVE_MAX_SERIES            256U
+#define CURVE_MAX_VARIANTS_PER_SERIES 16U
+#define CURVE_MAX_VARIANTS          256U
+#define CURVE_EXPR_POOL_MAX         768U
 #define CURVE_MAX_EXPR_DEPTH        8U
 #define CURVE_MAX_SAMPLE_BYTES      256U
 #define CURVE_MIN_INTERVAL_US       1000U
 #define CURVE_MAX_INTERVAL_US       200000U
 #define CURVE_SERIES_SIZE_MIN       1U
 #define CURVE_SERIES_SIZE_MAX       8U
-#define CURVE_JSON_BODY_MAX         4096U
+#define CURVE_JSON_BODY_MAX         16384U
 #define CURVE_MAX_FRAMES_PER_REQ    64U
 
 /* Frame ring.  The contract recommends >= 256 frames; the sampler uses up to
@@ -50,9 +68,12 @@ extern "C" {
 #define CURVE_RING_FRAMES_MIN       128U
 #define CURVE_RING_FRAMES_MAX       512U
 #define CURVE_RING_BYTES_BUDGET     (32U * 1024U)
-/* Per-frame ring metadata: seq (u32) + timestamp_us (u64). */
-#define CURVE_FRAME_META_BYTES      12U
+/* Protocol v2 ring/CVF2 per-frame metadata: seq (u32) + timestamp_us (u64) +
+ * group (u8) + payload_len (u16) = 15 B.  The ring slot also reserves the
+ * maximum group payload (frame_bytes) after that. */
+#define CURVE_FRAME_META_BYTES      15U
 #define CURVE_FRAME_HEADER_BYTES    16U
+#define CURVE_CVF2_VERSION          2U
 
 /* ---- Phase 2: breakpoint trigger (FPB) ------------------------------------
  * trigger=breakpoint installs one Cortex-M7 FPB code comparator on a target
@@ -98,6 +119,16 @@ const char *curve_trigger_name(uint8_t trigger);
  * convention used by the Web/DWARF side.
  */
 bool curve_pc_in_scope(uint32_t pc_low, uint32_t pc_high, uint32_t pc);
+
+/** Round-robin increment for the current sampling group. */
+static inline uint8_t curve_next_group(uint8_t current, uint8_t group_count)
+{
+    if (group_count == 0U) {
+        return 0U;
+    }
+    current++;
+    return (current >= group_count) ? 0U : current;
+}
 
 /* Phase 0 selftest: N halt -> regs -> mem -> resume iterations. */
 #define CURVE_SELFTEST_ITERATIONS   20U
@@ -165,36 +196,86 @@ typedef struct curve_expr {
     int32_t offset;            /* reg/cfa/add/deref: signed byte offset */
 } curve_expr_t;
 
+#define CURVE_SERIES_FLAG_PC_GATE  0x01U
+#define CURVE_SERIES_FLAG_VARIANTS 0x02U
+
+/** One loclist variant: PC range [pc_low, pc_high) selects `expr`. */
 typedef struct {
-    uint32_t id;      /* echoed back by callers; frames are ordered by index */
-    uint8_t size;     /* 1..8 bytes read from the evaluated address */
-    uint16_t expr;    /* index into curve_config_t.pool */
-    /* Phase 2.5 PC scope gate: enabled only when the request carried a valid
-     * Flash [pc_low, pc_high) range (see parser).  Both bounds are normalized
-     * (bit0 cleared) and pc_high is exclusive; the sampled series is zeroed
-     * + out_of_scope++ when the halted core's PC is outside. */
-    bool pc_gate;
-    uint32_t pc_low;
-    uint32_t pc_high;
+    uint32_t pc_low;   /* normalized (bit0 cleared) flash address */
+    uint32_t pc_high;  /* exclusive */
+    uint16_t expr;     /* index into curve_config_t.pool */
+    uint16_t reserved;
+} curve_variant_t;
+
+typedef struct {
+    uint32_t id;              /* echoed back by callers; frames ordered by index */
+    uint32_t pc_low;          /* single-style PC gate bounds (normalized) */
+    uint32_t pc_high;         /* valid when CURVE_SERIES_FLAG_PC_GATE is set */
+    uint16_t expr;            /* single expression index (CURVE_EXPR_NONE when
+                                 the series only has loclist variants) */
+    uint16_t variant_first;   /* first index into curve_config_t.variants */
+    uint8_t size;             /* 1..8 bytes read from the evaluated address */
+    uint8_t flags;            /* CURVE_SERIES_FLAG_* */
+    uint8_t variant_count;    /* 0 = single expr/pc-gate series, 1..16 otherwise */
+    uint8_t reserved;
 } curve_series_t;
 
-/** Immutable sampling configuration (parsed before the worker is started). */
+/** One sampling group: a contiguous slice of curve_config_t.series[]. */
+typedef struct {
+    uint16_t series_first;
+    uint16_t series_count;
+    uint16_t sample_bytes;    /* sum of this group's series sizes (<= 256) */
+    bool pc_needed;           /* any series needs r15 (pc gate or variants) */
+    uint8_t reg_count;        /* core registers needed by this group only */
+    uint8_t regs[CURVE_MAX_CORE_REGS];
+} curve_group_t;
+
+/** Immutable sampling configuration (parsed before the worker is started).
+ *
+ * Protocol v2: `groups` rotate round-robin, one group per tick.  Old clients
+ * that send a root `series` array are parsed as a single group.  The HTTP layer
+ * owns the only static instance and the engine keeps a const pointer to it for
+ * the duration of a session (the parser refuses to reuse it while running).
+ */
 typedef struct {
     uint8_t trigger;                /* curve_trigger_t */
-    uint32_t breakpoint_address;    /* CURVE_TRIGGER_BREAKPOINT: raw Thumb addr */
-    uint32_t interval_us;           /* periodic period / breakpoint throttle */
     bool halt;
-    uint8_t series_count;
-    uint16_t sample_bytes;          /* sum(series[].size) */
+    uint8_t group_count;            /* 1..CURVE_MAX_GROUPS */
+    uint16_t series_count;          /* total series across all groups (<=256) */
+    uint16_t sample_bytes;          /* max group payload (CVF2 frame_bytes) */
+    uint32_t interval_us;           /* periodic period / breakpoint throttle */
+    uint32_t breakpoint_address;    /* CURVE_TRIGGER_BREAKPOINT: raw Thumb addr */
     bool needs_regs;                /* any expr depends on a core register */
     uint8_t reg_count;              /* unique core registers to read per tick */
     uint8_t regs[CURVE_MAX_CORE_REGS];
-    uint8_t pc_gate_count;          /* series with an active PC scope gate */
+    uint16_t pc_gate_count;         /* series that need r15 (gate or variants) */
+    curve_group_t groups[CURVE_MAX_GROUPS];
     curve_series_t series[CURVE_MAX_SERIES];
-    /* One linear chain per series, depth <= 8 -> 32 * 8 nodes worst case. */
-    curve_expr_t pool[CURVE_MAX_SERIES * CURVE_MAX_EXPR_DEPTH];
+    curve_variant_t variants[CURVE_MAX_VARIANTS];
+    uint16_t variant_used;
+    curve_expr_t pool[CURVE_EXPR_POOL_MAX];
     uint16_t pool_used;
 } curve_config_t;
+
+/** True when sampling this series requires the tick's PC (single-style gate or
+ *  loclist variants). */
+static inline bool curve_series_needs_pc(const curve_series_t *series)
+{
+    return (series->flags & (CURVE_SERIES_FLAG_PC_GATE | CURVE_SERIES_FLAG_VARIANTS)) != 0U;
+}
+
+/**
+ * @brief Select the expression index to evaluate for a series at PC `pc`.
+ *
+ * - loclist variants: first variant whose [pc_low, pc_high) contains the PC;
+ * - single-style pc gate: the series expression when in scope;
+ * - plain series: its expression (PC ignored).
+ *
+ * @return pool index, or CURVE_EXPR_NONE when the current PC is out of scope
+ *         (caller zeroes the series bytes and increments out_of_scope).
+ */
+uint16_t curve_series_expr_for_pc(const curve_config_t *cfg,
+                                  const curve_series_t *series, uint32_t pc);
 
 /* ---- status / selftest snapshots ----------------------------------------- */
 typedef struct {
@@ -202,7 +283,9 @@ typedef struct {
     bool halt;
     uint32_t interval_us;
     uint16_t sample_bytes;
-    uint8_t series_count;
+    uint16_t series_count;
+    uint8_t group_count;
+    uint8_t current_group;
     uint32_t frames;             /* frames captured since start (contract) */
     uint32_t overwritten;        /* frames dropped before a client read them */
     uint32_t ring_capacity;      /* ring slots (256..512, see above) */
@@ -251,6 +334,21 @@ curve_eval_result_t curve_expr_eval(const curve_config_t *cfg, uint16_t expr_ind
                                     const uint32_t *reg_values,
                                     const bool *reg_valid,
                                     uint32_t *address);
+
+/* ---- CVF2 wire framing (curve_cvf2.c) ------------------------------------
+ * magic "CVF2", version 2, flags bit0=gap, count u16, first_seq u32,
+ * frame_bytes u16 (max group payload), reserved u16.
+ * Frame: seq u32, timestamp_us u64, group u8, payload_len u16, payload bytes. */
+#define CURVE_CVF2_FLAG_GAP 0x01U
+
+/** Write the 16-byte CVF2 batch header; returns 16. */
+size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
+                               uint16_t frame_bytes, bool gap);
+
+/** Write the 15-byte CVF2 frame metadata; returns 15. */
+size_t curve_cvf2_write_frame_meta(uint8_t *buf, uint32_t seq,
+                                   uint64_t timestamp_us, uint8_t group,
+                                   uint16_t payload_len);
 
 /* ---- frame ring bookkeeping (curve_ring.c) -------------------------------
  * Pure C, no RTOS/esp dependencies: the engine owns the payload arrays and
@@ -309,6 +407,13 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
 esp_err_t curve_engine_init(void);
 
 /** Start sampling.  Blocks until the DAP bring-up finished (or failed). */
+/**
+ * @brief True when the engine is idle and the HTTP layer may overwrite the
+ *        config buffer it passed to curve_engine_start() (that buffer is owned
+ *        by the HTTP layer and only referenced by the engine while running).
+ */
+bool curve_engine_is_idle(void);
+
 esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_len);
 
 /** Stop sampling: resumes the target, releases the DAP and waits for the
@@ -320,9 +425,10 @@ esp_err_t curve_engine_selftest(curve_selftest_t *out, char *err, size_t err_len
 
 void curve_engine_status(curve_status_t *out);
 
-/** Build a complete CVF1 response for GET /api/curve/frames.  Allocates the
- *  response buffer (caller frees) and returns *no_data=true when there is no
- *  frame newer than `since`. */
+/** Build a complete CVF2 response for GET /api/curve/frames (protocol v2:
+ *  group u8 + payload_len u16 per frame).  Allocates the response buffer
+ *  (caller frees) and returns *no_data=true when there is no frame newer than
+ *  `since`. */
 esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
                                     uint8_t **out_buf, size_t *out_len,
                                     bool *no_data);

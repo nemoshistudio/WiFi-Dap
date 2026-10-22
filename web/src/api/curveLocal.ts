@@ -1,8 +1,8 @@
 /**
- * 设备本地采样（ESP32 SWD 闭环）HTTP API 与 CVF1 帧解码。
+ * 设备本地采样（ESP32 SWD 闭环）HTTP API、CVF1/CVF2 帧解码与多组切分。
  *
- * 契约：docs/curve-local-sampler.md §1.1 / §2。
- * - POST /api/curve/start  {trigger,breakpoint_address,interval_us,halt,series}
+ * 契约：docs/curve-local-sampler.md §1.1 / §2 / §5 / §9（协议 v2）。
+ * - POST /api/curve/start  {trigger,breakpoint_address,interval_us,halt,series|groups}
  * - POST /api/curve/stop
  * - GET  /api/curve/status
  * - GET  /api/curve/frames?since=&max=  -> CVF1 二进制（204/空 = 无新帧）
@@ -20,7 +20,12 @@ export const CURVE_LOCAL_FRAMES_PATH = '/api/curve/frames'
 
 /** 固件契约限制（docs §1.1）。 */
 export const CURVE_LOCAL_MIN_SERIES = 1
+/** 单组系列上限（兼容旧接口名；v2 多组见 MAX_TOTAL_SERIES）。 */
 export const CURVE_LOCAL_MAX_SERIES = 32
+export const CURVE_LOCAL_MAX_GROUPS = 8
+export const CURVE_LOCAL_MAX_SERIES_PER_GROUP = 32
+export const CURVE_LOCAL_MAX_TOTAL_SERIES = CURVE_LOCAL_MAX_GROUPS * CURVE_LOCAL_MAX_SERIES_PER_GROUP
+export const CURVE_LOCAL_MAX_VARIANTS = 16
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
 export const CURVE_LOCAL_MIN_INTERVAL_US = 1000
@@ -36,12 +41,17 @@ export const CURVE_LOCAL_MAX_EXPR_DEPTH = 8
 export const CURVE_LOCAL_FRAMES_MAX = 64
 export const CURVE_LOCAL_FRAMES_DEFAULT = 32
 
-/** CVF1 头长度与帧头长度（little-endian）。 */
-const CVF1_HEADER_BYTES = 16
+/** CVF1/CVF2 头长度（little-endian，两类头布局相同）。 */
+const CURVE_FRAME_HEADER_BYTES = 16
+/** CVF1 单组帧头：seq u32 + timestamp u64。 */
 const CVF1_FRAME_HEADER_BYTES = 12
 const CVF1_MAGIC = 0x31465643 // 'CVF1'（字节 43 56 46 31）
 const CVF1_VERSION = 1
-const CVF1_FLAG_GAP = 0x01
+/** CVF2 多组帧头：seq u32 + timestamp u64 + group u8 + payload_len u16。 */
+const CVF2_FRAME_HEADER_BYTES = 15
+const CVF2_MAGIC = 0x32465643 // 'CVF2'（字节 43 56 46 32）
+const CVF2_VERSION = 2
+const CVF_FLAG_GAP = 0x01
 
 export class CurveLocalError extends Error {
     /** HTTP 状态码；0 = 网络/解析错误。 */
@@ -57,14 +67,30 @@ export class CurveLocalError extends Error {
     }
 }
 
+/** loclist 多段变体（协议 v2：固件按 PC 选择）。 */
+export interface CurveLocalLocationVariant {
+    pcLow: number
+    pcHigh: number
+    expr: AddressExpr
+}
+
 /** 下发给固件的曲线描述：id 对应 frames payload 内的顺序槽位。 */
 export interface CurveLocalSeriesSpec {
     id: number
     size: number
-    expr: AddressExpr
+    /** 单一位置表达式；有 variants 时可省略（v2 契约示例为 variants-only）。 */
+    expr?: AddressExpr
     /** DWARF subprogram PC 范围（可选；仅周期/断点模式都下发，用于固件 PC 门控）。 */
     pcLow?: number
     pcHigh?: number
+    /** loclist 多段变体（1..16；有 variants 时固件强制 halt 并按 PC 选择）。 */
+    variants?: readonly CurveLocalLocationVariant[]
+}
+
+/** 协议 v2 分组（每组 ≤32 路，总和 ≤256）。 */
+export interface CurveLocalGroupSpec {
+    id: number
+    series: readonly CurveLocalSeriesSpec[]
 }
 
 export interface StartLocalCurveOptions {
@@ -75,11 +101,16 @@ export interface StartLocalCurveOptions {
     breakpointAddress?: number
     /** periodic 是否每拍 halt；breakpoint 时忽略且不下发（命中时核心已暂停）。 */
     halt?: boolean
-    series: readonly CurveLocalSeriesSpec[]
+    /** 旧单组路径（与 groups 二选一；缺省 groups 时作为单 group）。 */
+    series?: readonly CurveLocalSeriesSpec[]
+    /** 协议 v2 多组（1..8 组；每组 1..32 路）。 */
+    groups?: readonly CurveLocalGroupSpec[]
 }
 
 export interface StartLocalCurveResult {
+    groupCount: number
     seriesCount: number
+    /** 各 group payload 最大值。 */
     sampleBytes: number
     intervalUs: number
 }
@@ -101,6 +132,9 @@ export interface LocalCurveStatus {
     throttled?: number
     /** PC 不在变量所属函数范围而被固件填 0 的累计次数（PC 门控）。 */
     outOfScope?: number
+    /** 协议 v2：group 数 / 当前轮转到的 group。 */
+    groupCount?: number
+    currentGroup?: number
     intervalUs: number
     frames: number
     overwritten: number
@@ -113,7 +147,9 @@ export interface CurveLocalFrame {
     seq: number
     /** ESP32 esp_timer_get_time() 微秒时间戳。 */
     timestampUs: number
-    /** sum(series.size) 字节，按 start 时 series 顺序拼接。 */
+    /** CVF2 帧所属 group；CVF1 恒为 0。 */
+    group: number
+    /** 该 group 的 series.size 之和字节，按该 group series 顺序拼接。 */
     payload: Uint8Array
 }
 
@@ -187,9 +223,95 @@ export function parseBreakpointAddressInput(text: string): number | null {
     return normalizeBreakpointAddress(address)
 }
 
+/** 协议 v2 分组切分结果（纯函数，便于单测 0/32/33/64/256/257）。 */
+export interface SeriesGroupSplit<T> {
+    groups: T[][]
+    groupCount: number
+    /** 首个错误：empty / too_many_series；null = 可下发。 */
+    error: 'empty' | 'too_many_series' | null
+}
+
+/** 按每组 perGroup 路切分（默认 32；最多 maxGroups 组 = 总 256 路）。 */
+export function splitSeriesIntoGroups<T>(
+    series: readonly T[],
+    perGroup = CURVE_LOCAL_MAX_SERIES_PER_GROUP,
+    maxGroups = CURVE_LOCAL_MAX_GROUPS,
+): SeriesGroupSplit<T> {
+    const totalLimit = perGroup * maxGroups
+    const groups: T[][] = []
+    for (let index = 0; index < series.length; index += perGroup) {
+        groups.push(series.slice(index, index + perGroup))
+    }
+    if (series.length === 0) return {groups: [], groupCount: 0, error: 'empty'}
+    if (series.length > totalLimit || groups.length > maxGroups) {
+        return {groups: groups.slice(0, maxGroups), groupCount: groups.length, error: 'too_many_series'}
+    }
+    return {groups, groupCount: groups.length, error: null}
+}
+
+/** 解析 StartLocalCurveOptions 的分组形式（groups 缺省时 root series 当单组）。 */
+export function normalizeLocalGroups(options: StartLocalCurveOptions): CurveLocalGroupSpec[] {
+    if (options.groups && options.groups.length > 0) return [...options.groups]
+    if (options.series && options.series.length > 0) return [{id: 0, series: options.series}]
+    return []
+}
+
+/** 计算 series 的字节数（variants 与 expr 互斥；size 由调用方校验）。 */
+function seriesSize(item: CurveLocalSeriesSpec): number {
+    return Number.isInteger(item.size) ? Math.max(1, Math.min(8, item.size)) : 1
+}
+
+/** 本地校验 series 的 expr/variants 结构（loclist 多段 variants 需 1..16 且 PC 区间有效）。 */
+function validateSeriesLocation(series: CurveLocalSeriesSpec, label: string): void {
+    const variants = series.variants ?? []
+    if (variants.length > 0) {
+        if (variants.length > CURVE_LOCAL_MAX_VARIANTS) {
+            throw new CurveLocalError(`${label} variants count must be 1..${CURVE_LOCAL_MAX_VARIANTS}`)
+        }
+        for (const variant of variants) {
+            if (!Number.isInteger(variant.pcLow) || !Number.isInteger(variant.pcHigh)
+                || variant.pcLow < 0 || variant.pcHigh > 0xffffffff || variant.pcLow >= variant.pcHigh) {
+                throw new CurveLocalError(`${label} variant pc_low/pc_high must be valid ranges`)
+            }
+            if (!isValidAddressExprShape(variant.expr)) {
+                throw new CurveLocalError(`${label} variant expr is invalid`)
+            }
+            if (addressExprDepth(variant.expr) > CURVE_LOCAL_MAX_EXPR_DEPTH) {
+                throw new CurveLocalError(`${label} variant expr depth > ${CURVE_LOCAL_MAX_EXPR_DEPTH}`)
+            }
+        }
+        // variants 与顶层 expr 可并存（旧路径兼容），但必须有可用变体。
+        return
+    }
+    if (!series.expr) throw new CurveLocalError(`${label} expr is required when variants are absent`)
+    if (!isValidAddressExprShape(series.expr)) throw new CurveLocalError(`${label} expr is invalid`)
+    if (addressExprDepth(series.expr) > CURVE_LOCAL_MAX_EXPR_DEPTH) {
+        throw new CurveLocalError(`${label} expr depth > ${CURVE_LOCAL_MAX_EXPR_DEPTH}`)
+    }
+}
+
+/** AddressExpr 基础形状校验（kind + 必填字段），防止把坏数据发给固件。 */
+export function isValidAddressExprShape(expr: AddressExpr): boolean {
+    if (!expr || typeof expr !== 'object') return false
+    switch (expr.kind) {
+        case 'addr':
+            return typeof expr.address === 'number' && Number.isFinite(expr.address)
+        case 'reg':
+            return Number.isInteger(expr.reg) && expr.reg >= 0 && Number.isInteger(expr.offset)
+        case 'cfa':
+            return Number.isInteger(expr.offset)
+        case 'add':
+        case 'deref':
+            return typeof expr.offset === 'number' && Number.isInteger(expr.offset)
+                && isValidAddressExprShape(expr.inner)
+        default:
+            return false
+    }
+}
+
 /** 下发前做本地校验，尽早给出可读错误（避免固件返回模糊失败）。 */
 export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
-    const {intervalUs, series} = options
+    const {intervalUs} = options
     const trigger = options.trigger ?? 'periodic'
     const maxInterval = trigger === 'breakpoint' ? CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT : CURVE_LOCAL_MAX_INTERVAL_US
     const minInterval = trigger === 'breakpoint' ? 5000 : CURVE_LOCAL_MIN_INTERVAL_US
@@ -206,33 +328,43 @@ export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
             )
         }
     }
-    if (series.length < CURVE_LOCAL_MIN_SERIES || series.length > CURVE_LOCAL_MAX_SERIES) {
-        throw new CurveLocalError(`series count must be ${CURVE_LOCAL_MIN_SERIES}..${CURVE_LOCAL_MAX_SERIES}`)
+    const groups = normalizeLocalGroups(options)
+    if (groups.length < 1 || groups.length > CURVE_LOCAL_MAX_GROUPS) {
+        throw new CurveLocalError(`groups count must be 1..${CURVE_LOCAL_MAX_GROUPS}`)
     }
-    let sampleBytes = 0
-    for (const item of series) {
-        if (!Number.isInteger(item.size) || item.size < 1 || item.size > CURVE_LOCAL_MAX_SERIES_SIZE) {
-            throw new CurveLocalError(`series[${item.id}] size must be 1..${CURVE_LOCAL_MAX_SERIES_SIZE}`)
+    let totalSeries = 0
+    for (const group of groups) {
+        if (!Array.isArray(group.series) || group.series.length < CURVE_LOCAL_MIN_SERIES
+            || group.series.length > CURVE_LOCAL_MAX_SERIES_PER_GROUP) {
+            throw new CurveLocalError(`group[${group.id}] series count must be ${CURVE_LOCAL_MIN_SERIES}..${CURVE_LOCAL_MAX_SERIES_PER_GROUP}`)
         }
-        if (addressExprDepth(item.expr) > CURVE_LOCAL_MAX_EXPR_DEPTH) {
-            throw new CurveLocalError(`series[${item.id}] expr depth > ${CURVE_LOCAL_MAX_EXPR_DEPTH}`)
-        }
-        if (item.pcLow !== undefined || item.pcHigh !== undefined) {
-            const pcLow = item.pcLow
-            const pcHigh = item.pcHigh
-            if (typeof pcLow !== 'number' || typeof pcHigh !== 'number'
-                || !Number.isInteger(pcLow) || !Number.isInteger(pcHigh)
-                || pcLow < CURVE_LOCAL_FLASH_START || pcHigh > CURVE_LOCAL_FLASH_END
-                || pcLow >= pcHigh) {
-                throw new CurveLocalError(
-                    `series[${item.id}] pc_low/pc_high must be a valid Flash range (0x${CURVE_LOCAL_FLASH_START.toString(16)}..0x${CURVE_LOCAL_FLASH_END.toString(16)}, low<high)`,
-                )
+        let groupBytes = 0
+        for (const item of group.series) {
+            totalSeries += 1
+            if (!Number.isInteger(item.size) || item.size < 1 || item.size > CURVE_LOCAL_MAX_SERIES_SIZE) {
+                throw new CurveLocalError(`series[${item.id}] size must be 1..${CURVE_LOCAL_MAX_SERIES_SIZE}`)
             }
+            validateSeriesLocation(item, `group[${group.id}] series[${item.id}]`)
+            if (item.pcLow !== undefined || item.pcHigh !== undefined) {
+                const pcLow = item.pcLow
+                const pcHigh = item.pcHigh
+                if (typeof pcLow !== 'number' || typeof pcHigh !== 'number'
+                    || !Number.isInteger(pcLow) || !Number.isInteger(pcHigh)
+                    || pcLow < CURVE_LOCAL_FLASH_START || pcHigh > CURVE_LOCAL_FLASH_END
+                    || pcLow >= pcHigh) {
+                    throw new CurveLocalError(
+                        `series[${item.id}] pc_low/pc_high must be a valid Flash range (0x${CURVE_LOCAL_FLASH_START.toString(16)}..0x${CURVE_LOCAL_FLASH_END.toString(16)}, low<high)`,
+                    )
+                }
+            }
+            groupBytes += item.size
         }
-        sampleBytes += item.size
+        if (groupBytes > CURVE_LOCAL_MAX_SAMPLE_BYTES) {
+            throw new CurveLocalError(`group[${group.id}] sum(series.size) must be <= ${CURVE_LOCAL_MAX_SAMPLE_BYTES}`)
+        }
     }
-    if (sampleBytes > CURVE_LOCAL_MAX_SAMPLE_BYTES) {
-        throw new CurveLocalError(`sum(series.size) must be <= ${CURVE_LOCAL_MAX_SAMPLE_BYTES}`)
+    if (totalSeries > CURVE_LOCAL_MAX_TOTAL_SERIES) {
+        throw new CurveLocalError(`total series count must be <= ${CURVE_LOCAL_MAX_TOTAL_SERIES}`)
     }
 }
 
@@ -285,38 +417,64 @@ function optionalFiniteNumber(value: unknown): number | undefined {
 }
 
 /** 启动设备本地采样。 */
+/** 序列化一个 series（v2：variants-only 或 expr+pc_low/pc_high）。 */
+function serializeSeriesSpec(item: CurveLocalSeriesSpec): Record<string, unknown> {
+    const spec: Record<string, unknown> = {id: item.id, size: item.size}
+    const variants = item.variants ?? []
+    if (variants.length > 0) {
+        spec.variants = variants.map((variant) => ({
+            pc_low: variant.pcLow >>> 0,
+            pc_high: variant.pcHigh >>> 0,
+            expr: variant.expr,
+        }))
+    } else {
+        spec.expr = item.expr
+        if (item.pcLow !== undefined && item.pcHigh !== undefined) {
+            spec.pc_low = item.pcLow >>> 0
+            spec.pc_high = item.pcHigh >>> 0
+        }
+    }
+    return spec
+}
+
+/** 启动设备本地采样（协议 v2：groups；单组无 variants 时保持 v1 root series 兼容）。 */
 export async function startLocalCurve(options: StartLocalCurveOptions): Promise<StartLocalCurveResult> {
     validateStartLocalCurve(options)
     const trigger = options.trigger ?? 'periodic'
+    const groups = normalizeLocalGroups(options)
+    const hasVariants = groups.some((group) => group.series.some((item) => (item.variants?.length ?? 0) > 0))
+    const explicitGroups = (options.groups?.length ?? 0) > 0
+    const useGroups = explicitGroups || groups.length > 1 || hasVariants
     const payload: Record<string, unknown> = {
         trigger,
         interval_us: options.intervalUs,
-        series: options.series.map((item) => {
-            const spec: Record<string, unknown> = {id: item.id, size: item.size, expr: item.expr}
-            // PC 门控：仅当范围有效时下发（缺省字段 = 不门控）。
-            if (item.pcLow !== undefined && item.pcHigh !== undefined) {
-                spec.pc_low = item.pcLow >>> 0
-                spec.pc_high = item.pcHigh >>> 0
-            }
-            return spec
-        }),
+    }
+    if (useGroups) {
+        payload.groups = groups.map((group, index) => ({
+            id: Number.isInteger(group.id) ? group.id : index,
+            series: group.series.map(serializeSeriesSpec),
+        }))
+    } else {
+        payload.series = groups[0].series.map(serializeSeriesSpec)
     }
     if (trigger === 'breakpoint') {
         // 断点命中时核心已暂停，halt 字段无意义且契约要求忽略；不下发避免冲突。
         payload.breakpoint_address = normalizeBreakpointAddress(options.breakpointAddress ?? 0)
     } else {
-        payload.halt = options.halt !== false
+        // loclist variants 要求固件按 PC 选择，必须 halt（契约 §9.4）。
+        payload.halt = hasVariants ? true : options.halt !== false
     }
     const body = await requestJson(CURVE_LOCAL_START_PATH, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),
     })
-    const seriesCount = finiteNumber(body.series_count, options.series.length)
-    const sampleBytes = finiteNumber(body.sample_bytes, options.series.reduce((sum, item) => sum + item.size, 0))
+    const totalSeries = groups.reduce((sum, group) => sum + group.series.length, 0)
+    const maxGroupBytes = groups.reduce((max, group) => Math.max(max, group.series.reduce((sum, item) => sum + item.size, 0)), 0)
     return {
-        seriesCount,
-        sampleBytes,
+        groupCount: finiteNumber(body.group_count, groups.length),
+        seriesCount: finiteNumber(body.series_count, totalSeries),
+        sampleBytes: finiteNumber(body.sample_bytes, maxGroupBytes),
         intervalUs: finiteNumber(body.interval_us, options.intervalUs),
     }
 }
@@ -356,6 +514,8 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
         sampled: optionalFiniteNumber(body.sampled),
         throttled: optionalFiniteNumber(body.throttled),
         outOfScope: optionalFiniteNumber(body.out_of_scope),
+        groupCount: optionalFiniteNumber(body.group_count),
+        currentGroup: optionalFiniteNumber(body.current_group),
         intervalUs: finiteNumber(body.interval_us, 0),
         frames: finiteNumber(body.frames, 0),
         overwritten: finiteNumber(body.overwritten, 0),
@@ -381,46 +541,73 @@ function readU64Number(bytes: Uint8Array, offset: number): number {
 }
 
 /**
- * 解码 CVF1 二进制帧页。
- * 空 body（204 或固件返回 0 字节）返回空页；magic/version/截断错误抛 CurveLocalError。
+ * 解码 CVF1（单组）或 CVF2（多组）二进制帧页。
+ * 空 body（204/0 字节）返回空页；magic/version/截断/坏 payload_len 抛 CurveLocalError。
  */
 export function decodeCurveFrames(input: ArrayBuffer | Uint8Array): CurveLocalFramesPage {
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(input)
     if (bytes.length === 0) return emptyCurveFramesPage()
-    if (bytes.length < CVF1_HEADER_BYTES) {
-        throw new CurveLocalError(`CVF1 header too short (${bytes.length}B)`)
+    if (bytes.length < CURVE_FRAME_HEADER_BYTES) {
+        throw new CurveLocalError(`CVF header too short (${bytes.length}B)`)
     }
     const magic = readU32(bytes, 0)
-    if (magic !== CVF1_MAGIC) {
-        throw new CurveLocalError(`CVF1 magic mismatch: 0x${magic.toString(16)}`)
-    }
+    if (magic === CVF1_MAGIC) return decodeCvf1(bytes)
+    if (magic === CVF2_MAGIC) return decodeCvf2(bytes)
+    throw new CurveLocalError(`CVF magic mismatch: 0x${magic.toString(16)}`)
+}
+
+function decodeCvf1(bytes: Uint8Array): CurveLocalFramesPage {
     const version = bytes[4]
-    if (version !== CVF1_VERSION) {
-        throw new CurveLocalError(`CVF1 unsupported version ${version}`)
-    }
+    if (version !== CVF1_VERSION) throw new CurveLocalError(`CVF1 unsupported version ${version}`)
     const flags = bytes[5]
     const count = readU16(bytes, 6)
     const firstSeq = readU32(bytes, 8)
     const frameBytes = readU16(bytes, 12)
-    const frameStride = CVF1_FRAME_HEADER_BYTES + frameBytes
-    const expected = CVF1_HEADER_BYTES + count * frameStride
+    const stride = CVF1_FRAME_HEADER_BYTES + frameBytes
+    const expected = CURVE_FRAME_HEADER_BYTES + count * stride
     if (bytes.length < expected) {
         throw new CurveLocalError(`CVF1 truncated: need ${expected}B, got ${bytes.length}B`)
     }
     const frames: CurveLocalFrame[] = []
-    let offset = CVF1_HEADER_BYTES
+    let offset = CURVE_FRAME_HEADER_BYTES
     for (let index = 0; index < count; index++) {
         const seq = readU32(bytes, offset)
         const timestampUs = readU64Number(bytes, offset + 4)
         const payloadStart = offset + CVF1_FRAME_HEADER_BYTES
-        frames.push({
-            seq,
-            timestampUs,
-            payload: bytes.slice(payloadStart, payloadStart + frameBytes),
-        })
-        offset += frameStride
+        frames.push({seq, timestampUs, group: 0, payload: bytes.slice(payloadStart, payloadStart + frameBytes)})
+        offset += stride
     }
-    return {version, flags, gap: (flags & CVF1_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
+    return {version: 1, flags, gap: (flags & CVF_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
+}
+
+function decodeCvf2(bytes: Uint8Array): CurveLocalFramesPage {
+    const version = bytes[4]
+    if (version !== CVF2_VERSION) throw new CurveLocalError(`CVF2 unsupported version ${version}`)
+    const flags = bytes[5]
+    const count = readU16(bytes, 6)
+    const firstSeq = readU32(bytes, 8)
+    const frameBytes = readU16(bytes, 12)
+    const frames: CurveLocalFrame[] = []
+    let offset = CURVE_FRAME_HEADER_BYTES
+    for (let index = 0; index < count; index++) {
+        if (offset + CVF2_FRAME_HEADER_BYTES > bytes.length) {
+            throw new CurveLocalError(`CVF2 truncated frame header at index ${index}`)
+        }
+        const seq = readU32(bytes, offset)
+        const timestampUs = readU64Number(bytes, offset + 4)
+        const group = bytes[offset + 12]
+        const payloadLen = readU16(bytes, offset + 13)
+        if (payloadLen > frameBytes) {
+            throw new CurveLocalError(`CVF2 invalid payload_len ${payloadLen} (frame_bytes ${frameBytes})`)
+        }
+        const payloadStart = offset + CVF2_FRAME_HEADER_BYTES
+        if (payloadStart + payloadLen > bytes.length) {
+            throw new CurveLocalError(`CVF2 truncated payload at index ${index}`)
+        }
+        frames.push({seq, timestampUs, group, payload: bytes.slice(payloadStart, payloadStart + payloadLen)})
+        offset = payloadStart + payloadLen
+    }
+    return {version: 2, flags, gap: (flags & CVF_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
 }
 
 /** 轮询设备本地采样帧；since=0 从 ring 最旧帧开始。 */

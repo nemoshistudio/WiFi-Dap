@@ -31,6 +31,7 @@ gcc -std=gnu11 -Wall -Wextra -O2 \
     "$ROOT/components/curve_sampler/src/curve_expr.c" \
     "$ROOT/components/curve_sampler/src/curve_ring.c" \
     "$ROOT/components/curve_sampler/src/curve_status.c" \
+    "$ROOT/components/curve_sampler/src/curve_cvf2.c" \
     "$BUILD_DIR/cjson/cJSON.c" \
     -lm -o "$BUILD_DIR/test_curve"
 

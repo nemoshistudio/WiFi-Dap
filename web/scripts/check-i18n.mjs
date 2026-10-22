@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 446
+const EXPECTED_TOTAL = 450
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 298
+const EXPECTED_ADDED = 302
 
 const errors = []
 const warnings = []
@@ -171,6 +171,8 @@ const ADDED_KEYS = [
         'localSeries', 'localOutOfScope', 'localOutOfScopeHint', 'localGroupingHint',
         // D：loclist 多段位置限制
         'loclistMultiShort', 'loclistMultiHint',
+        // v2 多组轮转
+        'localGroups', 'localCurrentGroup', 'localGroupRate', 'localGroupLimit',
     ]),
     ...keys('page', ['debugCurve']),
 ]

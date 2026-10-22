@@ -73,8 +73,8 @@ static void test_parse_contract_example(void)
     CHECK(cfg.series_count == 2U);
     CHECK(cfg.sample_bytes == 12U);
     CHECK(cfg.needs_regs == true);
-    CHECK(cfg.reg_count == 1U);
-    CHECK(cfg.regs[0] == 13U);
+    CHECK(cfg.groups[0].reg_count == 1U);
+    CHECK(cfg.groups[0].regs[0] == 13U);
     CHECK(cfg.series[0].size == 4U);
     CHECK(cfg.series[0].expr != CURVE_EXPR_NONE);
     CHECK(cfg.pool[cfg.series[0].expr].kind == CURVE_EXPR_REG);
@@ -297,9 +297,9 @@ static void test_ring_capacity(void)
 {
     /* capacity = clamp(32 KiB / (12 + frame_bytes), 128, 512) */
     CHECK(curve_ring_capacity_for(16U) == 512U);
-    CHECK(curve_ring_capacity_for(28U) == 512U);
-    CHECK(curve_ring_capacity_for(64U) == 431U);  /* 32768 / 76 */
-    CHECK(curve_ring_capacity_for(128U) == 234U); /* 32768 / 140 */
+    CHECK(curve_ring_capacity_for(28U) == 512U); /* 32768 / 43 = 762 -> 512 */
+    CHECK(curve_ring_capacity_for(64U) == 414U);  /* 32768 / 79 */
+    CHECK(curve_ring_capacity_for(128U) == 229U); /* 32768 / 143 */
     CHECK(curve_ring_capacity_for(256U) == 128U); /* 122 -> clamp to 128 */
     CHECK(curve_ring_capacity_for(0U) == 0U);
     CHECK(curve_ring_capacity_for(CURVE_MAX_SAMPLE_BYTES + 1U) == 0U);
@@ -575,6 +575,8 @@ static void test_status_json(void)
     memset(&st, 0, sizeof(st));
     st.running = true;
     st.trigger = (uint8_t)CURVE_TRIGGER_BREAKPOINT;
+    st.group_count = 2U;
+    st.current_group = 1U;
     st.breakpoint_address = 134356037U;
     st.hits = 12U;
     st.sampled = 11U;
@@ -608,6 +610,8 @@ static void test_status_json(void)
     CHECK(strstr(buf, "\"interval_us\":20000") != NULL);
     CHECK(strstr(buf, "\"frames\":11") != NULL);
     CHECK(strstr(buf, "\"out_of_scope\":7") != NULL);
+    CHECK(strstr(buf, "\"group_count\":2") != NULL);
+    CHECK(strstr(buf, "\"current_group\":1") != NULL);
     CHECK(strstr(buf, "\"ring_frames\":512") != NULL);
     CHECK(strstr(buf, "\"served_seq\":11") != NULL);
 
@@ -620,6 +624,8 @@ static void test_status_json(void)
     st.invalid = 4294967295U;
     st.out_of_scope = 4294967295U;
     st.errors = 4294967295U;
+    st.group_count = 8U;
+    st.current_group = 7U;
     st.sample_bytes = 65535U;
     st.series_count = 255U;
     st.link_hz = 4294967295U;
@@ -650,7 +656,7 @@ static void test_pc_scope_parse(void)
                    "\"pc_low\":134356037,\"pc_high\":134356805,"
                    "\"expr\":{\"kind\":\"reg\",\"reg\":13,\"offset\":244}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series[0].pc_gate == true);
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) != 0U);
     CHECK(cfg.series[0].pc_low == 0x08021C44U);
     CHECK(cfg.series[0].pc_high == 0x08021F44U);
     CHECK(cfg.pc_gate_count == 1U);
@@ -673,7 +679,7 @@ static void test_pc_scope_parse(void)
                    "\"pc_low\":134348800,\"pc_high\":134352896,"
                    "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series[0].pc_gate == true);
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) != 0U);
     CHECK(cfg.series[0].pc_low == 0x08020000U);
     CHECK(cfg.series[0].pc_high == 0x08021000U);
 
@@ -683,25 +689,25 @@ static void test_pc_scope_parse(void)
                    "\"pc_low\":134352896,\"pc_high\":134348800,"
                    "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series[0].pc_gate == false);
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) == 0U);
     (void)snprintf(json, sizeof(json),
                    "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":4,"
                    "\"pc_low\":603979776,\"pc_high\":603980800,"
                    "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series[0].pc_gate == false); /* not flash */
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) == 0U); /* not flash */
     (void)snprintf(json, sizeof(json),
                    "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":4,"
                    "\"pc_low\":134348800,"
                    "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series[0].pc_gate == false); /* pc_high missing */
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) == 0U); /* pc_high missing */
     (void)snprintf(json, sizeof(json),
                    "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":4,"
                    "\"pc_low\":0,\"pc_high\":0,"
                    "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series[0].pc_gate == false);
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) == 0U);
     CHECK(cfg.pc_gate_count == 0U);
 
     /* Per-series gates are independent and counted; breakpoint mode supports
@@ -716,9 +722,9 @@ static void test_pc_scope_parse(void)
                    "\"expr\":{\"kind\":\"addr\",\"address\":536870920}}]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
     CHECK(cfg.pc_gate_count == 2U);
-    CHECK(cfg.series[0].pc_gate == true);
-    CHECK(cfg.series[1].pc_gate == false);
-    CHECK(cfg.series[2].pc_gate == true);
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_PC_GATE) != 0U);
+    CHECK((cfg.series[1].flags & CURVE_SERIES_FLAG_PC_GATE) == 0U);
+    CHECK((cfg.series[2].flags & CURVE_SERIES_FLAG_PC_GATE) != 0U);
     CHECK(cfg.sample_bytes == 16U);
     CHECK(cfg.series_count == 3U);
 
@@ -744,9 +750,399 @@ static void test_pc_scope_parse(void)
         CHECK(cfg.sample_bytes == 64U);
         CHECK(cfg.pc_gate_count == 32U);
         CHECK(cfg.pool_used == 32U);
-        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 431U);
+        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 414U);
         (void)p;
     }
+}
+
+
+/* ---- protocol v2: groups / variants / CVF2 ------------------------------- */
+
+static void test_groups_parse(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+    static const char *json =
+        "{\"interval_us\":20000,\"halt\":true,\"groups\":["
+        "{\"id\":0,\"series\":["
+        "{\"size\":4,\"expr\":{\"kind\":\"reg\",\"reg\":13,\"offset\":244}},"
+        "{\"size\":2,\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]},"
+        "{\"id\":1,\"series\":["
+        "{\"size\":1,\"expr\":{\"kind\":\"addr\",\"address\":536870920}},"
+        "{\"size\":4,\"expr\":{\"kind\":\"addr\",\"address\":536870924}},"
+        "{\"size\":8,\"expr\":{\"kind\":\"addr\",\"address\":536870928}}]}]}";
+
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 2U);
+    CHECK(cfg.series_count == 5U);
+    CHECK(cfg.sample_bytes == 13U); /* max(6, 13) */
+    CHECK(cfg.groups[0].series_first == 0U);
+    CHECK(cfg.groups[0].series_count == 2U);
+    CHECK(cfg.groups[0].sample_bytes == 6U);
+    CHECK(cfg.groups[0].pc_needed == false);
+    CHECK(cfg.groups[0].reg_count == 1U);
+    CHECK(cfg.groups[0].regs[0] == 13U);
+    CHECK(cfg.groups[1].series_first == 2U);
+    CHECK(cfg.groups[1].series_count == 3U);
+    CHECK(cfg.groups[1].sample_bytes == 13U);
+    CHECK(cfg.groups[1].reg_count == 0U);
+
+    /* groups takes precedence over a legacy root series array. */
+    {
+        static const char *mixed =
+            "{\"interval_us\":20000,\"halt\":true,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870912}}],"
+            "\"groups\":[{\"series\":[{\"size\":2,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870912}}]}]}";
+
+        CHECK(curve_config_parse(mixed, strlen(mixed), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.group_count == 1U);
+        CHECK(cfg.series_count == 1U);
+        CHECK(cfg.sample_bytes == 2U);
+    }
+
+    /* Legacy single-group request keeps working (group_count=1). */
+    {
+        static const char *legacy =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":["
+            "{\"size\":4,\"expr\":{\"kind\":\"addr\",\"address\":536870912}},"
+            "{\"size\":4,\"pc_low\":134348800,\"pc_high\":134352896,"
+            "\"expr\":{\"kind\":\"reg\",\"reg\":13,\"offset\":0}}]}";
+
+        CHECK(curve_config_parse(legacy, strlen(legacy), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.group_count == 1U);
+        CHECK(cfg.series_count == 2U);
+        CHECK(cfg.groups[0].pc_needed == true);
+        CHECK((cfg.series[1].flags & CURVE_SERIES_FLAG_PC_GATE) != 0U);
+    }
+}
+
+static void build_addr_series(char *buf, size_t cap, size_t *pos, int index,
+                              uint32_t size, uint32_t address)
+{
+    *pos += (size_t)snprintf(buf + *pos, cap - *pos,
+                             "%s{\"size\":%u,\"expr\":{\"kind\":\"addr\","
+                             "\"address\":%u}}",
+                             (index == 0) ? "" : ",", (unsigned)size,
+                             (unsigned)address);
+}
+
+static void test_groups_boundaries(void)
+{
+    static curve_config_t cfg;
+    static char json[32768];
+    char err[96];
+    size_t pos;
+
+    /* 9 groups rejected. */
+    pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
+                                              "\"halt\":true,\"groups\":[");
+    for (int g = 0; g < 9; g++) {
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "%s{\"series\":[{\"size\":1,\"expr\":"
+                                "{\"kind\":\"addr\",\"address\":536870912}}]}",
+                                (g == 0) ? "" : ",");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+
+    /* 33 series in one group rejected. */
+    pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
+                                              "\"halt\":true,\"groups\":["
+                                              "{\"series\":[");
+    for (int i = 0; i < 33; i++) {
+        build_addr_series(json, sizeof(json), &pos, i, 1U,
+                          536870912U + (uint32_t)i);
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+
+    /* Contract maximum: 8 groups x 32 series = 256 total series. */
+    pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
+                                              "\"halt\":true,\"groups\":[");
+    for (int g = 0; g < 8; g++) {
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "%s{\"series\":[",
+                                (g == 0) ? "" : ",");
+        for (int i = 0; i < 32; i++) {
+            build_addr_series(json, sizeof(json), &pos, i, 1U,
+                              536870912U + (uint32_t)(g * 32 + i));
+        }
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 8U);
+    CHECK(cfg.series_count == 256U);
+    CHECK(cfg.sample_bytes == 32U);
+    CHECK(cfg.groups[7].series_first == 224U);
+    CHECK(cfg.groups[7].series_count == 32U);
+    CHECK(cfg.pool_used == 256U);
+
+    /* One group with 32 x size 8 = the 256 B payload cap. */
+    pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
+                                              "\"halt\":true,\"series\":[");
+    for (int i = 0; i < 32; i++) {
+        build_addr_series(json, sizeof(json), &pos, i, 8U,
+                          536870912U + (uint32_t)i * 8U);
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.sample_bytes == 256U);
+    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 128U);
+}
+
+static void test_variants_parse_select(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+    static const char *json =
+        "{\"interval_us\":20000,\"halt\":true,\"groups\":["
+        "{\"series\":["
+        "{\"size\":4,\"variants\":["
+        "{\"pc_low\":134348800,\"pc_high\":134352896,"
+        "\"expr\":{\"kind\":\"reg\",\"reg\":13,\"offset\":48}},"
+        "{\"pc_low\":134352896,\"pc_high\":134356992,"
+        "\"expr\":{\"kind\":\"reg\",\"reg\":7,\"offset\":-32}}]},"
+        "{\"size\":2,\"expr\":{\"kind\":\"addr\",\"address\":536870912}},"
+        "{\"size\":2,\"pc_low\":134348800,\"pc_high\":134352896,"
+        "\"expr\":{\"kind\":\"cfa\",\"offset\":12}}]},"
+        "{\"series\":[{\"size\":1,\"variants\":["
+        "{\"pc_low\":134348800,\"pc_high\":134352896,"
+        "\"expr\":{\"kind\":\"addr\",\"address\":536870916}}]}]}]}";
+
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 2U);
+    CHECK(cfg.series_count == 4U);
+    CHECK(cfg.variant_used == 3U);
+    CHECK(cfg.groups[0].pc_needed == true);
+    CHECK(cfg.groups[1].pc_needed == true);
+    CHECK((cfg.series[0].flags & CURVE_SERIES_FLAG_VARIANTS) != 0U);
+    CHECK(cfg.series[0].variant_count == 2U);
+    CHECK(cfg.series[0].expr == CURVE_EXPR_NONE);
+
+    /* Variant selection by PC (half-open range, Thumb bit ignored). */
+    {
+        const curve_series_t *variant_series = &cfg.series[0];
+        uint16_t first_expr = cfg.variants[variant_series->variant_first].expr;
+        uint16_t second_expr =
+            cfg.variants[variant_series->variant_first + 1U].expr;
+
+        CHECK(curve_series_expr_for_pc(&cfg, variant_series, 134348800U) ==
+              first_expr);
+        CHECK(curve_series_expr_for_pc(&cfg, variant_series, 134348801U) ==
+              first_expr);
+        CHECK(curve_series_expr_for_pc(&cfg, variant_series, 134352896U) ==
+              second_expr);
+        CHECK(curve_series_expr_for_pc(&cfg, variant_series, 134356992U) ==
+              CURVE_EXPR_NONE); /* high exclusive / no variant matches */
+        CHECK(cfg.pool[first_expr].kind == CURVE_EXPR_REG);
+        CHECK(cfg.pool[first_expr].reg == 13U);
+        CHECK(cfg.pool[second_expr].kind == CURVE_EXPR_REG);
+        CHECK(cfg.pool[second_expr].reg == 7U);
+        CHECK(curve_series_needs_pc(variant_series));
+    }
+
+    /* Plain series ignores the PC; single-style PC gate selects by range. */
+    CHECK(curve_series_expr_for_pc(&cfg, &cfg.series[1], 0U) == cfg.series[1].expr);
+    CHECK(!curve_series_needs_pc(&cfg.series[1]));
+    CHECK(curve_series_needs_pc(&cfg.series[2]));
+    CHECK(curve_series_expr_for_pc(&cfg, &cfg.series[2], 134348800U) ==
+          cfg.series[2].expr);
+    CHECK(curve_series_expr_for_pc(&cfg, &cfg.series[2], 134352896U) ==
+          CURVE_EXPR_NONE);
+
+    /* Variants are allowed on breakpoint trigger (core halted at the hit). */
+    {
+        static const char *bp =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"series\":[{\"size\":4,\"variants\":["
+            "{\"pc_low\":134348800,\"pc_high\":134352896,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}]}";
+
+        CHECK(curve_config_parse(bp, strlen(bp), &cfg, err, sizeof(err)) == ESP_OK);
+        CHECK(cfg.variant_used == 1U);
+    }
+
+    /* Periodic no-halt + variants is rejected. */
+    {
+        static const char *nohalt =
+            "{\"interval_us\":20000,\"halt\":false,\"series\":[{\"size\":4,"
+            "\"variants\":[{\"pc_low\":134348800,\"pc_high\":134352896,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}]}";
+
+        CHECK(curve_config_parse(nohalt, strlen(nohalt), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "variants require halt") != NULL);
+    }
+
+    /* 17 variants / bad range / empty variants / missing expr are rejected. */
+    {
+        char big[4096];
+        size_t pos = (size_t)snprintf(big, sizeof(big),
+                                      "{\"interval_us\":20000,\"halt\":true,"
+                                      "\"series\":[{\"size\":1,\"expr\":"
+                                      "{\"kind\":\"addr\",\"address\":536870912},"
+                                      "\"variants\":[");
+        for (int i = 0; i < 17; i++) {
+            pos += (size_t)snprintf(big + pos, sizeof(big) - pos,
+                                    "%s{\"pc_low\":%u,\"pc_high\":%u,\"expr\":"
+                                    "{\"kind\":\"addr\",\"address\":536870912}}",
+                                    (i == 0) ? "" : ",",
+                                    134348800U + (uint32_t)i * 16U,
+                                    134348816U + (uint32_t)i * 16U);
+        }
+        (void)snprintf(big + pos, sizeof(big) - pos, "]}]}");
+        CHECK(curve_config_parse(big, strlen(big), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+    }
+    {
+        static const char *badrange =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":1,"
+            "\"variants\":[{\"pc_low\":603979776,\"pc_high\":603980800,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}]}";
+
+        CHECK(curve_config_parse(badrange, strlen(badrange), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+    }
+    {
+        static const char *emptyvars =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":1,"
+            "\"variants\":[]}]}";
+
+        CHECK(curve_config_parse(emptyvars, strlen(emptyvars), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+    }
+    {
+        static const char *noexpr =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":1}]}";
+
+        CHECK(curve_config_parse(noexpr, strlen(noexpr), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+    }
+}
+
+static void test_variant_pool_limit(void)
+{
+    static curve_config_t cfg;
+    static char json[32768];
+    char err[96];
+    size_t pos = (size_t)snprintf(json, sizeof(json),
+                                  "{\"interval_us\":20000,\"halt\":true,"
+                                  "\"series\":[");
+    /* 32 series x 9 variants = 288 > CURVE_MAX_VARIANTS (256). */
+    for (int i = 0; i < 32; i++) {
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "%s{\"size\":1,\"expr\":{\"kind\":\"addr\","
+                                "\"address\":536870912},\"variants\":[",
+                                (i == 0) ? "" : ",");
+        for (int v = 0; v < 9; v++) {
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "%s{\"pc_low\":%u,\"pc_high\":%u,\"expr\":"
+                                    "{\"kind\":\"addr\",\"address\":%u}}",
+                                    (v == 0) ? "" : ",",
+                                    134348800U + (uint32_t)(i * 256 + v * 16),
+                                    134348816U + (uint32_t)(i * 256 + v * 16),
+                                    536870912U + (uint32_t)v);
+        }
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(strstr(err, "variants") != NULL);
+}
+
+static void test_expr_pool_limit(void)
+{
+    static curve_config_t cfg;
+    static char json[49152];
+    char err[96];
+    size_t pos = (size_t)snprintf(json, sizeof(json),
+                                  "{\"interval_us\":20000,\"halt\":true,"
+                                  "\"groups\":[");
+    /* 4 groups x 25 series x depth-8 expression = 800 nodes > 768. */
+    for (int g = 0; g < 4; g++) {
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "%s{\"series\":[", (g == 0) ? "" : ",");
+        for (int i = 0; i < 25; i++) {
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "%s{\"size\":1,\"expr\":", (i == 0) ? "" : ",");
+            for (int d = 0; d < 7; d++) {
+                pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                        "{\"kind\":\"add\",\"offset\":1,\"inner\":");
+            }
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "{\"kind\":\"addr\",\"address\":536870912}");
+            for (int d = 0; d < 7; d++) {
+                pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "}");
+            }
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "}");
+        }
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(strstr(err, "expr") != NULL);
+}
+
+static void test_group_rotation(void)
+{
+    CHECK(curve_next_group(0U, 1U) == 0U);
+    CHECK(curve_next_group(0U, 2U) == 1U);
+    CHECK(curve_next_group(1U, 2U) == 0U);
+    CHECK(curve_next_group(2U, 3U) == 0U);
+    CHECK(curve_next_group(0U, 8U) == 1U);
+    CHECK(curve_next_group(7U, 8U) == 0U);
+    CHECK(curve_next_group(3U, 0U) == 0U);
+}
+
+static void test_cvf2_wire(void)
+{
+    uint8_t header[CURVE_FRAME_HEADER_BYTES];
+    uint8_t frame[CURVE_FRAME_META_BYTES];
+
+    CHECK(curve_cvf2_write_header(header, 3U, 0x11223344U, 256U, true) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[0] == 'C' && header[1] == 'V' && header[2] == 'F' &&
+          header[3] == '2');
+    CHECK(header[4] == 2U); /* CVF2 version */
+    CHECK(header[5] == 0x01U); /* gap */
+    CHECK(header[6] == 3U && header[7] == 0U); /* count u16 */
+    CHECK(header[8] == 0x44U && header[9] == 0x33U && header[10] == 0x22U &&
+          header[11] == 0x11U); /* first_seq u32 LE */
+    CHECK(header[12] == 0x00U && header[13] == 0x01U); /* frame_bytes 256 */
+    CHECK(header[14] == 0U && header[15] == 0U); /* reserved */
+
+    CHECK(curve_cvf2_write_frame_meta(frame, 0x01020304U,
+                                      0x1122334455667788ULL, 3U, 0x0102U) ==
+          CURVE_FRAME_META_BYTES);
+    CHECK(frame[0] == 0x04U && frame[1] == 0x03U && frame[2] == 0x02U &&
+          frame[3] == 0x01U); /* seq */
+    CHECK(frame[4] == 0x88U && frame[11] == 0x11U); /* ts u64 LE */
+    CHECK(frame[12] == 3U); /* group */
+    CHECK(frame[13] == 0x02U && frame[14] == 0x01U); /* payload_len u16 LE */
+
+    /* No-gap flag variant. */
+    CHECK(curve_cvf2_write_header(header, 1U, 1U, 32U, false) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == 0U);
+}
+
+static void test_config_static_budget(void)
+{
+    /* Static single instance owned by the HTTP layer; keep it well below a
+     * typical 24 KiB .bss budget so 8 groups x 32 series + variants fit. */
+    CHECK(sizeof(curve_config_t) > 12U * 1024U);
+    CHECK(sizeof(curve_config_t) < 24U * 1024U);
+    CHECK(sizeof(curve_series_t) <= 24U);
+    CHECK(sizeof(curve_variant_t) <= 12U);
+    CHECK(sizeof(curve_expr_t) <= 12U);
 }
 
 int main(void)
@@ -765,6 +1161,14 @@ int main(void)
     test_parse_trigger();
     test_status_json();
     test_pc_scope_parse();
+    test_groups_parse();
+    test_groups_boundaries();
+    test_variants_parse_select();
+    test_variant_pool_limit();
+    test_expr_pool_limit();
+    test_group_rotation();
+    test_cvf2_wire();
+    test_config_static_budget();
 
     if (g_failures == 0) {
         printf("OK: %d checks passed\n", g_checks);

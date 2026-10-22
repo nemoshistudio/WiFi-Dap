@@ -146,6 +146,29 @@ bool curve_pc_in_scope(uint32_t pc_low, uint32_t pc_high, uint32_t pc)
     return pc_norm >= pc_low && pc_norm < pc_high;
 }
 
+uint16_t curve_series_expr_for_pc(const curve_config_t *cfg,
+                                  const curve_series_t *series, uint32_t pc)
+{
+    if (cfg == NULL || series == NULL) {
+        return CURVE_EXPR_NONE;
+    }
+    if ((series->flags & CURVE_SERIES_FLAG_VARIANTS) != 0U) {
+        for (uint8_t i = 0U; i < series->variant_count; i++) {
+            const curve_variant_t *variant = &cfg->variants[series->variant_first + i];
+
+            if (curve_pc_in_scope(variant->pc_low, variant->pc_high, pc)) {
+                return variant->expr;
+            }
+        }
+        return CURVE_EXPR_NONE;
+    }
+    if ((series->flags & CURVE_SERIES_FLAG_PC_GATE) != 0U &&
+        !curve_pc_in_scope(series->pc_low, series->pc_high, pc)) {
+        return CURVE_EXPR_NONE;
+    }
+    return series->expr;
+}
+
 curve_eval_result_t curve_expr_eval(const curve_config_t *cfg, uint16_t expr_index,
                                     const uint32_t *reg_values,
                                     const bool *reg_valid,

@@ -8,7 +8,7 @@
  * components/target_flash_debug):
  *
  *   POST /api/curve/selftest   Phase 0 SWD timing probe
- *   POST /api/curve/start      start local sampling (<= 4 KiB JSON body)
+ *   POST /api/curve/start      start local sampling (<= 16 KiB JSON body)
  *   POST /api/curve/stop       stop sampling, target resumed, DAP released
  *   GET  /api/curve/status     sampler status JSON
  *   GET  /api/curve/frames     CVF1 binary frame batch (application/octet-stream)
@@ -251,6 +251,12 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
         return curve_send_error(req, "400 Bad Request",
                                 "{\"ok\":false,\"err\":\"empty body\"}");
     }
+    /* The engine keeps a const pointer to s_http_cfg while a session runs;
+     * only (re)parse when idle. */
+    if (!curve_engine_is_idle()) {
+        return curve_send_error(req, "409 Conflict",
+                                "{\"ok\":false,\"err\":\"busy\"}");
+    }
 
     err = curve_config_parse(s_body, body_len, &s_http_cfg, err_msg, sizeof(err_msg));
     if (err != ESP_OK) {
@@ -267,10 +273,11 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
 
     curve_engine_status(&status);
     (void)snprintf(s_json, sizeof(s_json),
-                   "{\"ok\":true,\"series_count\":%u,\"sample_bytes\":%u,"
-                   "\"interval_us\":%u,\"trigger\":\"%s\","
-                   "\"breakpoint_address\":%u,\"halt\":%s,\"link_hz\":%u,"
-                   "\"dpidr\":\"0x%08X\"}",
+                   "{\"ok\":true,\"group_count\":%u,\"series_count\":%u,"
+                   "\"sample_bytes\":%u,\"interval_us\":%u,"
+                   "\"trigger\":\"%s\",\"breakpoint_address\":%u,"
+                   "\"halt\":%s,\"link_hz\":%u,\"dpidr\":\"0x%08X\"}",
+                   (unsigned)s_http_cfg.group_count,
                    (unsigned)s_http_cfg.series_count,
                    (unsigned)s_http_cfg.sample_bytes,
                    (unsigned)s_http_cfg.interval_us,

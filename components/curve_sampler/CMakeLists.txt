@@ -21,6 +21,7 @@ set(srcs
     "src/curve_json.c"
     "src/curve_ring.c"
     "src/curve_status.c"
+    "src/curve_cvf2.c"
     "src/curve_http.c"
 )
 

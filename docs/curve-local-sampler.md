@@ -266,3 +266,74 @@ overwritten=0。因此 Web UI 仍只暴露 5/10/20/50 ms 本地间隔，1 ms 仅
 - 真机：固定/全局 20 ms Halt OFF ≈50 Hz；栈帧变量 20 ms ≈50 Hz，
   不在栈时 out_of_scope 增长、invalid 0；32×4B 系列 ring_frames=117 可运行。
 
+
+## 9. 多组轮转 + loclist variants（B/D 完整支持，协议 v2）
+
+### 9.1 Start 请求扩展（向后兼容）
+
+```json
+{
+  "interval_us": 20000,
+  "halt": true,
+  "groups": [
+    {
+      "id": 0,
+      "series": [
+        {"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}},
+        {"id":1,"size":4,
+         "variants":[
+           {"pc_low":134386244,"pc_high":134386692,"expr":{"kind":"reg","reg":13,"offset":48}},
+           {"pc_low":134386692,"pc_high":134387000,"expr":{"kind":"reg","reg":7,"offset":-32}}
+         ]}
+      ]
+    },
+    {"id":1,"series":[...]}
+  ]
+}
+```
+- 兼容旧客户端：`groups` 缺省时把根 `series` 当成单 group。
+- 限制：groups 1..8；每组 series 1..32；每组 sum(size) ≤256；总 series ≤256。
+- `variants` 可选、1..16，按 `pc_low/pc_high` 半开区间选择；有 variants 的 series 必须 halt=true；无匹配 → `out_of_scope++`、填 0。
+- `interval_us` 是**每帧周期**；N 组时每组刷新率 = 1/(N×interval_us)，Web 需显示 group 刷新率。
+- Start 响应增加 `group_count`、`series_count`、`sample_bytes`（各 group payload 的最大值）。
+
+### 9.2 采样轮转
+
+- 每个 tick 只采样当前 group，然后 `current_group=(current_group+1)%group_count`。
+- PC 门控/variants/指针/地址过滤逻辑按该 group 的 series 执行。
+- 连续错误/stop 行为不变。
+
+### 9.3 CVF2 二进制帧
+
+`GET /api/curve/frames` 返回（magic `CVF2`，version=2）：
+```
+magic       4B "CVF2"
+version     u8 2
+flags       u8 bit0=gap
+count       u16
+first_seq   u32
+frame_bytes u16   // 所有 group 中最大 payload 字节
+reserved    u16 0
+frames[count]:
+  seq       u32
+  timestamp_us u64
+  group     u8
+  payload_len u16
+  payload   payload_len bytes (按该 group 的 series 顺序)
+```
+- ring 槽按 `frame_bytes` 分配；`payload_len` 每帧实际长度；Web 按 group 的 series sizes 解码。
+- `served_seq`/overwritten/gap 语义沿用。
+- status 增加 `group_count`、`current_group`。
+- 继续支持旧 CVF1（单 group）读取？新固件优先 CVF2；Web 需同时解码 v1/v2（向后兼容旧固件）。
+
+### 9.4 loclist 多段
+
+- Web 对多段变量发送 `variants`（来自 `locationVariants`，每个已有 pcLow/pcHigh/expr）；不再只发第一段。
+- 单段/default 继续用 `expr`/`pc_low/pc_high`。
+- 无 location 仍不可采样。
+
+### 9.5 验收
+
+- 多组（如 2 组）总 series >32（例如 40/64）可启动；页面按 group 映射；每组刷新率约 interval×组数。
+- 多段 loclist 变量在覆盖当前 PC 的变体下采样值与调试器一致；无覆盖时 out_of_scope，不画假数据。
+- 旧单组客户端行为不变；reference firmware 不改。

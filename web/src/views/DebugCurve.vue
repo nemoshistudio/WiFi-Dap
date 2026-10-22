@@ -161,6 +161,9 @@
           <span>{{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b></span>
           <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
           <span>{{ translate('curve.localSeries') }}: <b>{{ seriesList.length }}/{{ seriesLimit }}</b></span>
+          <span>{{ translate('curve.localGroups') }}: <b>{{ localActiveGroupCount }}</b></span>
+          <span>{{ translate('curve.localCurrentGroup') }}: <b>{{ sampling ? ((localCurrentGroup ?? 0) + 1) + '/' + localActiveGroupCount : '-' }}</b></span>
+          <span>{{ translate('curve.localGroupRate') }}: <b>{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
         </template>
         <template v-else>
           <label class="flex items-center gap-2">
@@ -454,13 +457,18 @@ import {
 import {
   CURVE_LOCAL_FLASH_END,
   CURVE_LOCAL_FLASH_START,
-  CURVE_LOCAL_MAX_SERIES,
+  CURVE_LOCAL_MAX_GROUPS,
+  CURVE_LOCAL_MAX_SERIES_PER_GROUP,
+  CURVE_LOCAL_MAX_TOTAL_SERIES,
   CurveLocalError,
+  splitSeriesIntoGroups,
+  type CurveLocalLocationVariant,
   getLocalCurveFrames,
   getLocalCurveStatus,
   parseBreakpointAddressInput,
   startLocalCurve,
   stopLocalCurve,
+  type CurveLocalSeriesSpec,
   type CurveLocalTrigger,
   type LocalCurveStatus,
 } from '@/api/curveLocal'
@@ -529,6 +537,8 @@ interface CurveSeries {
   pcHigh?: number
   /** loclist 多段位置：当前仅第一段（UI 标注限制） */
   loclistMulti?: boolean
+  /** loclist 多段变体（协议 v2：随系列下发，固件按 PC 选择） */
+  pcVariants?: CurveLocalLocationVariant[]
 }
 
 interface CurveNotice {
@@ -565,7 +575,16 @@ const samplingSource = ref<SamplingSource>('web')
 const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 /** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
-const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_SERIES : MAX_CURVE_SERIES))
+const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : MAX_CURVE_SERIES))
+/** 本地 v2：按每组 32 路自动分组（运行前按选择计划，运行后以固件 group_count 为准）。 */
+const localPlannedGroups = computed(() => Math.max(1, Math.ceil(seriesList.value.length / CURVE_LOCAL_MAX_SERIES_PER_GROUP)))
+const localActiveGroupCount = computed(() => (sampling.value && localGroupCount.value > 0 ? localGroupCount.value : localPlannedGroups.value))
+/** 每组刷新率 = 1/(组数 × interval)；总帧率仍约 1/interval（每组轮转）。 */
+const localGroupRefreshRate = computed(() => {
+  const groups = localActiveGroupCount.value
+  if (groups <= 0 || localIntervalMs.value <= 0) return 0
+  return 1000 / (groups * localIntervalMs.value)
+})
 /** Phase 2 触发方式：periodic（周期）或 breakpoint（FPB 命中触发）。 */
 const localTrigger = ref<CurveLocalTrigger>('periodic')
 /** 断点地址输入（十六进制，可带/不带 0x；Thumb bit0 忽略）。 */
@@ -609,6 +628,11 @@ const localOverwrittenCount = ref(0)
 /** PC 门控：当前函数不在栈上、固件填 0 的累计次数（status.out_of_scope）。 */
 const localOutOfScopeCount = ref(0)
 const localGap = ref(false)
+/** 协议 v2：固件 group 数 / 当前轮转 group（status/start 回读）。 */
+const localGroupCount = ref(0)
+const localCurrentGroup = ref<number | null>(null)
+/** 本地选中的系列上限（v2 总 256；每组 32，自动切分）。 */
+const localSeriesLimit = CURVE_LOCAL_MAX_TOTAL_SERIES
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<DisplayFormat>('auto')
@@ -663,7 +687,12 @@ let localSince = 0
 let localBaseTimestampUs = 0
 let localLastPollAt = 0
 let localRateTimestamps: number[] = []
-let localSnapshot: Array<{item: CurveSeries; expr: AddressExpr; size: number}> = []
+/** 本地运行时的系列顺序（carry values 对齐图表 series）。 */
+let localSeriesOrder: CurveSeries[] = []
+/** 协议 v2 group 映射：group id -> 该组内 series 在 localSeriesOrder 中的下标与字节数。 */
+let localGroupEntries: Array<Array<{index: number; item: CurveSeries; size: number}>> = []
+/** 最近一次各 series 的原始字节（多组轮转时未采样组沿用上一次值，避免假 0）。 */
+let localLatestValues = new Map<number, Uint8Array>()
 let sampleSeq = 0
 let sampleEpochMs = 0
 let nextSampleAt = 0
@@ -1253,17 +1282,43 @@ function localErrorText(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown error'
 }
 
-/** 按 series 顺序把一帧 payload 拆成每路原始字节；长度不符时返回 null（跳过该帧）。 */
-function splitLocalPayload(payload: Uint8Array): Uint8Array[] | null {
-  const expected = localSnapshot.reduce((sum, entry) => sum + entry.size, 0)
+/** 按 sizes 拆一帧 payload；长度不符返回 null（跳过该帧）。 */
+function splitPayloadBytes(payload: Uint8Array, sizes: readonly number[]): Uint8Array[] | null {
+  const expected = sizes.reduce((sum, size) => sum + size, 0)
   if (payload.length < expected) return null
   const values: Uint8Array[] = []
   let offset = 0
-  for (const entry of localSnapshot) {
-    values.push(payload.slice(offset, offset + entry.size))
-    offset += entry.size
+  for (const size of sizes) {
+    values.push(payload.slice(offset, offset + size))
+    offset += size
   }
   return values
+}
+
+/** 构建本地 series spec：loclist 多段发 variants（v2），否则 expr +（仅寄存器表达式）PC 门控。 */
+function buildLocalSeriesSpec(item: CurveSeries, id: number, index: number): {spec: CurveLocalSeriesSpec; entry: {index: number; item: CurveSeries; size: number; needsHalt: boolean}} | null {
+  const size = Math.max(1, Math.min(8, item.sample.size))
+  const variants = item.pcVariants?.filter((variant) => validPcRange(variant.pcLow, variant.pcHigh)) ?? []
+  const expr = item.location
+    ?? (item.sample.address ? {kind: 'addr' as const, address: item.sample.address >>> 0} : null)
+  if (variants.length === 0 && !expr) return null
+  const exprNeedsRegisters = variants.length > 0
+    ? variants.some((variant) => addressExprRegisters(variant.expr).size > 0)
+    : addressExprRegisters(expr!).size > 0
+  const spec: CurveLocalSeriesSpec = {id, size}
+  if (variants.length > 0) {
+    // 契约 §9.4：多段 loclist 发送全部 variants，由固件按当前 PC 选择。
+    spec.variants = variants
+  } else {
+    spec.expr = expr!
+    // Lead 修复：仅依赖寄存器的栈帧表达式做 PC 门控；函数内 static 固定地址不门控。
+    const pcRange = exprNeedsRegisters ? validPcRange(item.pcLow, item.pcHigh) : null
+    if (pcRange) {
+      spec.pcLow = pcRange.pcLow
+      spec.pcHigh = pcRange.pcHigh
+    }
+  }
+  return {spec, entry: {index, item, size, needsHalt: exprNeedsRegisters}}
 }
 
 function trimLocalRateWindow(latestSeconds: number): void {
@@ -1280,6 +1335,8 @@ async function refreshLocalStatus(): Promise<void> {
   localHits.value = status.hits ?? null
   localSampled.value = status.sampled ?? null
   localOutOfScopeCount.value = status.outOfScope ?? 0
+  if (status.groupCount !== undefined && status.groupCount > 0) localGroupCount.value = status.groupCount
+  if (status.currentGroup !== undefined) localCurrentGroup.value = status.currentGroup
   if (status.running !== true && status.error > 0) {
     localGap.value = true
   }
@@ -1316,40 +1373,43 @@ function stopLocalSampling(): void {
 
 async function startLocalSampling(): Promise<void> {
   if (sampling.value || seriesList.value.length === 0) return
-  // 设备本地与 WebSocket-DAP 互斥：已连接时先停止/断开，避免 DAP 会话冲突。
   if (connected.value || connecting.value) {
     await onDisconnect()
   }
   const snapshot = seriesList.value.slice()
-  const specs: Array<{id: number; size: number; expr: AddressExpr}> = []
-  const entries: Array<{item: CurveSeries; expr: AddressExpr; size: number}> = []
-  for (let index = 0; index < snapshot.length; index++) {
-    const item = snapshot[index]
-    const expr = item.location
-      ?? (item.sample.address ? {kind: 'addr' as const, address: item.sample.address >>> 0} : null)
-    if (!expr) {
-      notice.value = {type: 'error', title: translate('curve.localRegisterUnsupported')}
-      return
+  // v2：自动按每组 32 路切分（最多 8 组/256 路）；超出明确提示，不伪造。
+  const split = splitSeriesIntoGroups(snapshot, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS)
+  if (split.error === 'empty') return
+  if (split.error === 'too_many_series') {
+    notice.value = {type: 'error', title: translate('curve.localGroupLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES})}
+    return
+  }
+  const groupSpecs: Array<{id: number; series: CurveLocalSeriesSpec[]}> = []
+  const groupEntries: Array<Array<{index: number; item: CurveSeries; size: number}>> = []
+  let flatIndex = 0
+  let needsHalt = false
+  let hasVariants = false
+  for (const group of split.groups) {
+    const series: CurveLocalSeriesSpec[] = []
+    const entries: Array<{index: number; item: CurveSeries; size: number}> = []
+    for (const item of group) {
+      const built = buildLocalSeriesSpec(item, series.length, flatIndex)
+      if (!built) {
+        notice.value = {type: 'error', title: translate('curve.localRegisterUnsupported')}
+        return
+      }
+      series.push(built.spec)
+      entries.push({index: built.entry.index, item: built.entry.item, size: built.entry.size})
+      if (built.entry.needsHalt) needsHalt = true
+      if ((built.spec.variants?.length ?? 0) > 0) hasVariants = true
+      flatIndex += 1
     }
-    entries.push({item, expr, size: Math.max(1, Math.min(8, item.sample.size))})
-    // 只有依赖寄存器的栈帧/指针表达式才需要 PC 门控。函数内 static 局部变量
-    // 在 DWARF 里挂在 subprogram 下、但地址固定（如 target_debug_handle），
-    // 用 PC 门控会把始终有效的全局对象错误清零，必须仅在 halt 表达式上启用。
-    const exprNeedsRegisters = addressExprRegisters(expr).size > 0
-    const pcRange = exprNeedsRegisters ? validPcRange(item.pcLow, item.pcHigh) : null
-    specs.push({
-      id: index,
-      size: Math.max(1, Math.min(8, item.sample.size)),
-      expr,
-      ...(pcRange ?? {}),
-    })
+    groupSpecs.push({id: groupSpecs.length, series})
+    groupEntries.push(entries)
   }
   statusError.value = false
   notice.value = null
-  // 纯固定地址/固定指针表达式不需要暂停核心；只有 reg/cfa（栈帧）才必须 halt。
-  // 这样全局变量/指针成员可走 5 ms 本地轮询（~200 Hz）且不打断目标运行。
   const trigger = localTrigger.value
-  const needsHalt = entries.some((entry) => addressExprRegisters(entry.expr).size > 0)
   let breakpointAddress: number | undefined
   if (trigger === 'breakpoint') {
     const resolution = breakpointResolution.value
@@ -1363,15 +1423,19 @@ async function startLocalSampling(): Promise<void> {
     notice.value = {type: 'error', title: translate('curve.localHaltIntervalTooFast')}
     return
   }
+  const requestBase = {
+    intervalUs: localIntervalMs.value * 1000,
+    trigger,
+    breakpointAddress,
+    // variants 必须 halt（契约 §9.4）；固定地址仅在有寄存器表达式时 halt。breakpoint 忽略 halt。
+    halt: trigger === 'periodic' ? (hasVariants ? true : needsHalt) : undefined,
+  }
+  let started
   try {
-    await startLocalCurve({
-      intervalUs: localIntervalMs.value * 1000,
-      trigger,
-      breakpointAddress,
-      // breakpoint 命中时核心已暂停，halt 字段无意义；只在周期模式下发。
-      halt: trigger === 'periodic' ? needsHalt : undefined,
-      series: specs,
-    })
+    // 单组且无 variants：旧 root-series 请求（兼容旧固件）；多组/variants：v2 groups 请求。
+    started = groupSpecs.length === 1 && !hasVariants
+      ? await startLocalCurve({...requestBase, series: groupSpecs[0].series})
+      : await startLocalCurve({...requestBase, groups: groupSpecs})
   } catch (error) {
     statusError.value = true
     notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
@@ -1380,7 +1444,11 @@ async function startLocalSampling(): Promise<void> {
   // 设备时间戳与既有 ring 时间轴不同源：清空旧数据，按帧时间戳重新累积。
   clearData()
   failedCount.value = 0
-  localSnapshot = entries
+  localSeriesOrder = snapshot
+  localGroupEntries = groupEntries
+  localLatestValues = new Map()
+  localGroupCount.value = started.groupCount > 0 ? started.groupCount : groupEntries.length
+  localCurrentGroup.value = null
   localSince = 0
   localBaseTimestampUs = 0
   localPollCounter = 0
@@ -1422,20 +1490,37 @@ async function localPollTick(runId: number): Promise<void> {
     if (!sampling.value || runId !== localRunId) return
     if (page.frames.length > 0) {
       if (page.gap || (localSince > 0 && page.frames[0].seq > localSince + 1)) localGap.value = true
-      const seriesSnapshot = localSnapshot.map((entry) => entry.item)
       let applied = 0
       for (const frame of page.frames) {
         if (frame.seq <= localSince) continue
         if (localBaseTimestampUs === 0) localBaseTimestampUs = frame.timestampUs
-        const rawValues = splitLocalPayload(frame.payload)
-        if (!rawValues) {
+        // CVF1 单组 group=0；CVF2 按 frame.group 映射该组 series 顺序。
+        const groupIndex = page.version >= 2 ? frame.group : 0
+        const groupEntries = localGroupEntries[groupIndex]
+        if (!groupEntries) {
           localInvalidCount.value += 1
+          localSince = frame.seq
           continue
         }
+        const parts = splitPayloadBytes(frame.payload, groupEntries.map((entry) => entry.size))
+        if (!parts) {
+          localInvalidCount.value += 1
+          localSince = frame.seq
+          continue
+        }
+        groupEntries.forEach((entry, slot) => {
+          localLatestValues.set(entry.item.id, parts[slot] ?? new Uint8Array(entry.size))
+        })
+        // 多组轮转：本轮未采样的组沿用最近值，保持图表连续（不写假 0）。
+        const rawValues = localSeriesOrder.map((item) => {
+          const latest = localLatestValues.get(item.id)
+          return latest ?? new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
+        })
         const seconds = (frame.timestampUs - localBaseTimestampUs) / 1e6
-        pushSample(seconds, rawValues, seriesSnapshot)
+        pushSample(seconds, rawValues, localSeriesOrder)
         localRateTimestamps.push(seconds)
         trimLocalRateWindow(seconds)
+        localCurrentGroup.value = groupIndex
         localSince = frame.seq
         applied += 1
       }
@@ -1980,8 +2065,8 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
   const register = node.sample?.register
   if (isLocalSource.value && !localExprForNode(node)) return null
   if (seriesList.value.some((item) => item.key === key)) return null
-  if (isLocalSource.value && seriesList.value.length >= CURVE_LOCAL_MAX_SERIES) {
-    globalNotify(translate('curve.localSeriesLimit', {count: CURVE_LOCAL_MAX_SERIES}), 'warning')
+  if (isLocalSource.value && seriesList.value.length >= CURVE_LOCAL_MAX_TOTAL_SERIES) {
+    globalNotify(translate('curve.localSeriesLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES}), 'warning')
     return null
   }
   if (!isLocalSource.value && seriesList.value.length >= MAX_CURVE_SERIES) {
@@ -2005,7 +2090,7 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
     register,
     loclistMulti: node.loclistMulti === true,
     ...(node.locationVariants && node.locationVariants.length > 0
-      ? {pcLow: node.locationVariants[0].pcLow, pcHigh: node.locationVariants[0].pcHigh}
+      ? {pcVariants: node.locationVariants.map((variant) => ({pcLow: variant.pcLow, pcHigh: variant.pcHigh, expr: variant.expr}))}
       : (validPcRange(node.pcLow, node.pcHigh) ?? {})),
   }
   seriesLo.set(series.id, new Uint32Array(MAX_POINTS))
@@ -2137,8 +2222,12 @@ function addManualAddress(): void {
       addressError.value = translate('curve.invalidAddress')
       continue
     }
-    if (seriesList.value.length >= MAX_CURVE_SERIES) {
-      globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
+    const addLimit = isLocalSource.value ? localSeriesLimit : MAX_CURVE_SERIES
+    if (seriesList.value.length >= addLimit) {
+      const message = isLocalSource.value
+        ? translate('curve.localSeriesLimit', {count: addLimit})
+        : translate('curve.maxSeries', {max: addLimit})
+      globalNotify(message, 'warning')
       break
     }
     const name = formatHex32(address)

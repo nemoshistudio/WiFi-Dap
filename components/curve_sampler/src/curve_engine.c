@@ -9,9 +9,10 @@
  *   start:  tcp_server_kick_session() -> dap_handle_request_reset(DELETE_HANDLE)
  *           + dap_handle_wait_reset() -> tf_swd_link_init() (2/1/0.5 MHz retry)
  *           -> periodic esp_timer tick -> sample loop
- *   tick:   [halt] -> read needed core regs (DCRSR/DCRDR) -> evaluate address
- *           expressions -> read series bytes over the AHB-AP -> [resume] ->
- *           append one CVF1 frame to the ring
+ *   tick:   sample the current group: [halt] -> read needed core regs ->
+ *           evaluate expressions -> read series bytes over the AHB-AP ->
+ *           [resume] -> append one CVF2 frame to the ring -> round-robin the
+ *           next group
  *   stop:   stop the tick timer -> resume the target -> release the DAP
  *           (RESET_HANDLE) -> idle
  *
@@ -79,9 +80,10 @@ static struct {
     volatile bool stop_req;
     curve_worker_state_t worker_state;
     bool running;
+    uint8_t current_group;       /* round-robin sampling cursor (v2) */
     bool dap_held;               /* worker task only */
 
-    curve_config_t cfg;          /* immutable while running */
+    const curve_config_t *cfg;   /* owned by HTTP layer; immutable while running */
     uint32_t link_hz;
     uint32_t dpidr;
     esp_err_t cmd_result;
@@ -95,6 +97,8 @@ static struct {
     uint32_t *ring_seq;
     uint64_t *ring_ts;
     uint8_t *ring_payload;
+    uint8_t *ring_group;         /* CVF2 per-frame group index */
+    uint16_t *ring_len;          /* CVF2 per-frame payload_len */
     curve_ring_t ring;           /* seq/count/served/overwritten bookkeeping */
 
     /* Phase 2: FPB breakpoint state (worker task only) */
@@ -143,26 +147,6 @@ static void engine_set_message(const char *fmt, ...)
     (void)vsnprintf(s_engine.message, sizeof(s_engine.message), fmt, ap);
     va_end(ap);
     engine_unlock();
-}
-
-static void put_u16(uint8_t *p, uint16_t v)
-{
-    p[0] = (uint8_t)(v & 0xFFU);
-    p[1] = (uint8_t)((v >> 8) & 0xFFU);
-}
-
-static void put_u32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)(v & 0xFFU);
-    p[1] = (uint8_t)((v >> 8) & 0xFFU);
-    p[2] = (uint8_t)((v >> 16) & 0xFFU);
-    p[3] = (uint8_t)((v >> 24) & 0xFFU);
-}
-
-static void put_u64(uint8_t *p, uint64_t v)
-{
-    put_u32(p, (uint32_t)(v & 0xFFFFFFFFULL));
-    put_u32(p + 4, (uint32_t)((v >> 32) & 0xFFFFFFFFULL));
 }
 
 /** Target flash sessions and local curve sampling share the same DAP engine:
@@ -294,11 +278,14 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
 {
     size_t seq_bytes;
     size_t ts_bytes;
+    size_t group_bytes;
+    size_t len_bytes;
     size_t payload_bytes;
     size_t total_bytes;
     uint32_t capacity;
     uint8_t *block;
     size_t offset;
+    uint32_t attempt_capacity;
 
     if (frame_bytes == 0U) {
         return ESP_ERR_INVALID_ARG;
@@ -312,24 +299,29 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
         ESP_LOGI(CURVE_TAG, "reusing ring (%u frames x %u B)",
                  (unsigned)capacity, (unsigned)frame_bytes);
     } else {
-        /* Large payloads (32 series) can exceed the fragmented WiFi heap even
-         * though the nominal 32 KiB budget looks fine. Free the old ring first
-         * and, on allocation failure, halve the frame count down to 32 frames
-         * instead of failing the whole start request. */
+        /* Large payloads (v2: up to 8 groups x 256 B) can exceed the fragmented
+         * WiFi heap even though the nominal 32 KiB budget looks fine.  Free the
+         * old ring first and, on allocation failure, halve the frame count down
+         * to 32 frames instead of failing the whole start request. */
         free(s_engine.ring_block);
         s_engine.ring_block = NULL;
         s_engine.ring_seq = NULL;
         s_engine.ring_ts = NULL;
+        s_engine.ring_group = NULL;
+        s_engine.ring_len = NULL;
         s_engine.ring_payload = NULL;
         s_engine.ring_frame_bytes = 0U;
         s_engine.ring_capacity = 0U;
         block = NULL;
-        uint32_t attempt_capacity = capacity;
+        attempt_capacity = capacity;
         while (attempt_capacity >= 32U) {
             seq_bytes = sizeof(uint32_t) * (size_t)attempt_capacity;
             ts_bytes = sizeof(uint64_t) * (size_t)attempt_capacity;
+            group_bytes = sizeof(uint8_t) * (size_t)attempt_capacity;
+            len_bytes = sizeof(uint16_t) * (size_t)attempt_capacity;
             payload_bytes = (size_t)frame_bytes * (size_t)attempt_capacity;
-            total_bytes = seq_bytes + ts_bytes + payload_bytes;
+            total_bytes = seq_bytes + ts_bytes + group_bytes + len_bytes +
+                          payload_bytes;
             block = (uint8_t *)malloc(total_bytes);
             if (block != NULL) {
                 capacity = attempt_capacity;
@@ -342,15 +334,20 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
                      (unsigned)capacity, (unsigned)frame_bytes);
             return ESP_ERR_NO_MEM;
         }
-        s_engine.ring_block = block;
+        offset = 0U;
         s_engine.ring_seq = (uint32_t *)block;
-        offset = seq_bytes;
+        offset += seq_bytes;
         s_engine.ring_ts = (uint64_t *)(block + offset);
         offset += ts_bytes;
+        s_engine.ring_group = block + offset;
+        offset += group_bytes;
+        s_engine.ring_len = (uint16_t *)(block + offset);
+        offset += len_bytes;
         s_engine.ring_payload = block + offset;
+        s_engine.ring_block = block;
         s_engine.ring_frame_bytes = frame_bytes;
         s_engine.ring_capacity = capacity;
-        ESP_LOGI(CURVE_TAG, "ring: %u frames x %u B (%u bytes heap)",
+        ESP_LOGI(CURVE_TAG, "ring: %u frames x %u B CVF2 (%u bytes heap)",
                  (unsigned)capacity, (unsigned)frame_bytes, (unsigned)total_bytes);
     }
 
@@ -364,10 +361,12 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
     s_engine.stat_hits = 0U;
     s_engine.stat_sampled = 0U;
     s_engine.stat_throttled = 0U;
+    s_engine.current_group = 0U;
     return ESP_OK;
 }
 
-static void engine_record_frame(const uint8_t *payload, uint64_t timestamp_us,
+static void engine_record_frame(const uint8_t *payload, uint16_t payload_len,
+                                uint8_t group, uint64_t timestamp_us,
                                 uint32_t invalid, uint32_t out_of_scope,
                                 bool tick_ok, uint32_t tick_us,
                                 esp_err_t tick_err)
@@ -376,15 +375,19 @@ static void engine_record_frame(const uint8_t *payload, uint64_t timestamp_us,
     uint32_t seq = 0U;
 
     engine_lock();
-    if (s_engine.ring_block != NULL && s_engine.ring_payload != NULL) {
+    if (s_engine.ring_block != NULL && s_engine.ring_payload != NULL &&
+        payload_len <= s_engine.ring_frame_bytes) {
         /* curve_ring_begin_write() only counts a frame as overwritten when it
          * is evicted before a frames?since=... response delivered it. */
         curve_ring_begin_write(&s_engine.ring, &slot, &seq);
         if (seq != 0U) {
             s_engine.ring_seq[slot] = seq;
             s_engine.ring_ts[slot] = timestamp_us;
-            memcpy(s_engine.ring_payload + (size_t)slot * s_engine.ring_frame_bytes,
-                   payload, s_engine.ring_frame_bytes);
+            s_engine.ring_group[slot] = group;
+            s_engine.ring_len[slot] = payload_len;
+            memcpy(s_engine.ring_payload +
+                       (size_t)slot * s_engine.ring_frame_bytes,
+                   payload, payload_len);
             curve_ring_commit_write(&s_engine.ring);
         }
         s_engine.stat_invalid += invalid;
@@ -465,50 +468,64 @@ static esp_err_t curve_ensure_core_running(void)
 }
 
 /**
- * @brief Read one sample: core registers (only when the expressions need them
- *        and the core is halted), evaluate every series expression and read the
- *        target memory.
+ * @brief Read one sample for one group: core registers (only when the group's
+ *        expressions need them and the core is halted), select the expression
+ *        (single / PC gate / loclist variant), evaluate it and read the target
+ *        memory.
  *
- * Phase 2.5 PC scope: when `cfg->pc_gate_count > 0`, the caller reads r15 once
- * per tick and passes it here.  `pc_state` is:
- *   0 = PC not available (no-halt periodic mode: the core is running and DCRSR
- *       cannot be read) -> gated series are zeroed and counted out_of_scope;
- *   1 = PC valid -> gated series outside [pc_low, pc_high) are zeroed and
- *       counted out_of_scope;
- *   2 = PC read failed -> gated series are zeroed and counted invalid (a real
- *       read failure, like an unreadable target address).
- * `payload` must have room for cfg->sample_bytes and is zero-filled first, so
- * gated/invalid/unreadable series stay 0 in the frame.  *invalid_out counts
- * address/read failures and *out_of_scope_out counts series skipped by the PC
- * gate; neither aborts the session.
+ * `pc_state` mirrors the Phase 2.5 contract:
+ *   0 = PC not available (no-halt periodic mode) -> series that need the PC are
+ *       zeroed and counted out_of_scope;
+ *   1 = PC valid -> loclist variant selection / single PC gate;
+ *   2 = PC read failed -> series that need the PC are zeroed and counted
+ *       invalid (a real read failure).
+ *
+ * `payload` must have room for cfg->sample_bytes (max group payload) and is
+ * zero-filled first, so skipped/invalid series stay 0.  *payload_len_out is the
+ * group's payload length (== group sample_bytes) and becomes the CVF2
+ * payload_len.
  */
-static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
-                                 uint8_t pc_state, uint32_t pc_value,
-                                 uint8_t *payload, uint32_t *invalid_out,
+static void curve_collect_sample(const curve_config_t *cfg, uint8_t group_index,
+                                 bool core_halted, uint8_t pc_state,
+                                 uint32_t pc_value, uint8_t *payload,
+                                 uint16_t *payload_len_out,
+                                 uint32_t *invalid_out,
                                  uint32_t *out_of_scope_out,
                                  bool *ok_out, esp_err_t *err_out)
 {
+    const curve_group_t *group;
     uint32_t reg_values[CURVE_MAX_CORE_REGS];
     bool reg_valid[CURVE_MAX_CORE_REGS];
     uint32_t invalid = 0U;
     uint32_t out_of_scope = 0U;
     uint16_t offset = 0U;
+    uint16_t first;
+    uint16_t last;
     bool ok = true;
     esp_err_t tick_err = ESP_OK;
 
+    if (cfg == NULL || group_index >= cfg->group_count) {
+        *payload_len_out = 0U;
+        *invalid_out = 0U;
+        *out_of_scope_out = 0U;
+        *ok_out = false;
+        *err_out = ESP_ERR_INVALID_ARG;
+        return;
+    }
+    group = &cfg->groups[group_index];
     memset(reg_valid, 0, sizeof(reg_valid));
-    memset(payload, 0, cfg->sample_bytes);
+    memset(payload, 0, group->sample_bytes);
 
-    /* Reuse the PC read done for the scope gate if an expression also needs
-     * r15 (one DCRSR read per tick). */
+    /* Reuse the PC read done for the scope gate/variants if an expression also
+     * needs r15 (one DCRSR read per tick). */
     if (pc_state == 1U) {
         reg_values[15] = pc_value;
         reg_valid[15] = true;
     }
 
-    if (core_halted && cfg->reg_count > 0U) {
-        for (uint8_t i = 0U; i < cfg->reg_count; i++) {
-            uint8_t reg = cfg->regs[i];
+    if (core_halted && group->reg_count > 0U) {
+        for (uint8_t i = 0U; i < group->reg_count; i++) {
+            uint8_t reg = group->regs[i];
             uint32_t value = 0U;
             esp_err_t err;
 
@@ -526,14 +543,18 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
         }
     }
 
-    for (uint8_t i = 0U; i < cfg->series_count; i++) {
-        const curve_series_t *series = &cfg->series[i];
+    first = group->series_first;
+    last = (uint16_t)(first + group->series_count);
+    for (uint16_t si = first; si < last; si++) {
+        const curve_series_t *series = &cfg->series[si];
         uint32_t address = 0U;
+        uint16_t expr_index = series->expr;
         curve_eval_result_t res;
 
-        if (series->pc_gate) {
+        if (curve_series_needs_pc(series)) {
             if (pc_state == 1U) {
-                if (!curve_pc_in_scope(series->pc_low, series->pc_high, pc_value)) {
+                expr_index = curve_series_expr_for_pc(cfg, series, pc_value);
+                if (expr_index == CURVE_EXPR_NONE) {
                     out_of_scope++;
                     offset += series->size;
                     continue;
@@ -551,7 +572,7 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
             }
         }
 
-        res = curve_expr_eval(cfg, series->expr, reg_values, reg_valid, &address);
+        res = curve_expr_eval(cfg, expr_index, reg_values, reg_valid, &address);
         if (res == CURVE_EVAL_OK && curve_addr_range_ok(address, series->size)) {
             esp_err_t err = tf_swd_read_mem(address, payload + offset, series->size);
 
@@ -574,6 +595,7 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
         offset += series->size;
     }
 
+    *payload_len_out = offset;
     *invalid_out = invalid;
     *out_of_scope_out = out_of_scope;
     *ok_out = ok;
@@ -581,17 +603,23 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
 }
 
 /* ------------------------------------------------------------------------- */
-/* periodic trigger (Phase 1): halt -> sample -> resume every interval_us    */
+/* periodic trigger: halt -> sample current group -> resume every interval   */
 /* ------------------------------------------------------------------------- */
 
 static void curve_periodic_loop(void)
 {
     uint8_t payload[CURVE_MAX_SAMPLE_BYTES];
-    const curve_config_t *cfg = &s_engine.cfg;
+    const curve_config_t *cfg = s_engine.cfg;
     bool halted = false;
     uint32_t consecutive_errors = 0U;
-    TickType_t tick_wait = pdMS_TO_TICKS(cfg->interval_us / 1000U) * 2U +
-                           pdMS_TO_TICKS(1000U);
+    TickType_t tick_wait;
+
+    if (cfg == NULL) {
+        engine_set_message("stopped: no configuration");
+        return;
+    }
+    tick_wait = pdMS_TO_TICKS(cfg->interval_us / 1000U) * 2U +
+                pdMS_TO_TICKS(1000U);
 
     if (esp_timer_start_periodic(s_engine.tick_timer, cfg->interval_us) != ESP_OK) {
         engine_set_message("stopped: tick timer start failed");
@@ -615,8 +643,16 @@ static void curve_periodic_loop(void)
         esp_err_t tick_err = ESP_OK;
         uint32_t invalid = 0U;
         uint32_t out_of_scope = 0U;
+        uint16_t payload_len = 0U;
         uint8_t pc_state = 0U;
         uint32_t pc_value = 0U;
+        uint8_t group_index = s_engine.current_group;
+        const curve_group_t *group;
+
+        if (group_index >= cfg->group_count) {
+            group_index = 0U;
+        }
+        group = &cfg->groups[group_index];
 
         if (cfg->halt) {
             esp_err_t err = tf_swd_halt();
@@ -628,9 +664,9 @@ static void curve_periodic_loop(void)
             }
         }
 
-        /* Phase 2.5: one PC read per tick for PC-scoped series.  DCRSR is only
+        /* One PC read per tick when the current group needs it.  DCRSR is only
          * readable while the core is halted (no-halt mode keeps pc_state=0). */
-        if (cfg->pc_gate_count > 0U && halted) {
+        if (group->pc_needed && halted) {
             esp_err_t err = tf_swd_read_reg(15U, &pc_value);
             if (err == ESP_OK) {
                 pc_state = 1U;
@@ -647,9 +683,9 @@ static void curve_periodic_loop(void)
             bool collect_ok = true;
             esp_err_t collect_err = ESP_OK;
 
-            curve_collect_sample(cfg, halted, pc_state, pc_value, payload,
-                                 &invalid, &out_of_scope, &collect_ok,
-                                 &collect_err);
+            curve_collect_sample(cfg, group_index, halted, pc_state, pc_value,
+                                 payload, &payload_len, &invalid, &out_of_scope,
+                                 &collect_ok, &collect_err);
             if (!collect_ok) {
                 tick_ok = false;
                 if (tick_err == ESP_OK) {
@@ -668,9 +704,16 @@ static void curve_periodic_loop(void)
             }
         }
 
-        int64_t t_end = esp_timer_get_time();
-        engine_record_frame(payload, (uint64_t)t_start, invalid, out_of_scope,
-                            tick_ok, (uint32_t)(t_end - t_start), tick_err);
+        {
+            int64_t t_end = esp_timer_get_time();
+
+            engine_record_frame(payload, payload_len, group_index,
+                                (uint64_t)t_start, invalid, out_of_scope,
+                                tick_ok, (uint32_t)(t_end - t_start), tick_err);
+        }
+        engine_lock();
+        s_engine.current_group = curve_next_group(group_index, cfg->group_count);
+        engine_unlock();
 
         if (tick_ok) {
             consecutive_errors = 0U;
@@ -792,15 +835,19 @@ static void curve_fpb_restore(void)
 static void curve_breakpoint_loop(void)
 {
     uint8_t payload[CURVE_MAX_SAMPLE_BYTES];
-    const curve_config_t *cfg = &s_engine.cfg;
-    const uint32_t compare_value =
-        curve_breakpoint_compare_value(cfg->breakpoint_address);
+    const curve_config_t *cfg = s_engine.cfg;
+    uint32_t compare_value;
     uint32_t consecutive_errors = 0U;
     bool core_halted = false;
     bool fpb_active = false;
     bool armed = false;
     esp_err_t err;
 
+    if (cfg == NULL) {
+        engine_set_message("breakpoint: no configuration");
+        return;
+    }
+    compare_value = curve_breakpoint_compare_value(cfg->breakpoint_address);
     (void)esp_timer_stop(s_engine.tick_timer);
 
     err = curve_ensure_core_running();
@@ -877,17 +924,25 @@ static void curve_breakpoint_loop(void)
             esp_err_t collect_err = ESP_OK;
             uint32_t invalid = 0U;
             uint32_t out_of_scope = 0U;
+            uint16_t payload_len = 0U;
             uint32_t sample_us;
             uint8_t pc_state = 0U;
             uint32_t pc_value = 0U;
+            uint8_t group_index = s_engine.current_group;
+            const curve_group_t *group;
+
+            if (group_index >= cfg->group_count) {
+                group_index = 0U;
+            }
+            group = &cfg->groups[group_index];
 
             engine_lock();
             s_engine.stat_hits++;
             engine_unlock();
 
-            /* Phase 2.5: one PC read for PC-scoped series (the core is halted
-             * by the FPB hit, so DCRSR works exactly like periodic halt). */
-            if (cfg->pc_gate_count > 0U) {
+            /* One PC read per hit when the current group needs it (the core is
+             * halted by the FPB hit, so DCRSR works like periodic halt). */
+            if (group->pc_needed) {
                 esp_err_t perr = tf_swd_read_reg(15U, &pc_value);
 
                 if (perr == ESP_OK) {
@@ -899,14 +954,16 @@ static void curve_breakpoint_loop(void)
                 }
             }
 
-            curve_collect_sample(cfg, true, pc_state, pc_value, payload,
-                                 &invalid, &out_of_scope, &collect_ok,
-                                 &collect_err);
+            curve_collect_sample(cfg, group_index, true, pc_state, pc_value,
+                                 payload, &payload_len, &invalid, &out_of_scope,
+                                 &collect_ok, &collect_err);
             sample_us = (uint32_t)(esp_timer_get_time() - t_hit);
-            engine_record_frame(payload, (uint64_t)t_hit, invalid, out_of_scope,
+            engine_record_frame(payload, payload_len, group_index,
+                                (uint64_t)t_hit, invalid, out_of_scope,
                                 collect_ok, sample_us, collect_err);
             engine_lock();
             s_engine.stat_sampled++;
+            s_engine.current_group = curve_next_group(group_index, cfg->group_count);
             engine_unlock();
             if (!collect_ok) {
                 ESP_LOGW(CURVE_TAG, "breakpoint sample failed (%s)",
@@ -1182,16 +1239,22 @@ static void curve_worker_start_cmd(void)
     engine_lock();
     aborted = s_engine.stop_req;
     if (!aborted) {
+        const curve_config_t *cfg = s_engine.cfg;
+
         s_engine.running = true;
         s_engine.cmd_result = ESP_OK;
-        if (s_engine.cfg.trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+        if (cfg != NULL &&
+            cfg->trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
             (void)snprintf(s_engine.message, sizeof(s_engine.message),
-                           "breakpoint sampling @0x%08X (throttle %u us)",
-                           (unsigned)s_engine.cfg.breakpoint_address,
-                           (unsigned)s_engine.cfg.interval_us);
-        } else {
+                           "breakpoint sampling @0x%08X (%u group(s), throttle %u us)",
+                           (unsigned)cfg->breakpoint_address,
+                           (unsigned)cfg->group_count,
+                           (unsigned)cfg->interval_us);
+        } else if (cfg != NULL) {
             (void)snprintf(s_engine.message, sizeof(s_engine.message),
-                           "sampling @%u us", (unsigned)s_engine.cfg.interval_us);
+                           "sampling %u group(s) @%u us",
+                           (unsigned)cfg->group_count,
+                           (unsigned)cfg->interval_us);
         }
     }
     engine_unlock();
@@ -1203,7 +1266,8 @@ static void curve_worker_start_cmd(void)
         return;
     }
 
-    if (s_engine.cfg.trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+    if (s_engine.cfg != NULL &&
+        s_engine.cfg->trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
         curve_breakpoint_loop();
     } else {
         curve_periodic_loop();
@@ -1297,6 +1361,19 @@ esp_err_t curve_engine_init(void)
     return ESP_OK;
 }
 
+bool curve_engine_is_idle(void)
+{
+    bool idle;
+
+    if (curve_engine_init() != ESP_OK) {
+        return true; /* init failed: start will surface the error */
+    }
+    engine_lock();
+    idle = !s_engine.running && s_engine.worker_state == CURVE_WORKER_IDLE;
+    engine_unlock();
+    return idle;
+}
+
 esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_len)
 {
     esp_err_t rc;
@@ -1337,7 +1414,8 @@ esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_le
         }
         return rc;
     }
-    s_engine.cfg = *cfg;
+    s_engine.cfg = cfg; /* HTTP-owned static config; valid while running */
+    s_engine.current_group = 0U;
     s_engine.message[0] = '\0';
     s_engine.cmd_result = ESP_FAIL;
     s_engine.stop_req = false;
@@ -1496,10 +1574,16 @@ void curve_engine_status(curve_status_t *out)
     }
     engine_lock();
     out->running = s_engine.running;
-    out->halt = s_engine.cfg.halt;
-    out->interval_us = s_engine.cfg.interval_us;
-    out->sample_bytes = s_engine.cfg.sample_bytes;
-    out->series_count = s_engine.cfg.series_count;
+    if (s_engine.cfg != NULL) {
+        out->halt = s_engine.cfg->halt;
+        out->interval_us = s_engine.cfg->interval_us;
+        out->sample_bytes = s_engine.cfg->sample_bytes;
+        out->series_count = s_engine.cfg->series_count;
+        out->group_count = s_engine.cfg->group_count;
+        out->trigger = s_engine.cfg->trigger;
+        out->breakpoint_address = s_engine.cfg->breakpoint_address;
+    }
+    out->current_group = s_engine.current_group;
     out->frames = s_engine.ring.frames_total;
     out->overwritten = s_engine.ring.overwritten;
     out->ring_capacity = s_engine.ring.capacity;
@@ -1512,8 +1596,6 @@ void curve_engine_status(curve_status_t *out)
     out->dpidr = s_engine.dpidr;
     out->last_tick_us = s_engine.stat_last_tick_us;
     out->last_error = s_engine.stat_last_error;
-    out->trigger = s_engine.cfg.trigger;
-    out->breakpoint_address = s_engine.cfg.breakpoint_address;
     out->hits = s_engine.stat_hits;
     out->sampled = s_engine.stat_sampled;
     out->throttled = s_engine.stat_throttled;
@@ -1565,37 +1647,39 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
         return ESP_OK; /* 204: no frame newer than `since`, served cursor unchanged */
     }
     frame_bytes = s_engine.ring_frame_bytes;
-    len = CURVE_FRAME_HEADER_BYTES +
-          (size_t)count * (CURVE_FRAME_META_BYTES + frame_bytes);
+
+    /* CVF2 frames are variable length (payload_len per group): compute the exact
+     * response size first, then pack header + frames in one buffer. */
+    len = CURVE_FRAME_HEADER_BYTES;
+    for (uint32_t i = 0U; i < count; i++) {
+        uint32_t seq = first_seq + i;
+        uint32_t slot = (seq - 1U) % s_engine.ring.capacity;
+
+        len += CURVE_FRAME_META_BYTES + s_engine.ring_len[slot];
+    }
     buf = (uint8_t *)malloc(len);
     if (buf == NULL) {
         engine_unlock();
         return ESP_ERR_NO_MEM;
     }
 
-    buf[0] = 'C'; /* "CVF1" (0x43 0x56 0x46 0x31) */
-    buf[1] = 'V';
-    buf[2] = 'F';
-    buf[3] = '1';
-    buf[4] = 1U; /* version */
-    buf[5] = gap ? 0x01U : 0x00U;
-    put_u16(buf + 6, (uint16_t)count);
-    put_u32(buf + 8, first_seq);
-    put_u16(buf + 12, (uint16_t)frame_bytes);
-    put_u16(buf + 14, 0U);
-
+    (void)curve_cvf2_write_header(buf, (uint16_t)count, first_seq,
+                                  (uint16_t)frame_bytes, gap);
     offset = CURVE_FRAME_HEADER_BYTES;
     for (uint32_t i = 0U; i < count; i++) {
         uint32_t seq = first_seq + i;
         uint32_t slot = (seq - 1U) % s_engine.ring.capacity;
+        uint16_t payload_len = s_engine.ring_len[slot];
 
-        put_u32(buf + offset, s_engine.ring_seq[slot]);
-        offset += 4U;
-        put_u64(buf + offset, s_engine.ring_ts[slot]);
-        offset += 8U;
-        memcpy(buf + offset, s_engine.ring_payload + (size_t)slot * frame_bytes,
-               frame_bytes);
-        offset += frame_bytes;
+        offset += curve_cvf2_write_frame_meta(buf + offset,
+                                              s_engine.ring_seq[slot],
+                                              s_engine.ring_ts[slot],
+                                              s_engine.ring_group[slot],
+                                              payload_len);
+        memcpy(buf + offset,
+               s_engine.ring_payload + (size_t)slot * frame_bytes,
+               payload_len);
+        offset += payload_len;
     }
     /* The batch was handed to the client: everything up to the last seq of
      * this response counts as served, so only frames evicted before a client
@@ -1604,7 +1688,7 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
     engine_unlock();
 
     *out_buf = buf;
-    *out_len = len;
+    *out_len = offset;
     *no_data = false;
     return ESP_OK;
 }
