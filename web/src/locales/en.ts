@@ -514,5 +514,11 @@ export default {
         localBreakpointInvalid: 'Invalid breakpoint address (Flash 0x08000000–0x08FFFFFF, halfword aligned)',
         localHits: 'Hits',
         localSampled: 'Sampled',
+        localFunction: 'Function',
+        localFunctionPlaceholder: 'Filter by function name or address',
+        localFunctionEmpty: 'No ELF function symbols (upload an ELF with symbols)',
+        localFunctionHint: 'Pick from ELF symbols ({count} functions)',
+        localOffset: 'Offset',
+        localOffsetInvalid: 'Invalid offset (decimal or 0x hex)',
     },
 }

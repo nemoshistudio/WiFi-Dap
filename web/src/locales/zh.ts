@@ -518,5 +518,11 @@ export default {
         localBreakpointInvalid: '断点地址无效（Flash 0x08000000–0x08FFFFFF，半字对齐）',
         localHits: '命中',
         localSampled: '已采样',
+        localFunction: '函数',
+        localFunctionPlaceholder: '过滤函数名/地址',
+        localFunctionEmpty: '无 ELF 函数符号（请上传含符号的 ELF）',
+        localFunctionHint: '从 ELF 符号选择（{count} 个函数）',
+        localOffset: 'Offset（偏移）',
+        localOffsetInvalid: 'Offset 无效（十进制或 0x 十六进制）',
     },
 }

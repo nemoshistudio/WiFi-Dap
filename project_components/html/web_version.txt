@@ -1,8 +1,8 @@
 web_version=1.2.0
 protocol_version=1
-git_tag=v1.2.0-44-gefe88d1-dirty
-git_commit=efe88d1
-build_time=2026-10-22T09:48:46Z
-index_gz_sha256=76f0441b7b242deadf815a005db614443c5fc43552d8c416f9878bb1c65d839a
+git_tag=v1.2.0-45-gbd19095-dirty
+git_commit=bd19095
+build_time=2026-10-22T12:46:46Z
+index_gz_sha256=72a3f72fe8e45ae984e45b995b13850e706c744240d7b6eeff2667ff7b91b386
 worker_gz_sha256=f9cc43c77ee7760106c89d57b95d84ad52b3d555a80983c5677c323a613327b0
-build_info_json_gz_sha256=88da92e8445d0c15c4dcbc76010213eab1be44f12ac1c3b80138552dc80b8681
+build_info_json_gz_sha256=4ab49c670a72c2bf740d9c0c482b1ae981d55e79df686a05e6e47c7d464430ba

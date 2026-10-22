@@ -106,7 +106,43 @@
                 placeholder="0x08001234"
                 class="breakpoint-input"
                 :class="{'is-invalid': !!localBreakpointError}"
+                @input="onBreakpointAddressInput"
             />
+          </label>
+          <label v-if="localTrigger === 'breakpoint'" class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.localFunction') }}</span>
+            <el-select
+                v-model="selectedFunctionAddress"
+                size="small"
+                filterable
+                clearable
+                style="width: 18rem"
+                :disabled="sampling || elfFunctionSymbols.length === 0"
+                :placeholder="elfFunctionSymbols.length === 0 ? translate('curve.localFunctionEmpty') : translate('curve.localFunctionPlaceholder')"
+                @change="onFunctionSelected"
+            >
+              <el-option
+                  v-for="symbol in elfFunctionSymbols"
+                  :key="symbol.address + ':' + symbol.name"
+                  :value="symbol.address"
+                  :label="formatFunctionOption(symbol)"
+              >
+                <span class="font-mono">{{ formatHex32(symbol.address) }}</span>
+                <span class="ml-2">{{ symbol.displayName }}</span>
+              </el-option>
+            </el-select>
+            <span class="text-xs opacity-70">{{ translate('curve.localFunctionHint', {count: elfFunctionSymbols.length}) }}</span>
+          </label>
+          <label v-if="localTrigger === 'breakpoint'" class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.localOffset') }}</span>
+            <el-input
+                v-model="localBreakpointOffsetInput"
+                size="small"
+                style="width: 5.5rem"
+                :disabled="sampling"
+                placeholder="0x10 / 16"
+            />
+            <span v-if="breakpointResolution?.ok" class="font-mono text-xs opacity-70">{{ formatHex32(breakpointResolution.address) }}</span>
           </label>
           <label class="flex items-center gap-2">
             <span class="whitespace-nowrap">{{ localTrigger === 'breakpoint' ? translate('curve.localMinInterval') : translate('curve.localInterval') }}</span>
@@ -384,6 +420,7 @@ import {CmsisDapClient, DapError, MAX_CURVE_SERIES, WsDapTransport, type DapTarg
 import {kickDapSession} from '@/api/apiDap'
 import {
   formatHex32,
+  parseElf32Symbols,
   parseElfVariables,
   type AddressExpr,
   type DisplayFormat,
@@ -393,6 +430,14 @@ import {
   type VariableNode,
 } from '@/utils/elfSymbols'
 import {addressExprIsLive, addressExprRegisters, addressExprText} from '@/utils/dwarfLocation'
+import {
+  buildFunctionSymbols,
+  chooseBreakpointFunction,
+  formatBreakpointAddress,
+  formatFunctionOption,
+  resolveBreakpointWithOffset,
+  type FunctionSymbol,
+} from '@/utils/elfFunctionSymbols'
 import {
   CURVE_LOCAL_MAX_SERIES,
   CurveLocalError,
@@ -503,21 +548,35 @@ const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 const localTrigger = ref<CurveLocalTrigger>('periodic')
 /** 断点地址输入（十六进制，可带/不带 0x；Thumb bit0 忽略）。 */
 const localBreakpointInput = ref('')
+/** 从 ELF 解析出的 Flash 函数符号（局部断点选择器数据）。 */
+const elfFunctionSymbols = shallowRef<FunctionSymbol[]>([])
+/** 函数选择器的当前选中项（地址）；手工改地址时清空。 */
+const selectedFunctionAddress = ref<number | null>(null)
+/** 可选 Offset（hex/dec），用于选“函数入口之后”的指令地址。 */
+const localBreakpointOffsetInput = ref('')
 const localHits = ref<number | null>(null)
 const localSampled = ref<number | null>(null)
 const parsedBreakpointAddress = computed(() => (localTrigger.value === 'breakpoint'
   ? parseBreakpointAddressInput(localBreakpointInput.value)
   : null))
+/** 断点地址 + 可选 Offset 的最终 FPB 地址校验结果。 */
+const breakpointResolution = computed(() => (isLocalSource.value && localTrigger.value === 'breakpoint'
+  ? resolveBreakpointWithOffset(localBreakpointInput.value, localBreakpointOffsetInput.value)
+  : null))
 const localBreakpointError = computed(() => {
   if (!isLocalSource.value || localTrigger.value !== 'breakpoint') return ''
   if (!localBreakpointInput.value.trim()) return translate('curve.localBreakpointRequired')
-  if (parsedBreakpointAddress.value === null) return translate('curve.localBreakpointInvalid')
-  return ''
+  const result = breakpointResolution.value
+  if (!result || result.ok) return ''
+  if (result.reason === 'offset') return translate('curve.localOffsetInvalid')
+  if (result.reason === 'range') return translate('curve.localBreakpointInvalid')
+  return translate('curve.localBreakpointInvalid')
 })
 const localStartDisabled = computed(() => {
   if (seriesList.value.length === 0) return true
   if (!isLocalSource.value) return false
-  return localTrigger.value === 'breakpoint' && parsedBreakpointAddress.value === null
+  if (localTrigger.value !== 'breakpoint') return false
+  return breakpointResolution.value?.ok !== true
 })
 /** 本地采样器是否已 start（用于保证 stop/卸载时 POST /api/curve/stop）。 */
 const localActive = ref(false)
@@ -1258,12 +1317,12 @@ async function startLocalSampling(): Promise<void> {
   const needsHalt = entries.some((entry) => addressExprRegisters(entry.expr).size > 0)
   let breakpointAddress: number | undefined
   if (trigger === 'breakpoint') {
-    const parsed = parseBreakpointAddressInput(localBreakpointInput.value)
-    if (parsed === null) {
+    const resolution = breakpointResolution.value
+    if (!resolution || !resolution.ok) {
       notice.value = {type: 'error', title: translate('curve.localBreakpointInvalid')}
       return
     }
-    breakpointAddress = parsed
+    breakpointAddress = resolution.address
   }
   try {
     await startLocalCurve({
@@ -1388,6 +1447,21 @@ async function onSamplingSourceChange(): Promise<void> {
     localGap.value = false
   }
   scheduleDraw()
+}
+
+/** 函数选择器：选中后自动填 0x%08X（bit0 清 0），地址仍可手工改。 */
+function onFunctionSelected(address: number | null | undefined): void {
+  if (address === null || address === undefined) return
+  const symbol = chooseBreakpointFunction(elfFunctionSymbols.value, address)
+  const normalized = symbol ? symbol.address : (Number(address) & 0xfffffffe) >>> 0
+  localBreakpointInput.value = formatBreakpointAddress(normalized)
+}
+
+/** 手工修改地址时取消函数下拉的选中态（避免显示与实际地址不一致）。 */
+function onBreakpointAddressInput(): void {
+  if (selectedFunctionAddress.value === null) return
+  const parsed = parseBreakpointAddressInput(localBreakpointInput.value)
+  if (parsed === null || parsed !== selectedFunctionAddress.value) selectedFunctionAddress.value = null
 }
 
 /** 切换 Trigger 时清空上一次断点统计/状态显示（周期模式完全兼容）。 */
@@ -1957,6 +2031,12 @@ async function onElfSelected(event: Event): Promise<void> {
     const buffer = await file.arrayBuffer()
     const result = parseElfVariables(buffer)
     elfInfo.value = result
+    try {
+      elfFunctionSymbols.value = buildFunctionSymbols(parseElf32Symbols(buffer).symbols)
+    } catch {
+      elfFunctionSymbols.value = []
+    }
+    selectedFunctionAddress.value = null
     variableListEpoch.value += 1
     variableSearch.value = ''
     expandedKeys.value = new Set()
@@ -1965,6 +2045,8 @@ async function onElfSelected(event: Event): Promise<void> {
     }
   } catch (error) {
     elfInfo.value = null
+    elfFunctionSymbols.value = []
+    selectedFunctionAddress.value = null
     const message = error instanceof Error ? error.message : 'unknown error'
     elfError.value = translate('curve.elfInvalid', {err: message})
   } finally {

@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 433
+const EXPECTED_TOTAL = 439
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 285
+const EXPECTED_ADDED = 291
 
 const errors = []
 const warnings = []
@@ -164,6 +164,9 @@ const ADDED_KEYS = [
         'localTrigger', 'localTriggerPeriodic', 'localTriggerBreakpoint', 'localMinInterval',
         'localBreakpoint', 'localBreakpointHint', 'localBreakpointRequired', 'localBreakpointInvalid',
         'localHits', 'localSampled',
+        // 断点函数符号选择/Offset
+        'localFunction', 'localFunctionPlaceholder', 'localFunctionEmpty', 'localFunctionHint',
+        'localOffset', 'localOffsetInvalid',
     ]),
     ...keys('page', ['debugCurve']),
 ]
