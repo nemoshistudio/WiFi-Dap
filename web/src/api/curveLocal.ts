@@ -73,6 +73,8 @@ export interface StartLocalCurveResult {
 export interface LocalCurveStatus {
     ok: boolean
     running: boolean
+    /** 固件当前是否每拍 halt（false = 纯固定地址/指针的免暂停模式）。 */
+    halt?: boolean
     intervalUs: number
     frames: number
     overwritten: number
@@ -250,6 +252,7 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
     return {
         ok: body.ok !== false,
         running: body.running === true,
+        halt: body.halt === true ? true : body.halt === false ? false : undefined,
         intervalUs: finiteNumber(body.interval_us, 0),
         frames: finiteNumber(body.frames, 0),
         overwritten: finiteNumber(body.overwritten, 0),

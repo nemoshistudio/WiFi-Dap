@@ -98,6 +98,7 @@
           <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
           <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
           <span>{{ translate('curve.localStatus') }}: <b>{{ (sampling && localStatusInfo?.running !== false) ? translate('curve.localRunning') : translate('curve.localStopped') }}</b></span>
+          <span>Halt: <b>{{ localStatusInfo?.halt === false ? 'OFF' : (localStatusInfo?.halt === true ? 'ON' : '-') }}</b></span>
           <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
           <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
           <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
@@ -1201,8 +1202,11 @@ async function startLocalSampling(): Promise<void> {
   }
   statusError.value = false
   notice.value = null
+  // 纯固定地址/固定指针表达式不需要暂停核心；只有 reg/cfa（栈帧）才必须 halt。
+  // 这样全局变量/指针成员可走 5 ms 本地轮询（~200 Hz）且不打断目标运行。
+  const needsHalt = entries.some((entry) => addressExprRegisters(entry.expr).size > 0)
   try {
-    await startLocalCurve({intervalUs: localIntervalMs.value * 1000, halt: true, series: specs})
+    await startLocalCurve({intervalUs: localIntervalMs.value * 1000, halt: needsHalt, series: specs})
   } catch (error) {
     statusError.value = true
     notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
