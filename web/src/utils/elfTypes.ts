@@ -129,13 +129,23 @@ export interface ElfVariablesResult {
 
 /** 可采样地址范围：STM32 典型 Flash / RAM（含 DTCM/AXI SRAM）。 */
 export const TARGET_FLASH_RANGE: readonly [number, number] = [0x08000000, 0x09000000]
+/** 兼容旧调用的宽 RAM 范围；具体可访问区间见 isPlausibleTargetAddress。 */
 export const TARGET_RAM_RANGE: readonly [number, number] = [0x20000000, 0x24080000]
 
+/**
+ * STM32H7 上真实可经 AHB-AP 访问的 RAM 区间：
+ *   - DTCM：0x2000_0000..0x2001_FFFF（128 KB）
+ *   - AXI SRAM：0x2400_0000..0x2407_FFFF（320 KB）
+ * 0x2002_0000..0x23FF_FFFF 是未映射的空洞；访问它会返回 AHB FAULT，
+ * 并让 DAP-AP 进入 sticky error（之后连 halt/读寄存器都 FAULT，只能重连）。
+ * 栈帧变量越界（例如 SP 在 DTCM 顶部 + 正偏移）必须在这里被判定为无效。
+ */
 export function isPlausibleTargetAddress(address: number): boolean {
     const value = address >>> 0
     return (
         (value >= TARGET_FLASH_RANGE[0] && value < TARGET_FLASH_RANGE[1]) ||
-        (value >= TARGET_RAM_RANGE[0] && value < TARGET_RAM_RANGE[1])
+        (value >= 0x20000000 && value < 0x20020000) ||
+        (value >= 0x24000000 && value < 0x24080000)
     )
 }
 

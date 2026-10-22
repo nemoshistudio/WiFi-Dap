@@ -310,7 +310,7 @@ import {computed, onBeforeUnmount, onMounted, ref, shallowRef} from 'vue'
 import {ElMessageBox} from 'element-plus'
 import {translate} from '@/locales'
 import {globalNotify} from '@/composables/notification'
-import {CmsisDapClient, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} from '@/api/wsDap'
+import {CmsisDapClient, DapError, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} from '@/api/wsDap'
 import {kickDapSession} from '@/api/apiDap'
 import {
   formatHex32,
@@ -319,6 +319,7 @@ import {
   type DisplayFormat,
   type ElfVariablesResult,
   type SampleLeaf,
+  isPlausibleTargetAddress,
   type VariableNode,
 } from '@/utils/elfSymbols'
 import {addressExprIsLive, addressExprRegisters, addressExprText} from '@/utils/dwarfLocation'
@@ -333,8 +334,8 @@ const SAMPLE_RATES = [0, 10, 20, 50, 100]
 /** 0 = Auto 模式标识。 */
 const SAMPLE_RATE_AUTO = 0
 /** 调试采样模式：暂停目标读寄存器/栈帧/指针，采样间隔可选（低采样率）。 */
-const DEBUG_INTERVALS = [50, 100, 200]
-const DEFAULT_DEBUG_INTERVAL_MS = 100
+const DEBUG_INTERVALS = [20, 50, 100, 200]
+const DEFAULT_DEBUG_INTERVAL_MS = 50
 /** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
 const PIPELINE_DEPTH = 8
 const AUTO_MIN_RATE = 10
@@ -758,6 +759,12 @@ class WordPrefetcher {
   read(address: number): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const key = address >>> 0
+      // 失效的栈帧/指针值可能落在 0/PPB 等不可访问地址；直接返回 0，
+      // 不要向 DAP 发非法读（否则 ACK=FAULT，整个调试采样链会被打断）。
+      if (!isPlausibleTargetAddress(key)) {
+        resolve(0)
+        return
+      }
       const waiters = this.pending.get(key)
       if (waiters) waiters.push({resolve, reject})
       else this.pending.set(key, [{resolve, reject}])
@@ -839,12 +846,52 @@ async function fetchLiveRawValues(snapshot: readonly CurveSeries[]): Promise<Uin
       ? resolveAddressAsync(item.location, emptyRegisters, prefetcher)
       : Promise.resolve(item.sample.address >>> 0)
   )))
-  return current.sampleRaw(snapshot.map((item, index) => ({address: addresses[index], size: item.sample.size})))
+  const results = snapshot.map((item, index) => ({
+    value: new Uint8Array(Math.max(1, Math.min(8, item.sample.size))),
+    read: {address: addresses[index], size: item.sample.size},
+    valid: isPlausibleTargetAddress(addresses[index]),
+  }))
+  const reads = results.filter((item) => item.valid).map((item) => item.read)
+  if (reads.length > 0) {
+    const raws = await current.sampleRaw(reads)
+    let slot = 0
+    for (const item of results) {
+      if (item.valid) item.value = raws[slot++] ?? item.value
+    }
+  }
+  return results.map((item) => item.value)
 }
 
 /**
  * 调试采样：haltTarget → 读需要的一次性核心寄存器 → 批量指针/内存读取 → resume。
  * 每次采样独立 halt/resume，约 5–20 Hz；出错时立即停止采样并在 finally 恢复目标。
+ */
+function isTransientDebugError(error: unknown): boolean {
+  if (error instanceof DapError) {
+    // ack/target/protocol 通常来自“读到了失效的栈帧/指针地址”或目标暂时
+    // 未就绪；不应立刻停止采样。ws-* 表示连接已经坏了，必须停止/重连。
+    return error.code === 'ack' || error.code === 'target' || error.code === 'protocol'
+  }
+  return false
+}
+
+function noteDebugSampleSuccess(): void {
+  consecutiveFailures = 0
+  const completedAt = performance.now()
+  recentCompletions.push(completedAt)
+  const cutoff = completedAt - 1000
+  while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
+  scheduleStatsFlush()
+  scheduleDraw()
+}
+
+/**
+ * 调试采样：haltTarget → 读需要的一次性核心寄存器 → 批量指针/内存读取 → resume。
+ * 纯实时变量（固定地址/固定指针链）在调试模式下不 halt，直接走实时路径，
+ * 避免为了全局变量也付出暂停目标的代价。
+ *
+ * 失效地址（栈帧未命中/指针垃圾）返回 0 并跳过，不再让单个坏读取终止整场采样；
+ * 偶发 DAP ACK=FAULT 计入 Failures 后继续下一拍，连续 5 次才停止。
  */
 async function debugSampleTick(runId: number): Promise<void> {
   debugTimer = 0
@@ -855,87 +902,118 @@ async function debugSampleTick(runId: number): Promise<void> {
   let snapshot: CurveSeries[] = []
   debugInFlight = true
   try {
-    halted = await current.haltTarget()
-    if (!halted) throw new Error('target halt failed')
     snapshot = seriesList.value.slice()
-    if (snapshot.length === 0) return
-    const registerIds = new Set<number>()
-    for (const item of snapshot) {
-      if (item.register !== undefined) registerIds.add(item.register)
-      if (item.location) {
-        for (const reg of addressExprRegisters(item.location)) registerIds.add(reg)
-      }
+    if (snapshot.length === 0) {
+      stopSampling()
+      return
     }
-    const orderedRegs = [...registerIds].sort((left, right) => left - right)
-    const registers = new Map<number, number>()
-    if (orderedRegs.length > 0) {
-      const values = await current.readCoreRegs(orderedRegs)
-      orderedRegs.forEach((reg, index) => registers.set(reg, values[index] ?? 0))
-    }
-    const prefetcher = new WordPrefetcher(current)
-    const addresses = await Promise.all(snapshot.map((item) => (
-      item.location
-        ? resolveAddressAsync(item.location, registers, prefetcher)
-        : Promise.resolve(item.sample.address >>> 0)
-    )))
-    const values: Uint8Array[] = new Array(snapshot.length)
-    const memoryReads: Array<{address: number; size: number}> = []
-    const memoryIndices: number[] = []
-    for (let index = 0; index < snapshot.length; index++) {
-      const item = snapshot[index]
-      if (item.register !== undefined) {
-        const size = Math.max(1, Math.min(8, item.sample.size))
-        const bytes = new Uint8Array(size)
-        let value = registers.get(item.register) ?? 0
-        for (let byte = 0; byte < size; byte++) {
-          bytes[byte] = value & 0xff
-          value = Math.floor(value / 256)
+    const needsHalt = snapshot.some((item) => item.register !== undefined || (item.location && !addressExprIsLive(item.location)))
+    if (!needsHalt) {
+      const rawValues = await fetchLiveRawValues(snapshot)
+      if (!sampling.value || runId !== debugRunId) return
+      pushSample((begin - sampleEpochMs) / 1000, rawValues, snapshot)
+      noteDebugSampleSuccess()
+    } else {
+      halted = await current.haltTarget(false)
+      if (!halted) throw new DapError('target', 'target halt failed')
+      const registerIds = new Set<number>()
+      for (const item of snapshot) {
+        if (item.register !== undefined) registerIds.add(item.register)
+        if (item.location) {
+          for (const reg of addressExprRegisters(item.location)) registerIds.add(reg)
         }
-        values[index] = bytes
-      } else {
-        memoryReads.push({address: addresses[index], size: item.sample.size})
+      }
+      const orderedRegs = [...registerIds].sort((left, right) => left - right)
+      const registers = new Map<number, number>()
+      if (orderedRegs.length > 0) {
+        const values = await current.readCoreRegs(orderedRegs)
+        orderedRegs.forEach((reg, index) => registers.set(reg, values[index] ?? 0))
+      }
+      const prefetcher = new WordPrefetcher(current)
+      const addresses = await Promise.all(snapshot.map((item) => (
+        item.location
+          ? resolveAddressAsync(item.location, registers, prefetcher)
+          : Promise.resolve(item.sample.address >>> 0)
+      )))
+      const values: Uint8Array[] = new Array(snapshot.length)
+      const memoryReads: Array<{address: number; size: number}> = []
+      const memoryIndices: number[] = []
+      for (let index = 0; index < snapshot.length; index++) {
+        const item = snapshot[index]
+        if (item.register !== undefined) {
+          const size = Math.max(1, Math.min(8, item.sample.size))
+          const bytes = new Uint8Array(size)
+          let value = registers.get(item.register) ?? 0
+          for (let byte = 0; byte < size; byte++) {
+            bytes[byte] = value & 0xff
+            value = Math.floor(value / 256)
+          }
+          values[index] = bytes
+          continue
+        }
+        const address = addresses[index]
+        if (!isPlausibleTargetAddress(address)) {
+          values[index] = new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
+          continue
+        }
+        memoryReads.push({address, size: item.sample.size})
         memoryIndices.push(index)
       }
+      if (memoryReads.length > 0) {
+        const raws = await current.sampleRaw(memoryReads)
+        memoryIndices.forEach((seriesIndex, slot) => {
+          values[seriesIndex] = raws[slot] ?? new Uint8Array(1)
+        })
+      }
+      if (!sampling.value || runId !== debugRunId) return
+      pushSample((begin - sampleEpochMs) / 1000, values, snapshot)
+      noteDebugSampleSuccess()
     }
-    if (memoryReads.length > 0) {
-      const raws = await current.sampleRaw(memoryReads)
-      memoryIndices.forEach((seriesIndex, slot) => {
-        values[seriesIndex] = raws[slot] ?? new Uint8Array(1)
-      })
-    }
-    if (!sampling.value || runId !== debugRunId) return
-    pushSample((begin - sampleEpochMs) / 1000, values, snapshot)
-    consecutiveFailures = 0
-    const completedAt = performance.now()
-    recentCompletions.push(completedAt)
-    const cutoff = completedAt - 1000
-    while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
-    scheduleStatsFlush()
-    scheduleDraw()
   } catch (error) {
     if (!sampling.value || runId !== debugRunId) return
     failedCount.value += 1
     consecutiveFailures += 1
-    stopSampling()
-    statusError.value = true
     const message = error instanceof Error ? error.message : 'unknown error'
-    notice.value = {type: 'error', title: translate('curve.debugSampleFailed', {err: message})}
+    // 失效地址会让 AHB-AP 进入 sticky FAULT；不清除的话后续 halt/读寄存器
+    // 全部失败，只能刷新页面。这里先 ABORT+SELECT+CSW 恢复再继续下一拍。
+    if (error instanceof DapError && error.code === 'ack') {
+      try {
+        await current.recoverFromFault()
+      } catch {
+        /* 连接已断时由 transport 关闭流程处理 */
+      }
+    }
+    if (consecutiveFailures >= 5 || !isTransientDebugError(error) || transport === null || transport.isClosed) {
+      stopSampling()
+      statusError.value = true
+      if (transport === null || transport.isClosed) {
+        notice.value = {type: 'error', title: translate('curve.reconnectHint')}
+      } else {
+        notice.value = {type: 'error', title: translate('curve.debugSampleFailed', {err: message})}
+      }
+    }
     scheduleDraw()
-    return
   } finally {
     debugInFlight = false
     if (halted) {
       try {
-        await current.resumeTarget()
+        await current.resumeTarget(false)
       } catch {
-        // 恢复失败时连接层会报错；这里不覆盖原始错误信息。
+        try {
+          await current.resumeTarget(false)
+        } catch {
+          // 恢复失败时连接层会报错；下一拍重试。
+        }
       }
     }
   }
   if (sampling.value && runId === debugRunId) {
     const elapsed = performance.now() - begin
     if (elapsed > debugIntervalMs.value * 1.5) droppedPending += 1
-    debugTimer = window.setTimeout(() => { void debugSampleTick(runId) }, debugIntervalMs.value)
+    // 按“目标周期”而不是“tick 结束后再等一个周期”调度；否则实际周期是
+    // tick 耗时 + interval（WiFi 下 tick 可达 40–100 ms，6 Hz 的主要来源）。
+    const delay = Math.max(0, debugIntervalMs.value - elapsed)
+    debugTimer = window.setTimeout(() => { void debugSampleTick(runId) }, delay)
     scheduleStatsFlush()
   }
 }
