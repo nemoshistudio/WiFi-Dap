@@ -127,6 +127,12 @@ typedef struct tf_target {
     bool supported;           /* a flash implementation exists (F4/H7 only) */
     uint32_t swd_clock_hz;    /* SWD clock the link came up with */
 
+    /* Detection detail (v3, mirrors wt_tf_info_t). */
+    uint16_t dev_id;          /* DBGMCU DEV_ID (0 when unknown) */
+    char model_candidates[80];/* narrowed candidate group + FSIZE hint */
+    char core[16];            /* Cortex core name from CPUID */
+    uint8_t confidence;       /* wt_tf_confidence_t value (tf_narrow_t mirror) */
+
     /* STM32F4: false = x64 (PSIZE=3) programming, true = x32 fallback. */
     bool f4_x32_mode;
 } tf_target_t;

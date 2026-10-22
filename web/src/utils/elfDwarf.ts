@@ -32,6 +32,7 @@
  */
 import type {AddressExpr, DisplayFormat, ElfSectionInfo, LocationVariant, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
 import {decodeLocationList, type LocationListEntry} from './dwarfLocList'
+import {parseLineTable, type LineTable} from './dwarfLineTable'
 import {isPlausibleTargetAddress, TARGET_FLASH_RANGE} from './elfTypes'
 import {addressExprIsLive} from './dwarfLocation'
 
@@ -79,7 +80,10 @@ const AT_FRAME_BASE = 0x40
 const AT_BYTE_SIZE = 0x0b
 const AT_LOW_PC = 0x11
 const AT_HIGH_PC = 0x12
-const AT_LOCLISTS_BASE = 0x74
+const AT_LOCLISTS_BASE = 0x8c
+/** DWARF5 DW_AT_rnglists_base：.debug_rnglists contribution 的 offset table 起点 */
+const AT_RNGLISTS_BASE = 0x74
+const AT_RANGES = 0x55
 const AT_BIT_SIZE = 0x0d
 const AT_BIT_OFFSET = 0x0c
 const AT_DATA_MEMBER_LOCATION = 0x38
@@ -163,6 +167,16 @@ const OP_BREGX = 0x92
 const OP_CALL_FRAME_CFA = 0x9c
 const OP_STACK_VALUE = 0x9f
 const OP_NOP = 0x96
+
+// DWARF5 .debug_rnglists 条目类型（DW_RLE_*）
+const DW_RLE_END_OF_LIST = 0x00
+const DW_RLE_BASE_ADDRESSX = 0x01
+const DW_RLE_STARTX_ENDX = 0x02
+const DW_RLE_STARTX_LENGTH = 0x03
+const DW_RLE_OFFSET_PAIR = 0x04
+const DW_RLE_BASE_ADDRESS = 0x05
+const DW_RLE_START_END = 0x06
+const DW_RLE_START_LENGTH = 0x07
 
 const DW_ATE_ADDRESS = 0x01
 const DW_ATE_BOOLEAN = 0x02
@@ -318,6 +332,10 @@ interface DwarfSections {
     loc: Uint8Array | null
     /** DWARF5 位置列表节 */
     loclists: Uint8Array | null
+    /** DWARF2/3/4 范围列表节 */
+    ranges: Uint8Array | null
+    /** DWARF5 范围列表节 */
+    rnglists: Uint8Array | null
 }
 
 function sectionBytes(bytes: Uint8Array, sections: readonly ElfSectionInfo[], name: string): Uint8Array | null {
@@ -381,8 +399,16 @@ interface Unit {
     lowPc: number
     /** DWARF5 DW_AT_loclists_base（offset table 起始） */
     loclistsBase: number
-    /** DWARF32=4 / DWARF64=8（loclistx offset 表项宽度） */
+    /** DWARF32=4 / DWARF64=8（loclistx/rnglistx offset 表项宽度） */
     offsetSize: number
+    /** DWARF5 DW_AT_rnglists_base（.debug_rnglists offset table 起点） */
+    rnglistsBase: number
+    /** CU 代码范围（DW_AT_ranges；空表示无/解析失败） */
+    cuRanges: PcRange[]
+    cuRangesLoaded: boolean
+    /** 按 DW_AT_stmt_list 缓存的行号表 */
+    lineTable: LineTable | null
+    lineTableLoaded: boolean
 }
 
 interface Ctx {
@@ -397,6 +423,8 @@ interface Ctx {
     warning: (message: string) => void
     /** Itanium C++ 反混淆（由 elfSymbols 注入，避免循环依赖）。 */
     demangle?: (mangled: string) => string | null
+    /** 按 .debug_line contribution offset（DW_AT_stmt_list）缓存行号表。 */
+    lineTables: Map<number, LineTable>
 }
 
 // ---------------------------------------------------------------------------
@@ -468,11 +496,13 @@ function readForm(reader: ByteReader, form: number, unit: Unit, implicit?: numbe
         case FORM_REF_SUP4:
         case FORM_SEC_OFFSET:
         case FORM_REF4:
-        case FORM_STRX:
         case FORM_ADDRX:
+            return {form, number: reader.u32()}
+        case FORM_STRX:
         case FORM_LOCLISTX:
         case FORM_RNGLISTX:
-            return {form, number: reader.u32()}
+            // DWARF5：strx/loclistx/rnglistx 都是 ULEB128 索引（不是 4 字节偏移）
+            return {form, number: reader.uleb()}
         case FORM_REF_ADDR:
             return {form, number: reader.u32(), refAbsolute: true}
         case FORM_REF1:
@@ -940,6 +970,11 @@ function walkUnit(
         dieOffset: header.dieOffset,
         strOffsetsBase: header.version >= 5 ? 8 : 0,
         addrBase: header.version >= 5 ? 8 : 0,
+        rnglistsBase: 0,
+        cuRanges: [],
+        cuRangesLoaded: false,
+        lineTable: null,
+        lineTableLoaded: false,
         compDir: '',
         stmtList: null,
         root: null,
@@ -1000,6 +1035,8 @@ function walkUnit(
             if (addrBase !== null) unit.addrBase = addrBase
             const loclistsBase = numericAttr(die, AT_LOCLISTS_BASE)
             if (loclistsBase !== null) unit.loclistsBase = loclistsBase
+            const rnglistsBase = numericAttr(die, AT_RNGLISTS_BASE)
+            if (rnglistsBase !== null) unit.rnglistsBase = rnglistsBase
             const lowPc = attrAddress(ctx, unit, die.attrs.get(AT_LOW_PC))
             if (lowPc !== null) unit.lowPc = lowPc >>> 0
         }
@@ -1700,7 +1737,7 @@ function makeLeaf(type: TypeInfo, address: number, bitOffset = 0, bitSize = 0): 
 // ---------------------------------------------------------------------------
 // PC 作用域：变量所属 subprogram 的 DW_AT_low_pc/high_pc（high 可为地址或长度）
 // ---------------------------------------------------------------------------
-interface PcRange {
+export interface PcRange {
     pcLow: number
     pcHigh: number
 }
@@ -2162,29 +2199,22 @@ interface DwarfCollectResult {
     warnings: string[]
 }
 
-export function extractDwarfVariables(
+/**
+ * 建立 DWARF 解析上下文并遍历全部 CU/DIE（extractDwarfVariables 与行表索引共用）。
+ * 缺 .debug_info/.debug_abbrev/.debug_str 时返回 null 并写 warning。
+ */
+function openDwarfContext(
     bytes: Uint8Array,
     sections: readonly ElfSectionInfo[],
-    options: {demangle?: (mangled: string) => string | null} = {},
-): DwarfCollectResult {
-    const warnings: string[] = []
+    warnings: string[],
+    demangle?: (mangled: string) => string | null,
+): {ctx: Ctx; units: Unit[]} | null {
     const info = sectionBytes(bytes, sections, '.debug_info')
     const abbrev = sectionBytes(bytes, sections, '.debug_abbrev')
     const str = sectionBytes(bytes, sections, '.debug_str')
     if (!info || !abbrev || !str) {
-        return {
-            variables: [],
-            dwarfVariables: 0,
-            dwarfNamed: 0,
-            dwarfWithAddress: 0,
-            dwarfSkipped: 0,
-            dwarfLiveSamplable: 0,
-            dwarfHaltSamplable: 0,
-            dwarfPointerExpanded: 0,
-            dwarfNoLocation: 0,
-            units: 0,
-            warnings: ['DWARF: missing .debug_info/.debug_abbrev/.debug_str'],
-        }
+        warnings.push('DWARF: missing .debug_info/.debug_abbrev/.debug_str')
+        return null
     }
     const ctx: Ctx = {
         bytes: info,
@@ -2198,13 +2228,16 @@ export function extractDwarfVariables(
             line: sectionBytes(bytes, sections, '.debug_line'),
             loc: sectionBytes(bytes, sections, '.debug_loc'),
             loclists: sectionBytes(bytes, sections, '.debug_loclists'),
+            ranges: sectionBytes(bytes, sections, '.debug_ranges'),
+            rnglists: sectionBytes(bytes, sections, '.debug_rnglists'),
         },
         units: [],
         dies: new Map(),
+        lineTables: new Map(),
         warning: (message: string) => {
             if (warnings.length < 20) warnings.push(message)
         },
-        demangle: options.demangle,
+        demangle,
     }
 
     const abbrevCache = new Map<number, Map<number, Abbrev>>()
@@ -2220,6 +2253,32 @@ export function extractDwarfVariables(
         offset = header.end
     }
     ctx.units = units
+    return {ctx, units}
+}
+
+export function extractDwarfVariables(
+    bytes: Uint8Array,
+    sections: readonly ElfSectionInfo[],
+    options: {demangle?: (mangled: string) => string | null} = {},
+): DwarfCollectResult {
+    const warnings: string[] = []
+    const opened = openDwarfContext(bytes, sections, warnings, options.demangle)
+    if (!opened) {
+        return {
+            variables: [],
+            dwarfVariables: 0,
+            dwarfNamed: 0,
+            dwarfWithAddress: 0,
+            dwarfSkipped: 0,
+            dwarfLiveSamplable: 0,
+            dwarfHaltSamplable: 0,
+            dwarfPointerExpanded: 0,
+            dwarfNoLocation: 0,
+            units: 0,
+            warnings,
+        }
+    }
+    const {ctx, units} = opened
 
     // 跨 CU 引用经常先命中前向声明（DW_AT_declaration，无成员）；按名字/index 建
     // 聚合类型定义表，解析声明时补全为完整定义（否则 target_debug_handle->bmi088_
@@ -2366,3 +2425,307 @@ export function extractDwarfVariables(
         warnings,
     }
 }
+
+// ---------------------------------------------------------------------------
+// CU 代码范围（DW_AT_ranges）：DWARF2–4 `.debug_ranges` / DWARF5 `.debug_rnglists`
+// ---------------------------------------------------------------------------
+
+/** 从 LE 字节读地址（<=4 字节保持 32-bit 无符号语义）。 */
+function readAddressFromBytes(bytes: Uint8Array, size: number): number {
+    let value = 0
+    let scale = 1
+    let index = 0
+    while (index < size) {
+        const chunk = Math.min(4, size - index)
+        let part = 0
+        for (let i = 0; i < chunk; i++) part += bytes[index + i] * Math.pow(2, i * 8)
+        value += part * scale
+        if (chunk === 4) scale *= 0x100000000
+        index += chunk
+    }
+    return size <= 4 ? value >>> 0 : value
+}
+
+function isAllOnesBytes(bytes: Uint8Array): boolean {
+    for (const byte of bytes) if (byte !== 0xff) return false
+    return true
+}
+
+/**
+ * 纯函数：解码 DWARF2–4 `.debug_ranges` 范围列表。
+ *  `offset` 为节内绝对偏移；begin/end 相对当前 base（初值 = CU 的 DW_AT_low_pc）；
+ *  begin 全 1 为 base address selection entry，`(0, 0)` 为 terminator。
+ */
+export function decodeDebugRangesV4(
+    data: Uint8Array,
+    offset: number,
+    addrSize: number,
+    initialBase = 0,
+    maxRanges = 100000,
+): PcRange[] {
+    const ranges: PcRange[] = []
+    if (!(data instanceof Uint8Array) || offset < 0 || offset >= data.length) return ranges
+    if (addrSize < 1 || addrSize > 8) return ranges
+    const reader = new ByteReader(data, offset)
+    let base = initialBase >>> 0
+    try {
+        for (let guard = 0; guard < maxRanges; guard++) {
+            if (reader.remaining < addrSize * 2) break
+            const beginBytes = reader.take(addrSize)
+            const endBytes = reader.take(addrSize)
+            const begin = readAddressFromBytes(beginBytes, addrSize)
+            const end = readAddressFromBytes(endBytes, addrSize)
+            if (begin === 0 && end === 0) break
+            if (isAllOnesBytes(beginBytes)) {
+                base = end >>> 0
+                continue
+            }
+            const pcLow = (base + begin) >>> 0
+            const pcHigh = (base + end) >>> 0
+            if (pcHigh > pcLow) ranges.push({pcLow, pcHigh})
+        }
+    } catch {
+        // 截断/损坏：返回已解析的合法范围（调用方按容错处理）
+    }
+    return ranges
+}
+
+export interface DebugRngListsOptions {
+    /** `.debug_addr`（DW_RLE_base_addressx/startx_* 用） */
+    addr?: Uint8Array | null
+    /** DW_AT_addr_base（.debug_addr 第一条地址条目偏移） */
+    addrBase?: number
+    /** 初始 base（CU DW_AT_low_pc） */
+    initialBase?: number
+    /** `.debug_rnglists` header 的 segment_selector_size（.debug_addr 条目附加字节） */
+    segmentSelectorSize?: number
+    maxRanges?: number
+}
+
+/**
+ * 纯函数：解码 DWARF5 `.debug_rnglists` 列表（offset 为节内绝对偏移）。
+ * 支持 DW_RLE_end_of_list/base_addressx/startx_endx/startx_length/offset_pair/
+ * base_address/start_end/start_length；未知 opcode 或越界时返回已解析部分。
+ */
+export function decodeDebugRngListsV5(
+    data: Uint8Array,
+    offset: number,
+    addrSize: number,
+    options: DebugRngListsOptions = {},
+): PcRange[] {
+    const ranges: PcRange[] = []
+    if (!(data instanceof Uint8Array) || offset < 0 || offset >= data.length) return ranges
+    if (addrSize < 1 || addrSize > 8) return ranges
+    const {addr = null, addrBase = 0, initialBase = 0, segmentSelectorSize = 0, maxRanges = 100000} = options
+    const reader = new ByteReader(data, offset)
+    const stride = addrSize + segmentSelectorSize
+    let base = initialBase >>> 0
+    const pushRange = (begin: number, end: number) => {
+        const pcLow = begin >>> 0
+        const pcHigh = end >>> 0
+        if (pcHigh > pcLow) ranges.push({pcLow, pcHigh})
+    }
+    const lookupAddress = (index: number): number | null => {
+        if (!addr || !Number.isSafeInteger(index) || index < 0) return null
+        const position = addrBase + index * stride
+        if (position < 0 || position + addrSize > addr.length) return null
+        return readAddressFromBytes(addr.subarray(position, position + addrSize), addrSize)
+    }
+    try {
+        for (let guard = 0; guard < maxRanges; guard++) {
+            if (reader.remaining === 0) break
+            const kind = reader.u8()
+            if (kind === DW_RLE_END_OF_LIST) break
+            if (kind === DW_RLE_BASE_ADDRESSX) {
+                const address = lookupAddress(reader.uleb())
+                if (address === null) break
+                base = address >>> 0
+                continue
+            }
+            if (kind === DW_RLE_BASE_ADDRESS) {
+                base = readAddressFromBytes(reader.take(addrSize), addrSize) >>> 0
+                continue
+            }
+            if (kind === DW_RLE_OFFSET_PAIR) {
+                const begin = reader.uleb()
+                const end = reader.uleb()
+                pushRange(base + begin, base + end)
+                continue
+            }
+            if (kind === DW_RLE_START_END) {
+                const begin = readAddressFromBytes(reader.take(addrSize), addrSize)
+                const end = readAddressFromBytes(reader.take(addrSize), addrSize)
+                pushRange(begin, end)
+                continue
+            }
+            if (kind === DW_RLE_START_LENGTH) {
+                const begin = readAddressFromBytes(reader.take(addrSize), addrSize)
+                const length = reader.uleb()
+                pushRange(begin, begin + length)
+                continue
+            }
+            if (kind === DW_RLE_STARTX_ENDX) {
+                const begin = lookupAddress(reader.uleb())
+                const end = lookupAddress(reader.uleb())
+                if (begin === null || end === null) break
+                pushRange(begin, end)
+                continue
+            }
+            if (kind === DW_RLE_STARTX_LENGTH) {
+                const begin = lookupAddress(reader.uleb())
+                const length = reader.uleb()
+                if (begin === null) break
+                pushRange(begin, begin + length)
+                continue
+            }
+            // 未知 DW_RLE opcode：无法安全推进，停止解析。
+            break
+        }
+    } catch {
+        // 截断/损坏：返回已解析范围
+    }
+    return ranges
+}
+
+/** 解析每个 CU 的 DW_AT_ranges（按需触发，结果缓存到 unit.cuRanges）。 */
+function loadUnitCodeRanges(ctx: Ctx): void {
+    for (const unit of ctx.units) {
+        if (unit.cuRangesLoaded) continue
+        unit.cuRangesLoaded = true
+        const root = unit.root
+        if (!root) continue
+        const rangesAttr = root.attrs.get(AT_RANGES)
+        if (!rangesAttr || rangesAttr.number === undefined) continue
+        try {
+            if (unit.version >= 5) {
+                const section = ctx.sections.rnglists
+                if (!section) continue
+                let listOffset = rangesAttr.number >>> 0
+                if (rangesAttr.form === FORM_RNGLISTX) {
+                    // DW_AT_rnglists_base 指向 offset table 起点；表项相对该起点。
+                    if (unit.rnglistsBase <= 0) {
+                        ctx.warning(
+                            `DWARF: CU @0x${unit.start.toString(16)} uses DW_FORM_rnglistx without DW_AT_rnglists_base`,
+                        )
+                        continue
+                    }
+                    const entrySize = unit.offsetSize
+                    const position = unit.rnglistsBase + listOffset * entrySize
+                    if (position + entrySize > section.length) {
+                        ctx.warning(`DWARF: rnglistx index ${listOffset} is outside .debug_rnglists`)
+                        continue
+                    }
+                    const relative = readAddressFromBytes(section.subarray(position, position + entrySize), entrySize)
+                    listOffset = (unit.rnglistsBase + relative) >>> 0
+                }
+                unit.cuRanges = decodeDebugRngListsV5(section, listOffset, unit.addrSize, {
+                    addr: ctx.sections.addr,
+                    addrBase: unit.addrBase,
+                    initialBase: unit.lowPc,
+                })
+            } else if (ctx.sections.ranges) {
+                unit.cuRanges = decodeDebugRangesV4(
+                    ctx.sections.ranges,
+                    rangesAttr.number >>> 0,
+                    unit.addrSize,
+                    unit.lowPc,
+                )
+            }
+        } catch (error) {
+            ctx.warning(`DWARF: CU ranges @0x${unit.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+    }
+}
+
+/**
+ * 按 DW_AT_stmt_list 解析并缓存 CU 的行号表（每 CU 只解析一次，多 DIE 共用）。
+ * 无 .debug_line / stmt_list / 解析失败时返回 null（warning 通过 ctx.warning 上报）。
+ */
+function getUnitLineTable(ctx: Ctx, unit: Unit): LineTable | null {
+    if (unit.lineTableLoaded) return unit.lineTable
+    unit.lineTableLoaded = true
+    if (unit.stmtList === null || !ctx.sections.line) return null
+    const cached = ctx.lineTables.get(unit.stmtList)
+    if (cached) {
+        unit.lineTable = cached
+        return cached
+    }
+    try {
+        const table = parseLineTable({
+            data: ctx.sections.line,
+            offset: unit.stmtList,
+            lineStr: ctx.sections.lineStr,
+            str: ctx.sections.str,
+            strOffsets: ctx.sections.strOffsets,
+            strOffsetsBase: unit.strOffsetsBase,
+            addressSize: unit.addrSize,
+            compDir: unit.compDir,
+        })
+        ctx.lineTables.set(unit.stmtList, table)
+        unit.lineTable = table
+        for (const warning of table.warnings.slice(0, 2)) {
+            ctx.warning(`DWARF .debug_line @0x${unit.stmtList.toString(16)}: ${warning}`)
+        }
+        return table
+    } catch (error) {
+        ctx.warning(
+            `DWARF .debug_line @0x${unit.stmtList.toString(16)}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        return null
+    }
+}
+
+/** `extractDwarfLineUnits()` 返回的单个 CU 行表上下文（普通数据类型）。 */
+export interface DwarfLineUnitInfo {
+    /** .debug_info 中的 unit 顺序号 */
+    index: number
+    version: number
+    addrSize: number
+    /** 4 = DWARF32，8 = DWARF64 */
+    offsetSize: number
+    compDir: string
+    /** DW_AT_stmt_list（.debug_line contribution 偏移） */
+    stmtList: number
+    /** DW_AT_low_pc（range/loc list 的 base 初值） */
+    lowPc: number
+    /** DW_AT_ranges 解出的 CU 代码范围（可能为空） */
+    ranges: PcRange[]
+    /** 行号表；null = 无 .debug_line / 非法 stmt_list */
+    lineTable: LineTable | null
+}
+
+/**
+ * 为 ELF 中所有带 DW_AT_stmt_list 的 CU 解析行号表（按 stmtList 缓存），
+ * 并附带 CU 代码范围（.debug_ranges/.debug_rnglists）与行表 warnings。
+ * 供 `elfLineIndex.ts` 构建 Web 可用的 PC↔源码行索引。
+ */
+export function extractDwarfLineUnits(
+    bytes: Uint8Array,
+    sections: readonly ElfSectionInfo[],
+): {units: DwarfLineUnitInfo[]; warnings: string[]} {
+    const warnings: string[] = []
+    const opened = openDwarfContext(bytes, sections, warnings)
+    if (!opened) return {units: [], warnings}
+    const {ctx, units} = opened
+    if (!ctx.sections.line && units.some((unit) => unit.stmtList !== null)) {
+        warnings.push('DWARF: missing .debug_line (line breakpoints / PC source mapping unavailable)')
+    }
+    loadUnitCodeRanges(ctx)
+    const result: DwarfLineUnitInfo[] = []
+    for (const [index, unit] of units.entries()) {
+        if (unit.stmtList === null) continue
+        result.push({
+            index,
+            version: unit.version,
+            addrSize: unit.addrSize,
+            offsetSize: unit.offsetSize,
+            compDir: unit.compDir,
+            stmtList: unit.stmtList,
+            lowPc: unit.lowPc,
+            ranges: unit.cuRanges,
+            lineTable: getUnitLineTable(ctx, unit),
+        })
+    }
+    return {units: result, warnings}
+}
+

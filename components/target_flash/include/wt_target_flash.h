@@ -67,6 +67,18 @@ typedef enum {
     WT_TF_ERROR,           /**< last operation failed (see status.err/message) */
 } wt_tf_state_t;
 
+/** Detection confidence for the DEV_ID/model match (v3).  Values mirror the
+ *  Web/API `detection_confidence` strings:
+ *    WT_TF_CONF_UNKNOWN        <-> "unknown"        (no DEV_ID match at all)
+ *    WT_TF_CONF_GROUP          <-> "group"          (DEV_ID group only, no FSIZE)
+ *    WT_TF_CONF_FLASH_NARROWED <-> "flash-narrowed" (DEV_ID + valid FSIZE used)
+ */
+typedef enum {
+    WT_TF_CONF_UNKNOWN = 0,
+    WT_TF_CONF_GROUP = 1,
+    WT_TF_CONF_FLASH_NARROWED = 2,
+} wt_tf_confidence_t;
+
 /** Detected target description (filled by wt_tf_probe() / wt_tf_flash_begin()). */
 typedef struct {
     bool detected;             /**< true when a real STM32 was identified, even
@@ -92,6 +104,17 @@ typedef struct {
                                     flash implementation (F4/H7 today) */
     uint32_t swd_clock_hz;     /**< SWD clock the probe link came up with
                                     (H7 boards may fall back to 1 MHz/500 kHz) */
+
+    /* Detection detail (v3, additive; old fields above keep their meaning).
+     * DEV_ID alone identifies a device group, never a unique order code: the
+     * candidate list is narrowed by the FSIZE read at runtime but package /
+     * exact order code still require a user-confirmed MCU/board profile. */
+    uint16_t dev_id;           /**< DBGMCU DEV_ID = IDCODE bits[11:0]; 0 if unknown */
+    uint32_t flash_kib;        /**< flash size in KiB (0 when FSIZE unreadable) */
+    char model_candidates[80]; /**< narrowed candidate group, e.g.
+                                    "STM32F100/F101/F102/F103 (MD) [x8, 64 KiB]" */
+    char core[16];             /**< Cortex core from CPUID, e.g. "Cortex-M4" */
+    uint8_t confidence;        /**< wt_tf_confidence_t (unknown/group/flash-narrowed) */
 } wt_tf_info_t;
 
 /** Operation status snapshot. */

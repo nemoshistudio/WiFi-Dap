@@ -211,6 +211,7 @@
                     'sb-line-vars': row.hasVariables,
                     'sb-line-selected': row.selected,
                     'sb-line-active': row.active,
+                    'sb-line-pc': row.pcLine,
                     'sb-line-flash': row.index + 1 === flashLine,
                   }"
                   :style="{top: `${row.top}px`, height: `${ROW_HEIGHT}px`}"
@@ -218,8 +219,11 @@
                 <button
                     type="button"
                     class="sb-gutter"
-                    :title="breakpointHint(row.index + 1)"
+                    :class="{'no-address': row.gutterAddress === undefined}"
+                    :title="row.gutterTitle"
+                    :aria-label="row.gutterTitle"
                     data-gutter
+                    :data-address="row.gutterAddress"
                     @click.stop="onGutterClick(row.index + 1)"
                 >{{ row.index + 1 }}</button>
                 <span class="sb-line-text"><span
@@ -233,6 +237,7 @@
                     :data-variable="token.kind === 'variable' ? token.variable : null"
                     :data-line="row.index + 1"
                 >{{ token.text }}</span></span>
+                <span v-if="row.pcLine" class="sb-pc-badge" :title="activePcLineLabel()">{{ activePcLineLabel() }}</span>
                 <span v-if="row.liveEntries.length > 0" class="sb-live-values" :title="labels.liveValues">
                   <span
                       v-for="entry in row.liveEntries"
@@ -367,6 +372,7 @@ import {
   supportsDirectoryPicker,
   type SourceProject,
 } from './projectLoader'
+import {resolveFileLineTarget, type SourceActiveFileLine} from './lineTarget'
 
 defineOptions({name: 'SourceBrowser'})
 
@@ -396,6 +402,12 @@ const props = defineProps<{
    * 父页面有 ELF 行表/符号地址时传入，`line-click` 才会携带 address；否则只给 line。
    */
   lineAddresses?: SourceLineAddressMap | null
+  /**
+   * 当前 PC / 活动源码行（task-43）：声明式高亮/跟随。
+   * 父组件把 task-42 `pcToLine(...)` 得到的文件+行传来即可；每次变化会解析项目文件、必要时打开文件并滚动到该行，
+   * 以 PC 行样式高亮（不清除 selectedKeys/liveValues）。传 null 停止跟随/清除高亮。
+   */
+  activeFileLine?: SourceActiveFileLine | null
 }>()
 
 const emit = defineEmits<{
@@ -425,6 +437,13 @@ const dirInputRef = ref<HTMLInputElement | null>(null)
 const elfInputRef = ref<HTMLInputElement | null>(null)
 const viewportRef = ref<HTMLDivElement | null>(null)
 const candidateMenuRef = ref<HTMLDivElement | null>(null)
+
+/** task-43：当前高亮/跟随的源码行（prop activeFileLine 或 expose scrollToLine/highlightLine 驱动）。 */
+const activeFileLineState = shallowRef<{filePath: string; line: number; address?: number} | null>(null)
+let lastActiveFileLineSignature = ''
+/** task-43 labels 的英文 fallback（未放入 DEFAULT，避免破坏 task-26 的 labels 完整性契约）。 */
+const ACTIVE_PC_LINE_FALLBACK = 'PC'
+const LINE_NO_ADDRESS_FALLBACK = 'Line {line}: no executable address in the ELF line table'
 
 const loadedProject = shallowRef<SourceProject | null>(null)
 const currentProject = computed<SourceProject | null>(() => props.project ?? loadedProject.value)
@@ -669,6 +688,12 @@ interface RenderRow {
   hasVariables: boolean
   selected: boolean
   active: boolean
+  /** task-43：当前 PC/活动行 */
+  pcLine: boolean
+  /** task-43：该行可执行地址（lineAddresses 或 PC 行地址；无则 undefined） */
+  gutterAddress?: number
+  /** task-43：gutter hover 提示（有地址=断点提示，无地址=行表缺失提示） */
+  gutterTitle: string
   liveEntries: SourceLiveValueEntry<V>[]
   liveIdentifiers: ReadonlySet<string>
   activeIdentifiers: ReadonlySet<string>
@@ -683,6 +708,8 @@ const visibleRows = computed<RenderRow[]>(() => {
   const names = identifierSet.value
   const liveByLine = liveEntriesByLine.value
   const active = activeLocation.value
+  const pc = activeFileLineState.value
+  const openedFile = openFilePath.value
   for (let index = window.start; index < window.end; index++) {
     const lineNumber = index + 1
     const lineRefList = grouped.get(lineNumber) ?? []
@@ -691,16 +718,21 @@ const visibleRows = computed<RenderRow[]>(() => {
     const activeIdentifiers = new Set<string>()
     const rowActive = active !== null
         && active.ref.line === lineNumber
-        && normalizeRelativePath(active.filePath) === openFilePath.value
+        && normalizeRelativePath(active.filePath) === openedFile
     if (rowActive) {
       for (const ref of lineRefList) activeIdentifiers.add(ref.identifier)
     }
+    const pcLine = pc !== null && pc.line === lineNumber && pc.filePath === openedFile
+    const gutterAddress = addressForLine(lineNumber)
     rows.push({
       index,
       top: index * ROW_HEIGHT,
       hasVariables: grouped.has(lineNumber),
       selected: selected.has(lineNumber),
       active: rowActive,
+      pcLine,
+      ...(gutterAddress !== undefined ? {gutterAddress} : {}),
+      gutterTitle: gutterHint(lineNumber, gutterAddress),
       liveEntries,
       liveIdentifiers,
       activeIdentifiers,
@@ -777,7 +809,7 @@ async function openFile(path: string, options: { line?: number } = {}): Promise<
     await nextTick()
     scrollTreeToPath(normalized)
     const target = options.line ?? variableLines(fileRefs.value)[0]
-    if (target) scrollToLine(target)
+    if (target) scrollCodeLine(target)
     else scrollToTop()
     emit('file-open', normalized)
   } catch (error) {
@@ -799,7 +831,7 @@ function scrollToTop(): void {
 }
 
 /** 滚动到指定行（1 起始），并把该行短暂高亮。 */
-function scrollToLine(line: number, highlight = true): void {
+function scrollCodeLine(line: number, highlight = true): void {
   const viewport = viewportRef.value
   if (!viewport) return
   const height = viewportHeight.value || DEFAULT_VIEWPORT_HEIGHT
@@ -817,25 +849,91 @@ function onScroll(event: Event): void {
 
 // ---- 行号 gutter：断点请求（line-click） ---------------------------------
 
-function breakpointHint(line: number): string {
+function activePcLineLabel(): string {
+  return labels.value.activePcLine ?? ACTIVE_PC_LINE_FALLBACK
+}
+
+/** 行没有可执行地址时的 gutter hover 提示（task-43）。 */
+function lineNoAddressHint(line: number): string {
+  return formatLabel(labels.value.lineNoAddressHint ?? LINE_NO_ADDRESS_FALLBACK, {line})
+}
+
+function formatAddressHex(address: number): string {
+  return `0x${(address >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+}
+
+/**
+ * 行可执行地址（task-43）：`lineAddresses`（task-42 精确行表）优先；
+ * 当前 PC 行的 `activeFileLine.address` 作为兜底（即使父组件还没生成完整行地址表）。
+ */
+function addressForLine(line: number): number | undefined {
+  const path = openFilePath.value
+  if (!path) return undefined
+  const mapped = resolveLineAddress(props.lineAddresses, path, line)
+  if (mapped !== undefined) return mapped
+  const pc = activeFileLineState.value
+  if (pc && pc.filePath === path && pc.line === line && pc.address !== undefined) return pc.address
+  return undefined
+}
+
+/** gutter hover 提示：有地址显示断点提示+地址；无地址（lineAddresses 为空/该行不在行表）显示行表缺失提示。 */
+function gutterHint(line: number, address: number | undefined): string {
+  if (address === undefined) return lineNoAddressHint(line)
   const template = labels.value.breakpointLineHint ?? 'Click line {line} to request a breakpoint'
-  return formatLabel(template, {line})
+  return `${formatLabel(template, {line})} · ${formatAddressHex(address)}`
 }
 
 /**
  * 点击行号 gutter -> emit `line-click`。
- * 若父组件提供了 `lineAddresses`（ELF 行表/符号地址）则附带可执行地址，否则只给行号。
+ * 若父组件提供了 `lineAddresses`（ELF 行表/符号地址）或当前 PC 行带地址则附带可执行地址，否则只给行号。
  */
 function onGutterClick(line: number): void {
   const path = openFilePath.value
   if (!path) return
-  const address = resolveLineAddress(props.lineAddresses, path, line)
+  const address = addressForLine(line)
   const payload: SourceLineClickPayload = address === undefined ? {path, line} : {path, line, address}
   flashLine.value = line
   window.setTimeout(() => {
     if (flashLine.value === line) flashLine.value = null
   }, 1600)
   emit('line-click', payload)
+}
+
+// ---- task-43：当前 PC / 活动源码行高亮与跟随 ------------------------------
+
+/**
+ * 应用“文件:行”高亮：路径按 exact -> suffix -> basename 匹配项目文件；
+ * 文件不同则打开，同一文件则滚动（同一行重复更新不反复滚动，避免 PC 抖动）。
+ * 返回 false 表示找不到文件/项目未加载（task-44 可据此提示）。
+ */
+async function applyActiveFileLine(
+  target: SourceActiveFileLine | null | undefined,
+  options: {scroll?: boolean} = {},
+): Promise<boolean> {
+  const project = currentProject.value
+  if (!project) return false
+  if (!target) {
+    activeFileLineState.value = null
+    lastActiveFileLineSignature = ''
+    return false
+  }
+  const resolved = resolveFileLineTarget(target, fileIndex.value ?? project.files)
+  if (!resolved) return false
+  const signature = `${resolved.filePath}:${resolved.line}`
+  const sameTarget = lastActiveFileLineSignature === signature
+  lastActiveFileLineSignature = signature
+  activeFileLineState.value = {
+    filePath: resolved.filePath,
+    line: resolved.line,
+    ...(resolved.address !== undefined ? {address: resolved.address} : {}),
+  }
+  expandPathToFile(resolved.filePath)
+  if (resolved.filePath !== openFilePath.value) {
+    await openFile(resolved.filePath, {line: resolved.line})
+    return true
+  }
+  if (options.scroll !== false && !sameTarget) scrollCodeLine(resolved.line, false)
+  return true
 }
 
 // ---- 变量 token 点击 / hover / 候选浮层 ----------------------------------
@@ -961,7 +1059,7 @@ function selectCandidate(candidate: VariableCandidate<V>, candidates: readonly V
   hover.value = null
   const ref = candidate.ref
   if (jump && ref.line !== undefined) {
-    scrollToLine(ref.line)
+    scrollCodeLine(ref.line)
   } else if (ref.line !== undefined) {
     flashLine.value = ref.line
   }
@@ -994,7 +1092,7 @@ function onJumpChange(event: Event): void {
   if (!select) return
   const ref = fileRefs.value.find((candidate) => candidate.key === select.value)
   select.value = ''
-  if (ref?.line !== undefined) scrollToLine(ref.line)
+  if (ref?.line !== undefined) scrollCodeLine(ref.line)
 }
 
 /** 上一个/下一个变量行（以当前视口顶部行号为准，循环）。 */
@@ -1009,7 +1107,7 @@ function jumpBy(direction: number): void {
     const before = lines.filter((line) => line < currentLine)
     target = before.length > 0 ? before[before.length - 1] : lines[lines.length - 1]
   }
-  scrollToLine(target)
+  scrollCodeLine(target)
 }
 
 /**
@@ -1028,7 +1126,7 @@ async function scrollToVariableByKey(key: string): Promise<boolean> {
     await openFile(filePath, {line: location.ref.line})
     return true
   }
-  if (location.ref.line !== undefined) scrollToLine(location.ref.line)
+  if (location.ref.line !== undefined) scrollCodeLine(location.ref.line)
   scrollTreeToPath(filePath)
   return true
 }
@@ -1200,6 +1298,16 @@ watch(viewportRef, () => {
   void nextTick(observeViewport)
 })
 
+// task-43：prop activeFileLine（声明式 PC 行跟随）。项目/行变化时解析项目文件并打开/滚动/高亮。
+watch(() => props.activeFileLine, (target) => {
+  void applyActiveFileLine(target, {scroll: true})
+}, {immediate: true})
+
+// 先设置 PC 行、后加载项目/ELF 时补一次（applyActiveFileLine 依赖 currentProject/fileIndex）。
+watch([currentProject, () => props.activeFileLine], () => {
+  if (props.activeFileLine) void applyActiveFileLine(props.activeFileLine, {scroll: true})
+})
+
 watch(treeViewportRef, () => {
   void nextTick(observeTreeViewport)
 })
@@ -1265,8 +1373,28 @@ function formatLabel(template: string, values: Record<string, string | number> =
 defineExpose({
   /** 打开指定项目相对路径的文件（父组件联动用） */
   openFile,
-  /** 滚动到指定行并高亮 */
-  scrollToLine,
+  /**
+   * task-43：打开/滚动到指定源码行并高亮（PC 行样式）。
+   * - `scrollToLine(path, line)`：path 支持 full path/relativePath/suffix/basename，找不到返回 false；
+   * - `scrollToLine(line)`：兼容旧签名，仅滚动当前文件。
+   */
+  scrollToLine: async (pathOrLine: string | number, line?: number): Promise<boolean> => {
+    if (typeof pathOrLine === 'number') {
+      scrollCodeLine(pathOrLine)
+      return true
+    }
+    if (!line) return false
+    return applyActiveFileLine({path: pathOrLine, line}, {scroll: true})
+  },
+  /**
+   * task-43：高亮指定源码行（不清除 selectedKeys/liveValues）。
+   * `options.scroll=false` 时只高亮不滚动；找不到文件返回 false。
+   */
+  highlightLine: async (path: string, line: number, options: {scroll?: boolean} = {}): Promise<boolean> => {
+    return applyActiveFileLine({path, line}, {scroll: options.scroll !== false})
+  },
+  /** task-43：当前高亮文件行（调试/task-44 用）。 */
+  getActiveFileLine: (): {filePath: string; line: number; address?: number} | null => activeFileLineState.value,
   /**
    * task-29：按选中 key（`path@address`）滚动到变量；必要时自动切文件。
    * 父页面点击曲线/图例时调用；找不到返回 false。
@@ -1791,6 +1919,30 @@ defineExpose({
   box-shadow: inset 3px 0 0 var(--sb-accent-strong);
 }
 
+/* task-43：当前 PC/活动源码行（与变量 active 行独立，使用 warning 色强调） */
+.sb-line-pc {
+  background: rgba(251, 191, 36, 0.14);
+  box-shadow: inset 3px 0 0 var(--sb-warn);
+}
+
+.sb-line-pc .sb-gutter {
+  color: var(--sb-warn);
+  font-weight: 700;
+}
+
+.sb-pc-badge {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--sb-warn);
+  background: var(--sb-panel);
+  border: 1px solid var(--sb-warn);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 .sb-line-flash {
   animation: sb-flash 1.4s ease-out;
 }
@@ -1836,6 +1988,17 @@ defineExpose({
   margin-left: 4px;
   font-size: 8px;
   color: var(--sb-danger);
+}
+
+/* task-43：该行在行表中没有可执行地址（hover title 会说明；点击仍会 emit line-click，由父页面提示） */
+.sb-gutter.no-address {
+  opacity: 0.72;
+  cursor: help;
+}
+
+.sb-gutter.no-address:hover::after {
+  content: '?';
+  color: var(--sb-warn);
 }
 
 .sb-line-text {

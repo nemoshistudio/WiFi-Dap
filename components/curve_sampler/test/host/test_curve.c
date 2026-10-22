@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "curve_priv.h"
+#include "curve_ws.h"
 
 /* ---- tf_swd mock -------------------------------------------------------- */
 static uint32_t g_pointer_value;
@@ -164,7 +165,7 @@ static void test_parse_series_counts(void)
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
     CHECK(cfg.series_count == 32U);
     CHECK(cfg.sample_bytes == 256U);
-    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 30U);
+    CHECK(curve_ring_capacity_for(cfg.sample_bytes, false) == 30U);
 
     /* 33 series rejected */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,\"series\":[");
@@ -296,13 +297,20 @@ static void test_eval(void)
 static void test_ring_capacity(void)
 {
     /* capacity = clamp(8 KiB / (15 + frame_bytes), 16, 512) */
-    CHECK(curve_ring_capacity_for(16U) == 264U);  /* 8192 / 31 */
-    CHECK(curve_ring_capacity_for(28U) == 190U);  /* 8192 / 43 */
-    CHECK(curve_ring_capacity_for(64U) == 103U);  /* 8192 / 79 */
-    CHECK(curve_ring_capacity_for(128U) == 57U);  /* 8192 / 143 */
-    CHECK(curve_ring_capacity_for(256U) == 30U);  /* 8192 / 271 */
-    CHECK(curve_ring_capacity_for(0U) == 0U);
-    CHECK(curve_ring_capacity_for(CURVE_MAX_SAMPLE_BYTES + 1U) == 0U);
+    CHECK(curve_ring_capacity_for(16U, false) == 264U);  /* 8192 / 31 */
+    CHECK(curve_ring_capacity_for(28U, false) == 190U);  /* 8192 / 43 */
+    CHECK(curve_ring_capacity_for(64U, false) == 103U);  /* 8192 / 79 */
+    CHECK(curve_ring_capacity_for(128U, false) == 57U);  /* 8192 / 143 */
+    CHECK(curve_ring_capacity_for(256U, false) == 30U);  /* 8192 / 271 */
+    CHECK(curve_ring_capacity_for(0U, false) == 0U);
+    CHECK(curve_ring_capacity_for(CURVE_MAX_SAMPLE_BYTES + 1U, false) == 0U);
+
+    /* PCI capture (CVF2 PC_PRESENT) adds 4 B/frame, so the same 8 KiB budget
+     * yields fewer slots: stride = 19 + frame_bytes. */
+    CHECK(curve_ring_capacity_for(16U, true) == 234U);  /* 8192 / 35 */
+    CHECK(curve_ring_capacity_for(64U, true) == 98U);   /* 8192 / 83 */
+    CHECK(curve_ring_capacity_for(128U, true) == 55U);  /* 8192 / 147 */
+    CHECK(curve_ring_capacity_for(256U, true) == 29U);  /* 8192 / 275 */
 }
 
 /* Client polls promptly (every 3 frames, 32 per poll): physical ring reuse is
@@ -586,6 +594,16 @@ static void test_status_json(void)
     st.overwritten = 1U;
     st.invalid = 2U;
     st.out_of_scope = 7U;
+    st.pc_available = true;
+    st.last_pc = 0x08021C44U;
+    st.watchpoint_armed = true;
+    st.watchpoint_address = 0x20000000U;
+    st.watchpoint_hits = 4U;
+    st.trigger_seq = 9U;
+    st.condition_armed = true;
+    st.condition_met = true;
+    st.condition_hits = 3U;
+    st.condition_trigger_seq = 11U;
     st.errors = 0U;
     st.sample_bytes = 8U;
     st.series_count = 2U;
@@ -611,6 +629,16 @@ static void test_status_json(void)
     CHECK(strstr(buf, "\"frames\":11") != NULL);
     CHECK(strstr(buf, "\"out_of_scope\":7") != NULL);
     CHECK(strstr(buf, "\"group_count\":2") != NULL);
+    CHECK(strstr(buf, "\"pc_available\":true") != NULL);
+    CHECK(strstr(buf, "\"last_pc\":134356036") != NULL);
+    CHECK(strstr(buf, "\"watchpoint_armed\":true") != NULL);
+    CHECK(strstr(buf, "\"watchpoint_address\":536870912") != NULL);
+    CHECK(strstr(buf, "\"watchpoint_hits\":4") != NULL);
+    CHECK(strstr(buf, "\"trigger_seq\":9") != NULL);
+    CHECK(strstr(buf, "\"condition_armed\":true") != NULL);
+    CHECK(strstr(buf, "\"condition_met\":true") != NULL);
+    CHECK(strstr(buf, "\"condition_hits\":3") != NULL);
+    CHECK(strstr(buf, "\"condition_trigger_seq\":11") != NULL);
     CHECK(strstr(buf, "\"current_group\":1") != NULL);
     CHECK(strstr(buf, "\"ring_frames\":512") != NULL);
     CHECK(strstr(buf, "\"served_seq\":11") != NULL);
@@ -623,6 +651,12 @@ static void test_status_json(void)
     st.overwritten = 4294967295U;
     st.invalid = 4294967295U;
     st.out_of_scope = 4294967295U;
+    st.last_pc = 4294967295U;
+    st.watchpoint_address = 4294967295U;
+    st.watchpoint_hits = 4294967295U;
+    st.trigger_seq = 4294967295U;
+    st.condition_hits = 4294967295U;
+    st.condition_trigger_seq = 4294967295U;
     st.errors = 4294967295U;
     st.group_count = 8U;
     st.current_group = 7U;
@@ -638,7 +672,7 @@ static void test_status_json(void)
     st.message[sizeof(st.message) - 1U] = '\0';
     len = curve_status_format_json(&st, buf, sizeof(buf));
     CHECK(len > 0);
-    CHECK(len < 768); /* httpd s_json size in curve_http.c */
+    CHECK(len < 1024); /* httpd s_json size in curve_http.c */
     CHECK(strstr(buf, "\"trigger\":\"periodic\"") != NULL);
 }
 
@@ -750,13 +784,218 @@ static void test_pc_scope_parse(void)
         CHECK(cfg.sample_bytes == 64U);
         CHECK(cfg.pc_gate_count == 32U);
         CHECK(cfg.pool_used == 32U);
-        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 103U);
+        CHECK(curve_ring_capacity_for(cfg.sample_bytes, false) == 103U);
         (void)p;
     }
 }
 
 
 /* ---- protocol v2: groups / variants / CVF2 ------------------------------- */
+
+
+static void test_watchpoint_params(void)
+{
+    /* Valid: in DTCM/AXI/flash, naturally aligned for the size. */
+    CHECK(curve_watchpoint_params_ok(0x20000000U, 4U));
+    CHECK(curve_watchpoint_params_ok(0x20000002U, 2U));
+    CHECK(curve_watchpoint_params_ok(0x20000001U, 1U));
+    CHECK(curve_watchpoint_params_ok(0x24000008U, 4U));
+    CHECK(curve_watchpoint_params_ok(0x08000000U, 4U));
+    /* Bad sizes / alignment / regions. */
+    CHECK(!curve_watchpoint_params_ok(0x20000000U, 3U));
+    CHECK(!curve_watchpoint_params_ok(0x20000000U, 8U));
+    CHECK(!curve_watchpoint_params_ok(0x20000002U, 4U));
+    CHECK(!curve_watchpoint_params_ok(0x20000003U, 2U));
+    CHECK(!curve_watchpoint_params_ok(0x10000000U, 4U));
+    CHECK(!curve_watchpoint_params_ok(0xE0001000U, 4U));
+    CHECK(strcmp(curve_watch_access_name(0U), "write") == 0);
+    CHECK(strcmp(curve_watch_access_name(1U), "readwrite") == 0);
+}
+
+static void test_parse_watchpoint(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+
+    /* Minimal watchpoint request: address required, size/access default. */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT);
+        CHECK(cfg.watch_address == 0x20000000U);
+        CHECK(cfg.watch_size == 4U);
+        CHECK(cfg.watch_access == (uint8_t)CURVE_WATCH_ACCESS_WRITE);
+        CHECK(cfg.interval_us == CURVE_TRIGGER_WATCH_DEFAULT_US);
+        CHECK(cfg.want_pc == true);
+    }
+    /* 2-byte readwrite with explicit throttle. */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870914,"
+            "\"watch_size\":2,\"watch_access\":\"readwrite\","
+            "\"interval_us\":10000,\"want_pc\":false,"
+            "\"series\":[{\"size\":4,\"pc_low\":134348800,"
+            "\"pc_high\":134352896,\"expr\":{\"kind\":\"reg\",\"reg\":13,"
+            "\"offset\":0}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch_size == 2U);
+        CHECK(cfg.watch_access == (uint8_t)CURVE_WATCH_ACCESS_RW);
+        CHECK(cfg.interval_us == 10000U);
+        CHECK(cfg.want_pc == false);
+    }
+    /* Missing / unaligned / out-of-region address -> bad watchpoint address. */
+    {
+        static const char *missing =
+            "{\"trigger\":\"watchpoint\",\"series\":[{\"size\":4,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870916}}]}";
+        static const char *misaligned =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870913,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *outside =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":268435456,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(missing, strlen(missing), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "bad watchpoint address") != NULL);
+        CHECK(curve_config_parse(misaligned, strlen(misaligned), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "bad watchpoint address") != NULL);
+        CHECK(curve_config_parse(outside, strlen(outside), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "bad watchpoint address") != NULL);
+    }
+    /* Invalid size / access / throttle bounds. */
+    {
+        static const char *badsize =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch_size\":3,\"series\":[{\"size\":4,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870916}}]}";
+        static const char *badaccess =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch_access\":\"read\",\"series\":[{\"size\":4,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870916}}]}";
+        static const char *badinterval =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"interval_us\":4999,\"series\":[{\"size\":4,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(badsize, strlen(badsize), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch_size") != NULL);
+        CHECK(curve_config_parse(badaccess, strlen(badaccess), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch_access") != NULL);
+        CHECK(curve_config_parse(badinterval, strlen(badinterval), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "interval_us") != NULL);
+    }
+    /* groups/variants keep working in watchpoint mode. */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"groups\":[{\"series\":[{\"size\":4,\"variants\":["
+            "{\"pc_low\":134348800,\"pc_high\":134352896,\"expr\":"
+            "{\"kind\":\"reg\",\"reg\":13,\"offset\":0}}]}]}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.variant_used == 1U);
+    }
+}
+
+static void test_ring_group_trigger_marker(void)
+{
+    uint8_t encoded;
+
+    encoded = curve_ring_group_encode(3U, false, false);
+    CHECK(curve_ring_group_index(encoded) == 3U);
+    CHECK(!curve_ring_group_triggered(encoded));
+
+    encoded = curve_ring_group_encode(5U, true, false);
+    CHECK(curve_ring_group_index(encoded) == 5U);
+    CHECK(curve_ring_group_triggered(encoded));
+    CHECK(encoded == (uint8_t)(5U | CURVE_RING_GROUP_TRIGGERED));
+
+    /* Group index is preserved for all 0..7 groups with the marker set. */
+    for (uint8_t g = 0U; g < 8U; g++) {
+        encoded = curve_ring_group_encode(g, true, false);
+        CHECK(curve_ring_group_index(encoded) == g);
+        CHECK(curve_ring_group_triggered(encoded));
+        CHECK(!curve_ring_group_condition(encoded));
+    }
+
+    /* Condition marker (bit6) is independent from the trigger marker. */
+    encoded = curve_ring_group_encode(6U, false, true);
+    CHECK(curve_ring_group_index(encoded) == 6U);
+    CHECK(!curve_ring_group_triggered(encoded));
+    CHECK(curve_ring_group_condition(encoded));
+    CHECK(encoded == (uint8_t)(6U | CURVE_RING_GROUP_CONDITION));
+
+    encoded = curve_ring_group_encode(2U, true, true);
+    CHECK(curve_ring_group_index(encoded) == 2U);
+    CHECK(curve_ring_group_triggered(encoded));
+    CHECK(curve_ring_group_condition(encoded));
+}
+
+static void test_want_pc_parse(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+
+    /* Default: PC capture allowed when the mode can read r15. */
+    {
+        static const char *json =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":1,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.want_pc == true);
+    }
+    /* Explicit opt-out. */
+    {
+        static const char *json =
+            "{\"interval_us\":20000,\"halt\":true,\"want_pc\":false,"
+            "\"series\":[{\"size\":1,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870912}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.want_pc == false);
+    }
+    /* Non-boolean want_pc is rejected. */
+    {
+        static const char *json =
+            "{\"interval_us\":20000,\"halt\":true,\"want_pc\":1,"
+            "\"series\":[{\"size\":1,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870912}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "want_pc") != NULL);
+    }
+    /* Breakpoint mode also defaults to capturing PC. */
+    {
+        static const char *json =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"series\":[{\"size\":1,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870912}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.want_pc == true);
+    }
+}
 
 static void test_groups_parse(void)
 {
@@ -893,7 +1132,7 @@ static void test_groups_boundaries(void)
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
     CHECK(cfg.sample_bytes == 256U);
-    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 30U);
+    CHECK(curve_ring_capacity_for(cfg.sample_bytes, false) == 30U);
 }
 
 static void test_variants_parse_select(void)
@@ -1108,21 +1347,30 @@ static void test_group_rotation(void)
 static void test_ring_budget_boundaries(void)
 {
     for (uint32_t payload = 1U; payload <= CURVE_MAX_SAMPLE_BYTES; payload++) {
-        uint32_t capacity = curve_ring_capacity_for(payload);
+        uint32_t capacity = curve_ring_capacity_for(payload, false);
         uint32_t stride = CURVE_FRAME_META_BYTES + payload;
 
         CHECK(capacity >= CURVE_RING_FRAMES_MIN);
         CHECK(capacity <= CURVE_RING_FRAMES_MAX);
         CHECK((uint64_t)capacity * stride <= CURVE_RING_BYTES_BUDGET);
     }
+    /* Same budget with per-frame PC capture (stride 19 + payload). */
+    for (uint32_t payload = 1U; payload <= CURVE_MAX_SAMPLE_BYTES; payload++) {
+        uint32_t capacity = curve_ring_capacity_for(payload, true);
+        uint32_t stride = CURVE_FRAME_META_BYTES_PC + payload;
+
+        CHECK(capacity >= CURVE_RING_FRAMES_MIN);
+        CHECK((uint64_t)capacity * stride <= CURVE_RING_BYTES_BUDGET);
+    }
+
     /* 32 x 8 B group payload: 30 frames x 271 B = 8130 B <= 8 KiB. */
-    CHECK((uint64_t)curve_ring_capacity_for(256U) *
+    CHECK((uint64_t)curve_ring_capacity_for(256U, false) *
               (CURVE_FRAME_META_BYTES + 256U) <=
           CURVE_RING_BYTES_BUDGET);
     /* Monotonic: a larger payload never gets more frames. */
     for (uint32_t payload = 1U; payload < CURVE_MAX_SAMPLE_BYTES; payload++) {
-        CHECK(curve_ring_capacity_for(payload) >=
-              curve_ring_capacity_for(payload + 1U));
+        CHECK(curve_ring_capacity_for(payload, false) >=
+              curve_ring_capacity_for(payload + 1U, false));
     }
 }
 
@@ -1233,9 +1481,10 @@ static void test_group_weights(void)
 static void test_cvf2_wire(void)
 {
     uint8_t header[CURVE_FRAME_HEADER_BYTES];
-    uint8_t frame[CURVE_FRAME_META_BYTES];
+    uint8_t frame[CURVE_FRAME_META_BYTES_PC];
 
-    CHECK(curve_cvf2_write_header(header, 3U, 0x11223344U, 256U, true) ==
+    /* PC_PRESENT clear: 15 B metadata, flags bit1 = 0. */
+    CHECK(curve_cvf2_write_header(header, 3U, 0x11223344U, 256U, true, false, false, false) ==
           CURVE_FRAME_HEADER_BYTES);
     CHECK(header[0] == 'C' && header[1] == 'V' && header[2] == 'F' &&
           header[3] == '2');
@@ -1248,7 +1497,8 @@ static void test_cvf2_wire(void)
     CHECK(header[14] == 0U && header[15] == 0U); /* reserved */
 
     CHECK(curve_cvf2_write_frame_meta(frame, 0x01020304U,
-                                      0x1122334455667788ULL, 3U, 0x0102U) ==
+                                      0x1122334455667788ULL, 3U, 0x0102U,
+                                      0x08021C44U, false) ==
           CURVE_FRAME_META_BYTES);
     CHECK(frame[0] == 0x04U && frame[1] == 0x03U && frame[2] == 0x02U &&
           frame[3] == 0x01U); /* seq */
@@ -1257,9 +1507,49 @@ static void test_cvf2_wire(void)
     CHECK(frame[13] == 0x02U && frame[14] == 0x01U); /* payload_len u16 LE */
 
     /* No-gap flag variant. */
-    CHECK(curve_cvf2_write_header(header, 1U, 1U, 32U, false) ==
+    CHECK(curve_cvf2_write_header(header, 1U, 1U, 32U, false, false, false, false) ==
           CURVE_FRAME_HEADER_BYTES);
     CHECK(header[5] == 0U);
+
+    /* PC_PRESENT: flags bit1 set, 19 B metadata with pc u32 after payload_len. */
+    CHECK(curve_cvf2_write_header(header, 4U, 0x0A0B0C0DU, 64U, false, true, false, false) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == CURVE_CVF2_FLAG_PC_PRESENT);
+    CHECK(header[12] == 64U && header[13] == 0U);
+
+    CHECK(curve_cvf2_write_frame_meta(frame, 0x01020304U,
+                                      0x1122334455667788ULL, 2U, 0x0102U,
+                                      0x08021C44U, true) ==
+          CURVE_FRAME_META_BYTES_PC);
+    CHECK(frame[0] == 0x04U && frame[3] == 0x01U); /* seq */
+    CHECK(frame[4] == 0x88U && frame[11] == 0x11U); /* ts u64 LE */
+    CHECK(frame[12] == 2U); /* group */
+    CHECK(frame[13] == 0x02U && frame[14] == 0x01U); /* payload_len u16 LE */
+    CHECK(frame[15] == 0x44U && frame[16] == 0x1CU && frame[17] == 0x02U &&
+          frame[18] == 0x08U); /* pc 0x08021C44 LE */
+
+    /* gap + PC together: flags = 0x03. */
+    CHECK(curve_cvf2_write_header(header, 1U, 1U, 1U, true, true, false, false) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == (CURVE_CVF2_FLAG_GAP | CURVE_CVF2_FLAG_PC_PRESENT));
+
+    /* P1.8 trigger bit (bit2, 0x04) combines with gap/PC: flags = 0x07. */
+    CHECK(curve_cvf2_write_header(header, 2U, 7U, 128U, true, true, true, false) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == (CURVE_CVF2_FLAG_GAP | CURVE_CVF2_FLAG_PC_PRESENT |
+                        CURVE_CVF2_FLAG_TRIGGERED));
+    CHECK(curve_cvf2_write_header(header, 1U, 1U, 1U, false, false, true, false) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == CURVE_CVF2_FLAG_TRIGGERED);
+
+    /* P1.8 condition bit3 (0x08) combines with the other flags: 0x0F. */
+    CHECK(curve_cvf2_write_header(header, 2U, 3U, 64U, true, true, true, true) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == (CURVE_CVF2_FLAG_GAP | CURVE_CVF2_FLAG_PC_PRESENT |
+                        CURVE_CVF2_FLAG_TRIGGERED | CURVE_CVF2_FLAG_CONDITION));
+    CHECK(curve_cvf2_write_header(header, 1U, 1U, 1U, false, false, false, true) ==
+          CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == CURVE_CVF2_FLAG_CONDITION);
 }
 
 static void test_config_static_budget(void)
@@ -1271,6 +1561,370 @@ static void test_config_static_budget(void)
     CHECK(sizeof(curve_series_t) <= 24U);
     CHECK(sizeof(curve_variant_t) <= 12U);
     CHECK(sizeof(curve_expr_t) <= 12U);
+}
+
+
+/* ---- P1.11 WebSocket push core (subscription / cursor / backpressure) ----- */
+
+static void test_ws_core_attach(void)
+{
+    static curve_ws_state_t st;
+
+    curve_ws_state_init(&st);
+    CHECK(st.attached == 0U);
+    CHECK(st.subscribed == 0U);
+    CHECK(curve_ws_attach(&st, 60) == 0);
+    CHECK(curve_ws_attach(&st, 61) == 1);
+    CHECK(curve_ws_attach(&st, 60) == 0); /* duplicate handshake is idempotent */
+    CHECK(st.attached == 2U);
+    CHECK(curve_ws_find(&st, 60) != NULL);
+    CHECK(curve_ws_find(&st, 99) == NULL);
+    CHECK(curve_ws_detach(&st, 60));
+    CHECK(!curve_ws_detach(&st, 60));
+    CHECK(st.attached == 1U);
+    CHECK(curve_ws_find(&st, 60) == NULL);
+
+    /* Table capacity + reuse of freed slots. */
+    {
+        static curve_ws_state_t full;
+        int slots[CURVE_WS_MAX_CLIENTS];
+
+        curve_ws_state_init(&full);
+        for (uint32_t i = 0U; i < CURVE_WS_MAX_CLIENTS; i++) {
+            slots[i] = curve_ws_attach(&full, 70 + (int)i);
+            CHECK(slots[i] == (int)i);
+        }
+        CHECK(curve_ws_attach(&full, 80) == -1); /* full */
+        CHECK(curve_ws_detach(&full, 70 + (int)(CURVE_WS_MAX_CLIENTS - 1U)));
+        CHECK(curve_ws_attach(&full, 81) ==
+              (int)(CURVE_WS_MAX_CLIENTS - 1U));
+    }
+}
+
+static void test_ws_core_subscribe(void)
+{
+    static curve_ws_state_t st;
+
+    curve_ws_state_init(&st);
+    CHECK(curve_ws_attach(&st, 60) == 0);
+    CHECK(st.subscribed == 0U);
+    CHECK(curve_ws_subscribe(&st, 60));
+    CHECK(st.subscribed == 1U);
+    CHECK(curve_ws_subscribe(&st, 60)); /* idempotent */
+    CHECK(st.subscribed == 1U);
+    CHECK(curve_ws_unsubscribe(&st, 60));
+    CHECK(st.subscribed == 0U);
+    CHECK(!curve_ws_subscribe(&st, 99)); /* unknown fd */
+    CHECK(curve_ws_detach(&st, 60));
+    CHECK(st.subscribed == 0U);
+}
+
+static void test_ws_core_plan_push(void)
+{
+    static curve_ws_state_t st;
+    uint32_t since = 0U;
+    uint32_t first = 0U;
+    bool gap = false;
+    uint32_t n;
+
+    curve_ws_state_init(&st);
+    CHECK(curve_ws_attach(&st, 60) == 0);
+
+    /* Not subscribed yet -> nothing to push. */
+    CHECK(curve_ws_plan_push(&st, 60, 10U, 20U, 32U, 1000U, &since, &first,
+                             &gap) == 0U);
+    CHECK(curve_ws_subscribe(&st, 60));
+
+    /* First push starts at the oldest retained frame (like HTTP since=0). */
+    n = curve_ws_plan_push(&st, 60, 10U, 20U, 32U, 1000U, &since, &first, &gap);
+    CHECK(n == 11U);
+    CHECK(since == 0U);
+    CHECK(first == 10U);
+    CHECK(!gap);
+    curve_ws_mark_pushed(&st, 60, first, n, 1000U);
+    CHECK(st.clients[0].next_seq == 21U);
+    CHECK(st.clients[0].sent_batches == 1U);
+    CHECK(st.clients[0].sent_frames == 11U);
+
+    /* Push interval backpressure: immediately after a push -> 0. */
+    CHECK(curve_ws_plan_push(&st, 60, 10U, 25U, 32U, 1005U, &since, &first,
+                             &gap) == 0U);
+    /* After the interval, only frames after next_seq-1 are pushed. */
+    n = curve_ws_plan_push(&st, 60, 10U, 30U, 32U,
+                           1000U + CURVE_WS_PUSH_INTERVAL_MS, &since, &first,
+                           &gap);
+    CHECK(n == 10U);
+    CHECK(since == 20U);
+    CHECK(first == 21U);
+    CHECK(!gap);
+    curve_ws_mark_pushed(&st, 60, first, n, 1000U + CURVE_WS_PUSH_INTERVAL_MS);
+    CHECK(st.clients[0].next_seq == 31U);
+
+    /* Up to date -> 0. */
+    CHECK(curve_ws_plan_push(&st, 60, 10U, 30U, 32U, 2000U, &since, &first,
+                             &gap) == 0U);
+
+    /* max batch cap + gap when the client cursor fell behind the ring. */
+    n = curve_ws_plan_push(&st, 60, 100U, 200U, 32U, 3000U, &since, &first,
+                           &gap);
+    CHECK(n == 32U);
+    CHECK(first == 100U); /* since 30 -> first 31 < oldest 100 -> clamped */
+    CHECK(gap);
+    CHECK(since == 30U);
+
+    /* max_frames above the protocol cap is clamped to CURVE_WS_MAX_BATCH_FRAMES. */
+    curve_ws_subscribe(&st, 60);
+    n = curve_ws_plan_push(&st, 60, 1U, 200U, 1000U, 4000U, &since, &first,
+                           &gap);
+    CHECK(n == CURVE_WS_MAX_BATCH_FRAMES);
+
+    /* Dropped batch is counted and backs off one interval. */
+    curve_ws_mark_dropped(&st, 60, 4000U);
+    CHECK(st.clients[0].dropped_batches == 1U);
+    CHECK(curve_ws_plan_push(&st, 60, 1U, 200U, 32U, 4001U, &since, &first,
+                             &gap) == 0U);
+}
+
+static void test_ws_core_ack(void)
+{
+    static curve_ws_state_t st;
+    uint32_t since = 0U;
+    uint32_t first = 0U;
+    bool gap = false;
+    uint32_t n;
+
+    curve_ws_state_init(&st);
+    CHECK(curve_ws_attach(&st, 60) == 0);
+    CHECK(curve_ws_subscribe(&st, 60));
+    n = curve_ws_plan_push(&st, 60, 1U, 10U, 32U, 1000U, &since, &first, &gap);
+    CHECK(n == 10U);
+    curve_ws_mark_pushed(&st, 60, first, n, 1000U);
+    CHECK(st.clients[0].next_seq == 11U);
+
+    /* Ack is monotonic and cannot exceed the planned seq. */
+    CHECK(curve_ws_ack(&st, 60, 5U));
+    CHECK(st.clients[0].acked_seq == 5U);
+    CHECK(curve_ws_ack(&st, 60, 3U));
+    CHECK(st.clients[0].acked_seq == 5U);
+    CHECK(curve_ws_ack(&st, 60, 1000U));
+    CHECK(st.clients[0].acked_seq == 10U);
+}
+
+
+/* ---- P1.8 trigger_condition (comparison / parsing / status) -------------- */
+
+static void test_condition_match(void)
+{
+    /* size 1: unsigned 0xFF = 255, signed 0xFF = -1 */
+    CHECK(curve_condition_match(0xFFU, 1U, false, CURVE_COND_OP_EQ, 255));
+    CHECK(!curve_condition_match(0xFFU, 1U, false, CURVE_COND_OP_EQ, 254));
+    CHECK(curve_condition_match(0xFFU, 1U, true, CURVE_COND_OP_EQ, -1));
+    CHECK(curve_condition_match(0xFFU, 1U, true, CURVE_COND_OP_LT, 0));
+    CHECK(curve_condition_match(0xFFU, 1U, false, CURVE_COND_OP_GT, 254));
+
+    /* size 2: 0x8000 unsigned 32768 / signed -32768 */
+    CHECK(curve_condition_match(0x8000U, 2U, false, CURVE_COND_OP_EQ, 32768));
+    CHECK(curve_condition_match(0x8000U, 2U, true, CURVE_COND_OP_EQ, -32768));
+    CHECK(curve_condition_match(0x7FFFU, 2U, true, CURVE_COND_OP_GE, 32767));
+    CHECK(curve_condition_match(0x1234U, 2U, true, CURVE_COND_OP_LT, 0x1235));
+
+    /* size 4: int32 boundaries, high bytes must not leak into a 1/2-byte read. */
+    CHECK(curve_condition_match(0xFFFFFFFFU, 4U, true, CURVE_COND_OP_EQ, -1));
+    CHECK(curve_condition_match(0x80000000U, 4U, true, CURVE_COND_OP_EQ,
+                                INT32_MIN));
+    CHECK(curve_condition_match(0x7FFFFFFFU, 4U, true, CURVE_COND_OP_EQ,
+                                INT32_MAX));
+    CHECK(curve_condition_match(0x000000FFU, 1U, false, CURVE_COND_OP_EQ, 255));
+    CHECK(!curve_condition_match(0x0000ABCDU, 2U, false, CURVE_COND_OP_EQ,
+                                 0x1234));
+
+    /* All six ops on one value (unsigned): 10 vs 10 / 20 / 5. */
+    CHECK(curve_condition_match(10U, 4U, false, CURVE_COND_OP_EQ, 10));
+    CHECK(curve_condition_match(10U, 4U, false, CURVE_COND_OP_NE, 11));
+    CHECK(curve_condition_match(10U, 4U, false, CURVE_COND_OP_LT, 11));
+    CHECK(curve_condition_match(10U, 4U, false, CURVE_COND_OP_LE, 10));
+    CHECK(curve_condition_match(10U, 4U, false, CURVE_COND_OP_GT, 9));
+    CHECK(curve_condition_match(10U, 4U, false, CURVE_COND_OP_GE, 10));
+    CHECK(!curve_condition_match(10U, 4U, false, CURVE_COND_OP_LT, 10));
+    CHECK(!curve_condition_match(10U, 4U, false, CURVE_COND_OP_GT, 10));
+
+    /* Unsigned comparison does not sign-extend: 0xFFFFFFFF > 0 unsigned. */
+    CHECK(curve_condition_match(0xFFFFFFFFU, 4U, false, CURVE_COND_OP_GT, 0));
+    CHECK(!curve_condition_match(0xFFFFFFFFU, 4U, true, CURVE_COND_OP_GT, 0));
+
+    /* Invalid size / op never match. */
+    CHECK(!curve_condition_match(0U, 3U, false, CURVE_COND_OP_EQ, 0));
+    CHECK(!curve_condition_match(0U, 4U, false, (uint8_t)99, 0));
+    CHECK(strcmp(curve_cond_op_name(CURVE_COND_OP_EQ), "eq") == 0);
+    CHECK(strcmp(curve_cond_op_name(CURVE_COND_OP_GE), "ge") == 0);
+}
+
+static void test_parse_condition(void)
+{
+    static curve_config_t cfg;
+    char err[128];
+
+    /* Minimal condition: size 4, unsigned eq, mode once, no stop. */
+    {
+        static const char *json =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870912}}],"
+            "\"trigger_condition\":{\"address\":536870916,\"op\":\"eq\","
+            "\"value\":7}}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.cond_enabled);
+        CHECK(cfg.cond_address == 0x20000004U);
+        CHECK(cfg.cond_size == 4U);
+        CHECK(cfg.cond_op == (uint8_t)CURVE_COND_OP_EQ);
+        CHECK(cfg.cond_value == 7);
+        CHECK(cfg.cond_mode == (uint8_t)CURVE_COND_MODE_ONCE);
+        CHECK(!cfg.cond_signed);
+        CHECK(!cfg.cond_stop_after);
+    }
+    /* Full options: size 2, signed, continuous, stop_after, op alias. */
+    {
+        static const char *json =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870912}}],"
+            "\"trigger_condition\":{\"address\":536870914,"
+            "\"size\":2,\"op\":\">=\",\"value\":-5,\"signed\":true,"
+            "\"mode\":\"continuous\",\"stop_after\":true}}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.cond_size == 2U);
+        CHECK(cfg.cond_op == (uint8_t)CURVE_COND_OP_GE);
+        CHECK(cfg.cond_value == -5);
+        CHECK(cfg.cond_signed);
+        CHECK(cfg.cond_mode == (uint8_t)CURVE_COND_MODE_CONTINUOUS);
+        CHECK(cfg.cond_stop_after);
+    }
+    /* op aliases map to the same six operators. */
+    {
+        static const char *ops[] = {"==", "!=", "<", "<=", ">", ">="};
+        static const uint8_t expect[] = {
+            (uint8_t)CURVE_COND_OP_EQ, (uint8_t)CURVE_COND_OP_NE,
+            (uint8_t)CURVE_COND_OP_LT, (uint8_t)CURVE_COND_OP_LE,
+            (uint8_t)CURVE_COND_OP_GT, (uint8_t)CURVE_COND_OP_GE,
+        };
+        char json[256];
+
+        for (size_t i = 0U; i < sizeof(ops) / sizeof(ops[0]); i++) {
+            (void)snprintf(json, sizeof(json),
+                           "{\"interval_us\":20000,\"series\":[{\"size\":1,"
+                           "\"expr\":{\"kind\":\"addr\","
+                           "\"address\":536870912}}],\"trigger_condition\":"
+                           "{\"address\":536870912,\"op\":\"%s\",\"value\":1}}",
+                           ops[i]);
+            CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+                  ESP_OK);
+            CHECK(cfg.cond_op == expect[i]);
+        }
+    }
+    /* Compatible with breakpoint + watchpoint trigger modes (and halt). */
+    {
+        static const char *bp =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356036,"
+            "\"series\":[{\"size\":1,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":536870920,\"op\":\"ne\",\"value\":0}}";
+        static const char *wp =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"series\":[{\"size\":1,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}],\"trigger_condition\":"
+            "{\"address\":536870920,\"size\":4,\"op\":\"lt\",\"value\":-1}}";
+
+        CHECK(curve_config_parse(bp, strlen(bp), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.cond_enabled);
+        CHECK(cfg.cond_op == (uint8_t)CURVE_COND_OP_NE);
+        CHECK(curve_config_parse(wp, strlen(wp), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.cond_enabled);
+        CHECK(cfg.cond_op == (uint8_t)CURVE_COND_OP_LT);
+        CHECK(cfg.cond_value == -1);
+    }
+    /* No trigger_condition -> disabled (legacy requests unchanged). */
+    {
+        static const char *json =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870912}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(!cfg.cond_enabled);
+    }
+    /* Invalid objects/fields -> 400-class errors. */
+    {
+        static const char *notobj =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":7}";
+        static const char *noaddr =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":{\"op\":\"eq\","
+            "\"value\":1}}";
+        static const char *badaddr =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":268435456,\"op\":\"eq\",\"value\":1}}";
+        static const char *badsize =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":536870912,\"size\":8,\"op\":\"eq\",\"value\":1}}";
+        static const char *badop =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":536870912,\"op\":\"xor\",\"value\":1}}";
+        static const char *badvalue =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":536870912,\"op\":\"eq\",\"value\":4294967296}}";
+        static const char *badmode =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":536870912,\"op\":\"eq\",\"value\":1,"
+            "\"mode\":\"always\"}}";
+        static const char *badsigned =
+            "{\"interval_us\":20000,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\","
+            "\"address\":536870912}}],\"trigger_condition\":"
+            "{\"address\":536870912,\"op\":\"eq\",\"value\":1,"
+            "\"signed\":\"yes\"}}";
+
+        CHECK(curve_config_parse(notobj, strlen(notobj), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition must be an object") != NULL);
+        CHECK(curve_config_parse(noaddr, strlen(noaddr), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition.address") != NULL);
+        CHECK(curve_config_parse(badaddr, strlen(badaddr), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition address") != NULL);
+        CHECK(curve_config_parse(badsize, strlen(badsize), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition.size") != NULL);
+        CHECK(curve_config_parse(badop, strlen(badop), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition.op") != NULL);
+        CHECK(curve_config_parse(badvalue, strlen(badvalue), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition.value") != NULL);
+        CHECK(curve_config_parse(badmode, strlen(badmode), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition.mode") != NULL);
+        CHECK(curve_config_parse(badsigned, strlen(badsigned), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "trigger_condition.signed") != NULL);
+    }
 }
 
 int main(void)
@@ -1298,6 +1952,16 @@ int main(void)
     test_ring_budget_boundaries();
     test_group_weights();
     test_cvf2_wire();
+    test_want_pc_parse();
+    test_watchpoint_params();
+    test_parse_watchpoint();
+    test_ring_group_trigger_marker();
+    test_ws_core_attach();
+    test_ws_core_subscribe();
+    test_ws_core_plan_push();
+    test_ws_core_ack();
+    test_condition_match();
+    test_parse_condition();
     test_config_static_budget();
 
     if (g_failures == 0) {

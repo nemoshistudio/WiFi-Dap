@@ -76,7 +76,8 @@ extern "C" {
 /* Protocol v2 ring/CVF2 per-frame metadata: seq (u32) + timestamp_us (u64) +
  * group (u8) + payload_len (u16) = 15 B.  The ring slot also reserves the
  * maximum group payload (frame_bytes) after that. */
-#define CURVE_FRAME_META_BYTES      15U
+#define CURVE_FRAME_META_BYTES      15U /* seq+ts+group+payload_len */
+#define CURVE_FRAME_META_BYTES_PC   19U /* + pc u32 (CVF2 flags bit1) */
 #define CURVE_FRAME_HEADER_BYTES    16U
 #define CURVE_CVF2_VERSION          2U
 
@@ -104,7 +105,79 @@ extern "C" {
 typedef enum {
     CURVE_TRIGGER_PERIODIC = 0,
     CURVE_TRIGGER_BREAKPOINT = 1,
+    CURVE_TRIGGER_WATCHPOINT = 2, /* P1.8/P1.9: DWT data watchpoint trigger */
 } curve_trigger_t;
+
+/* ---- P1.8/P1.9: DWT data watchpoint --------------------------------------
+ * Cortex-M7 DWT comparator 0: DWT_COMP0 = address, DWT_MASK0 = log2(size),
+ * DWT_FUNCTION0 = 5 (read) / 6 (write) / 7 (read+write) with MATCHED bit24
+ * after a hit, DEMCR.TRCENA (bit24) must be set.  The sampler saves and
+ * restores DEMCR/COMP0/MASK0/FUNCTION0 and disarms comparator 0 before every
+ * resume (same throttle flow as the FPB breakpoint trigger). */
+#define CURVE_TRIGGER_WATCH_MIN_US   5000U
+#define CURVE_TRIGGER_WATCH_MAX_US   1000000U
+#define CURVE_TRIGGER_WATCH_DEFAULT_US 20000U
+/* Watch-size checks are 1/2/4 bytes (DWT_MASK = log2(size)). */
+#define CURVE_WATCH_SIZE_1           1U
+#define CURVE_WATCH_SIZE_2           2U
+#define CURVE_WATCH_SIZE_4           4U
+#define CURVE_WATCH_DEFAULT_SIZE     4U
+
+typedef enum {
+    CURVE_WATCH_ACCESS_WRITE = 0,
+    CURVE_WATCH_ACCESS_RW = 1,
+} curve_watch_access_t;
+
+/* ---- P1.8 conditional trigger (trigger_condition) ------------------------
+ * After each sampled tick the sampler reads one target address/size and
+ * compares it with an int32 value.  A match marks the frame/batch in CVF2
+ * (flags bit3) and status; `mode=once` latches after the first match,
+ * `continuous` marks/counts every match and `stop_after=true` ends the session
+ * after the first match.  Works on top of periodic/breakpoint/watchpoint. */
+typedef enum {
+    CURVE_COND_OP_EQ = 0,
+    CURVE_COND_OP_NE = 1,
+    CURVE_COND_OP_LT = 2,
+    CURVE_COND_OP_LE = 3,
+    CURVE_COND_OP_GT = 4,
+    CURVE_COND_OP_GE = 5,
+} curve_cond_op_t;
+
+typedef enum {
+    CURVE_COND_MODE_ONCE = 0,
+    CURVE_COND_MODE_CONTINUOUS = 1,
+} curve_cond_mode_t;
+
+#define CURVE_COND_SIZE_MIN 1U
+#define CURVE_COND_SIZE_MAX 4U
+
+/** Compare a size-byte little-endian raw value with the configured int32. */
+bool curve_condition_match(uint32_t raw_value, uint8_t size, bool is_signed,
+                           uint8_t op, int32_t value);
+
+/** "eq"/"ne"/"lt"/"le"/"gt"/"ge" (unknown -> "?"). */
+const char *curve_cond_op_name(uint8_t op);
+
+/* ---- Cortex-M7 DWT / DEMCR registers ------------------------------------- */
+#define CURVE_DWT_CTRL               0xE0001000U
+#define CURVE_DWT_COMP0              0xE0001020U
+#define CURVE_DWT_MASK0              0xE0001024U
+#define CURVE_DWT_FUNCTION0          0xE0001028U
+#define CURVE_DEMCR                  0xE000EDFCU
+#define CURVE_DEMCR_TRCENA           (1U << 24)
+#define CURVE_DWT_FUNCTION_MATCHED   (1U << 24)
+#define CURVE_DWT_FUNC_READ          5U
+#define CURVE_DWT_FUNC_WRITE         6U
+#define CURVE_DWT_FUNC_ACCESS        7U
+#define CURVE_DWT_NUM_COMP(ctrl)     (((ctrl) >> 28) & 0xFU)
+
+/** True when the watchpoint address/size is valid: size 1/2/4, size-aligned,
+ *  and the whole range is in an allowed target memory window (same filter as
+ *  sampling reads). */
+bool curve_watchpoint_params_ok(uint32_t address, uint8_t size);
+
+/** "write"/"readwrite" name for a curve_watch_access_t. */
+const char *curve_watch_access_name(uint8_t access);
 
 /** True when the breakpoint address (Thumb bit0 ignored) is in target flash. */
 bool curve_breakpoint_addr_ok(uint32_t address);
@@ -124,6 +197,34 @@ const char *curve_trigger_name(uint8_t trigger);
  * convention used by the Web/DWARF side.
  */
 bool curve_pc_in_scope(uint32_t pc_low, uint32_t pc_high, uint32_t pc);
+
+/* The per-frame ring group byte uses bit7 as the trigger-event marker (group
+ * indexes are 0..7), so CVF2 batches can set flags.bit2 without extra RAM. */
+#define CURVE_RING_GROUP_TRIGGERED 0x80U
+#define CURVE_RING_GROUP_CONDITION 0x40U
+
+static inline uint8_t curve_ring_group_encode(uint8_t group, bool triggered,
+                                              bool condition)
+{
+    return (uint8_t)((group & 0x07U) |
+                     (triggered ? CURVE_RING_GROUP_TRIGGERED : 0U) |
+                     (condition ? CURVE_RING_GROUP_CONDITION : 0U));
+}
+
+static inline uint8_t curve_ring_group_index(uint8_t encoded)
+{
+    return (uint8_t)(encoded & 0x07U);
+}
+
+static inline bool curve_ring_group_triggered(uint8_t encoded)
+{
+    return (encoded & CURVE_RING_GROUP_TRIGGERED) != 0U;
+}
+
+static inline bool curve_ring_group_condition(uint8_t encoded)
+{
+    return (encoded & CURVE_RING_GROUP_CONDITION) != 0U;
+}
 
 /** Advance a weighted-round-robin schedule slot. */
 static inline uint8_t curve_next_slot(uint8_t position, uint8_t schedule_len)
@@ -257,6 +358,19 @@ typedef struct {
     uint32_t interval_us;           /* periodic period / breakpoint throttle */
     uint32_t breakpoint_address;    /* CURVE_TRIGGER_BREAKPOINT: raw Thumb addr */
     bool needs_regs;                /* any expr depends on a core register */
+    bool want_pc;                   /* CVF2 PC_PRESENT opt-out (default true) */
+    uint32_t watch_address;         /* CURVE_TRIGGER_WATCHPOINT: data address */
+    uint8_t watch_size;             /* 1/2/4 bytes */
+    uint8_t watch_access;           /* curve_watch_access_t (write/readwrite) */
+    /* P1.8 optional trigger_condition (independent of the trigger mode) */
+    bool cond_enabled;
+    bool cond_signed;
+    bool cond_stop_after;
+    uint8_t cond_size;              /* 1/2/4 */
+    uint8_t cond_op;                /* curve_cond_op_t */
+    uint8_t cond_mode;              /* curve_cond_mode_t */
+    uint32_t cond_address;
+    int32_t cond_value;
     uint8_t reg_count;              /* unique core registers to read per tick */
     uint8_t regs[CURVE_MAX_CORE_REGS];
     uint16_t pc_gate_count;         /* series that need r15 (gate or variants) */
@@ -312,6 +426,17 @@ typedef struct {
     uint32_t throttled;          /* hits dropped by interval throttling */
     uint32_t invalid;            /* invalid series values, bytes zeroed */
     uint32_t out_of_scope;       /* PC-gated series skipped outside [low,high) */
+    bool pc_available;           /* CVF2 frames carry PC (halt/breakpoint/watch) */
+    uint32_t last_pc;            /* last captured PC (Thumb bit0 cleared) */
+    bool watchpoint_armed;       /* DWT comparator currently armed */
+    uint32_t watchpoint_address; /* DWT watchpoint address (0 when unrelated) */
+    uint32_t watchpoint_hits;    /* DWT watchpoint triggers observed */
+    uint32_t trigger_seq;        /* seq of the last trigger-event frame (0=none) */
+    /* P1.8 trigger_condition status */
+    bool condition_armed;        /* configured and still evaluating (once latch clears) */
+    bool condition_met;          /* latched true after the first match */
+    uint32_t condition_hits;     /* number of matching ticks */
+    uint32_t condition_trigger_seq; /* seq of the last condition-match frame */
     uint32_t errors;             /* failed sample ticks */
     uint32_t consecutive_errors;
     uint32_t link_hz;
@@ -354,16 +479,23 @@ curve_eval_result_t curve_expr_eval(const curve_config_t *cfg, uint16_t expr_ind
  * magic "CVF2", version 2, flags bit0=gap, count u16, first_seq u32,
  * frame_bytes u16 (max group payload), reserved u16.
  * Frame: seq u32, timestamp_us u64, group u8, payload_len u16, payload bytes. */
-#define CURVE_CVF2_FLAG_GAP 0x01U
+#define CURVE_CVF2_FLAG_GAP        0x01U
+#define CURVE_CVF2_FLAG_PC_PRESENT 0x02U
+#define CURVE_CVF2_FLAG_TRIGGERED  0x04U /* batch contains trigger-event frames */
+#define CURVE_CVF2_FLAG_CONDITION  0x08U /* batch contains condition-match frames */
 
-/** Write the 16-byte CVF2 batch header; returns 16. */
+/** Write the 16-byte CVF2 batch header; returns 16.
+ *  flags bit1 = PC_PRESENT when `pc_present` is set. */
 size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
-                               uint16_t frame_bytes, bool gap);
+                               uint16_t frame_bytes, bool gap, bool pc_present,
+                               bool triggered, bool condition);
 
-/** Write the 15-byte CVF2 frame metadata; returns 15. */
+/** Write the CVF2 frame metadata; returns 19 with PC, 15 without.
+ *  PC (Thumb bit0 already cleared by the caller) goes after payload_len. */
 size_t curve_cvf2_write_frame_meta(uint8_t *buf, uint32_t seq,
                                    uint64_t timestamp_us, uint8_t group,
-                                   uint16_t payload_len);
+                                   uint16_t payload_len, uint32_t pc,
+                                   bool pc_present);
 
 /* ---- frame ring bookkeeping (curve_ring.c) -------------------------------
  * Pure C, no RTOS/esp dependencies: the engine owns the payload arrays and
@@ -378,8 +510,14 @@ typedef struct {
     uint32_t overwritten;  /* frames evicted before any client received them */
 } curve_ring_t;
 
-/** Ring capacity for one frame payload (256..512, 32 KiB budget). */
-uint32_t curve_ring_capacity_for(uint32_t frame_bytes);
+/**
+ * @brief Ring capacity for one frame payload, bounded by CURVE_RING_BYTES_BUDGET.
+ *
+ * @param frame_bytes max group payload bytes
+ * @param with_pc     true when the session stores a per-frame PC (CVF2 19 B
+ *                    metadata instead of 15 B), so the budget accounts for it.
+ */
+uint32_t curve_ring_capacity_for(uint32_t frame_bytes, bool with_pc);
 
 /** Reset a ring for a new sampling session. */
 void curve_ring_reset(curve_ring_t *ring, uint32_t capacity);
@@ -453,6 +591,15 @@ void curve_engine_status(curve_status_t *out);
 esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
                                     uint8_t **out_buf, size_t *out_len,
                                     bool *no_data);
+
+/** Current ring seq window (oldest retained / newest); false when no frames. */
+bool curve_engine_ring_seqs(uint32_t *oldest_seq, uint32_t *latest_seq);
+
+/* ---- WebSocket frame push (curve_ws.c / curve_ws_core.c) ------------------
+ * GET /ws/curve WebSocket endpoint: after POST /api/curve/start a browser can
+ * subscribe and receive CVF2 batches pushed by the sampler (same wire format
+ * as GET /api/curve/frames).  HTTP polling keeps working unchanged. */
+void curve_ws_notify_frame(void);
 
 /* ---- tf_swd access layer (components/target_flash/src) -------------------
  * tf_swd.h is a private header of target_flash, so the small subset needed by

@@ -11,6 +11,8 @@
  * Plain HTTP page: no auth/token headers (login/auth UI was removed by requirement).
  */
 
+import {parseDetectionConfidence, type DetectionConfidence} from '@/utils/targetProfile'
+
 export interface TargetInfo {
     detected: boolean
     family?: string
@@ -23,6 +25,16 @@ export interface TargetInfo {
     uid?: string
     flash_base?: number
     flash_size?: number
+    /** DBGMCU DEV_ID (12 bit, v3 detection detail). */
+    dev_id?: number
+    /** Flash size in KiB (v3). */
+    flash_kib?: number
+    /** Narrowed candidate model group, e.g. "STM32F100/F101/F102/F103 (MD) [x8, 64 KiB]". */
+    model_candidates?: string
+    /** Cortex core from CPUID, e.g. "Cortex-M4". */
+    core?: string
+    /** Detection confidence: unknown / group / flash-narrowed. */
+    detection_confidence?: DetectionConfidence
     running?: boolean
     err?: string
     code?: number
@@ -118,6 +130,13 @@ export async function getTargetInfo(): Promise<TargetInfo> {
         uid: typeof body?.uid === 'string' ? body.uid as string : undefined,
         flash_base: toNumber(body?.flash_base),
         flash_size: toNumber(body?.flash_size),
+        dev_id: toNumber(body?.dev_id),
+        flash_kib: toNumber(body?.flash_kib),
+        model_candidates: typeof body?.model_candidates === 'string' ? body.model_candidates as string : undefined,
+        core: typeof body?.core === 'string' ? body.core as string : undefined,
+        detection_confidence: body?.detection_confidence !== undefined
+            ? parseDetectionConfidence(body.detection_confidence)
+            : undefined,
         running: typeof body?.running === 'boolean' ? body.running as boolean : undefined,
     }
 }

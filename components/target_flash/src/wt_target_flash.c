@@ -328,12 +328,18 @@ static void tf_info_clear(void)
     snprintf(s_info.family, sizeof(s_info.family), "unknown");
     snprintf(s_info.series, sizeof(s_info.series), "unknown");
     snprintf(s_info.device, sizeof(s_info.device), "unknown");
+    snprintf(s_info.model_candidates, sizeof(s_info.model_candidates), "unknown");
+    snprintf(s_info.core, sizeof(s_info.core), "unknown");
     s_info.supported = false;
+    s_info.confidence = (uint8_t)WT_TF_CONF_UNKNOWN;
     memset(&s_target, 0, sizeof(s_target));
     s_target.family = TF_FAMILY_UNKNOWN;
     snprintf(s_target.family_str, sizeof(s_target.family_str), "unknown");
     snprintf(s_target.series, sizeof(s_target.series), "unknown");
     snprintf(s_target.device, sizeof(s_target.device), "unknown");
+    snprintf(s_target.model_candidates, sizeof(s_target.model_candidates), "unknown");
+    snprintf(s_target.core, sizeof(s_target.core), "unknown");
+    s_target.confidence = (uint8_t)WT_TF_CONF_UNKNOWN;
 }
 
 static void tf_info_fill_from_target(void)
@@ -343,6 +349,9 @@ static void tf_info_fill_from_target(void)
     snprintf(s_info.family, sizeof(s_info.family), "%s", s_target.family_str);
     snprintf(s_info.series, sizeof(s_info.series), "%s", s_target.series);
     snprintf(s_info.device, sizeof(s_info.device), "%s", s_target.device);
+    snprintf(s_info.model_candidates, sizeof(s_info.model_candidates), "%s",
+             s_target.model_candidates);
+    snprintf(s_info.core, sizeof(s_info.core), "%s", s_target.core);
     s_info.supported = s_target.supported;
     s_info.swd_clock_hz = s_target.swd_clock_hz;
     s_info.dpidr = s_target.dpidr;
@@ -352,6 +361,9 @@ static void tf_info_fill_from_target(void)
     s_info.flash_base = s_target.flash_base;
     s_info.flash_size = s_target.flash_size;
     s_info.max_image_size = s_target.max_image_size;
+    s_info.dev_id = s_target.dev_id;
+    s_info.flash_kib = s_target.flash_size / 1024U;
+    s_info.confidence = s_target.confidence;
 }
 
 /* DBGMCU IDCODE sanity: DEV_ID in bits[11:0], REV_ID in bits[31:16]. */
@@ -378,42 +390,13 @@ static void tf_series_to_family(const char *series, char *out, size_t out_len)
     out[i] = '\0';
 }
 
-/* DEV_ID groups cover several order codes; narrow the H7 groups with FSIZE
- * (RM0433/RM0468: H72x/H73x are single-bank up to 1 MiB, the H74x/H75x group
- * contains 2 MiB parts and the 128 KiB STM32H750 value line).  For all other
- * groups the DEV_ID/FSIZE combination cannot distinguish the order code, so
- * the "/"-separated candidate list from the table is kept as is. */
-static const char *tf_model_narrow(uint16_t dev_id, uint32_t flash_size,
-                                   const char *table_model, char *buf, size_t buf_len)
-{
-    switch (dev_id) {
-    case 0x483U: /* STM32H723/H725/H730/H733/H735 (single bank, <= 1 MiB) */
-        if (flash_size <= 1024U * 1024U) {
-            snprintf(buf, buf_len, "STM32H723/H725/H730/H733/H735");
-            return buf;
-        }
-        break;
-    case 0x450U: /* STM32H742/H743/H745/H747/H750/H753/H755/H757 */
-        if (flash_size >= 2048U * 1024U) {
-            snprintf(buf, buf_len, "STM32H743/H745/H747/H750/H755/H757");
-            return buf;
-        }
-        if (flash_size > 0U && flash_size <= 128U * 1024U) {
-            snprintf(buf, buf_len, "STM32H750");
-            return buf;
-        }
-        break;
-    case 0x413U: /* STM32F405/F407/F415/F417 - all 512 KiB/1 MiB order codes */
-        if (flash_size >= 1024U * 1024U) {
-            snprintf(buf, buf_len, "STM32F405/F407/F415/F417");
-            return buf;
-        }
-        break;
-    default:
-        break;
-    }
-    return table_model;
-}
+/* DEV_ID groups cover several order codes.  The narrowing rules live in
+ * tf_stm32_id.c (tf_stm32_model_group/tf_stm32_model_candidates) so they can
+ * be covered by host unit tests: the historical H7/F4 special cases narrow the
+ * old `device` string, while `model_candidates` additionally gets the standard
+ * order-code density hint from FSIZE ("... [x8, 64 KiB]").  Package and exact
+ * order code remain unknowable over SWD (the Web layer compares against a
+ * user-selected MCU/board profile). */
 
 /* Fill s_target for an identified table entry.  F4/H7 entries run the existing
  * family probe (it re-validates DEV_ID/CPUID and reads FSIZE/UID); other series
@@ -478,16 +461,26 @@ static esp_err_t tf_target_apply_part(const tf_stm32_part_t *part, uint32_t idco
         s_target.supported = false;
     }
 
-    model_str = tf_model_narrow(part->dev_id, flash_size, part->model, model, sizeof(model));
+    model_str = tf_stm32_model_group(part->dev_id, flash_size, part->model, model, sizeof(model));
     snprintf(s_target.device, sizeof(s_target.device), "%s", model_str);
+    s_target.dev_id = part->dev_id;
+    snprintf(s_target.core, sizeof(s_target.core), "%s", tf_stm32_core_name(core));
+    {
+        tf_narrow_t narrow = TF_NARROW_UNKNOWN;
+        (void)tf_stm32_model_candidates(part->dev_id, flash_size, part->model,
+                                        s_target.model_candidates,
+                                        sizeof(s_target.model_candidates), &narrow);
+        s_target.confidence = (uint8_t)narrow;
+    }
 
     ESP_LOGI(TF_TAG,
              "target identified: %s (%s) DEV_ID=0x%03X REV=0x%04X CPUID=0x%08X (%s) "
-             "flash=%u KiB UID@0x%08X supported=%d",
-             s_target.device, s_target.series, (unsigned)(idcode & 0xFFFU),
+             "flash=%u KiB UID@0x%08X supported=%d confidence=%u",
+             s_target.model_candidates, s_target.series, (unsigned)(idcode & 0xFFFU),
              (unsigned)((idcode >> 16) & 0xFFFFU), (unsigned)cpuid,
-             tf_stm32_core_name(core), (unsigned)(flash_size / 1024U),
-             (unsigned)part->uid_base, (int)s_target.supported);
+             s_target.core, (unsigned)(flash_size / 1024U),
+             (unsigned)part->uid_base, (int)s_target.supported,
+             (unsigned)s_target.confidence);
     return ESP_OK;
 }
 
@@ -499,12 +492,19 @@ static void tf_target_set_unknown(uint32_t idcode, uint32_t cpuid, uint32_t dpid
     s_target.family = TF_FAMILY_STM32_IDENTIFIED;
     snprintf(s_target.family_str, sizeof(s_target.family_str), "stm32");
     snprintf(s_target.series, sizeof(s_target.series), "unknown");
+    snprintf(s_target.core, sizeof(s_target.core), "%s",
+             tf_stm32_core_name(tf_stm32_core_from_cpuid(cpuid)));
     if (idcode != 0U) {
         snprintf(s_target.device, sizeof(s_target.device), "unknown (DEV_ID=0x%03X)",
                  (unsigned)(idcode & 0xFFFU));
+        s_target.dev_id = (uint16_t)(idcode & 0xFFFU);
     } else {
         snprintf(s_target.device, sizeof(s_target.device), "unknown (no DBGMCU IDCODE)");
+        s_target.dev_id = 0U;
     }
+    snprintf(s_target.model_candidates, sizeof(s_target.model_candidates), "%s",
+             s_target.device);
+    s_target.confidence = (uint8_t)WT_TF_CONF_UNKNOWN;
     s_target.dpidr = dpidr;
     s_target.swd_clock_hz = clock_hz;
 }

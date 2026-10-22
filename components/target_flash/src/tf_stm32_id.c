@@ -9,6 +9,8 @@
 #include "tf_stm32_id.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 const tf_stm32_part_t tf_stm32_part_table[] = {
     /* 0x01E  STM32WB06_WB07           WB06_WB07.chip               RM0530  */
@@ -326,4 +328,134 @@ size_t tf_stm32_dbgmc_probe_bases(tf_core_class_t core, const uint32_t **bases)
         return 4U;
     }
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* flash-size narrowing (host-testable, no ESP-IDF dependency)               */
+/* ------------------------------------------------------------------------- */
+
+const char *tf_stm32_flash_density_code(uint32_t flash_size)
+{
+    if ((flash_size == 0U) || (flash_size % 1024U) != 0U) {
+        return NULL;
+    }
+    switch (flash_size / 1024U) {
+    case 16U:   return "x4";
+    case 32U:   return "x6";
+    case 64U:   return "x8";
+    case 128U:  return "xB";
+    case 256U:  return "xC";
+    case 384U:  return "xD";
+    case 512U:  return "xE";
+    case 768U:  return "xF";
+    case 1024U: return "xG";
+    case 2048U: return "xI";
+    default:    return NULL;
+    }
+}
+
+/* Classic STM32 families whose order-code flash-density letter follows the
+ * 4/6/8/B/C/D/E/F/G/I KiB convention.  Connectivity/value/access lines are
+ * included (F105/F107, F100, ...): the density letter is still the same.
+ * WB/WL/C0/U0/U5/H5/L5/C5 and the 0x01E/0x027/0x028/0x032 WB/WL groups are
+ * deliberately excluded because their flash-size register / naming differs. */
+bool tf_stm32_flash_density_applies(uint16_t dev_id)
+{
+    switch (dev_id) {
+    /* STM32F0 */
+    case 0x440U: case 0x442U: case 0x444U: case 0x445U: case 0x448U:
+    /* STM32F1 */
+    case 0x410U: case 0x412U: case 0x414U: case 0x418U: case 0x420U:
+    case 0x428U: case 0x430U:
+    /* STM32F2 */
+    case 0x411U:
+    /* STM32F3 */
+    case 0x422U: case 0x432U: case 0x438U: case 0x439U: case 0x446U:
+    /* STM32F4 */
+    case 0x413U: case 0x419U: case 0x421U: case 0x423U: case 0x431U:
+    case 0x433U: case 0x434U: case 0x441U: case 0x458U: case 0x463U:
+    /* STM32F7 */
+    case 0x449U: case 0x451U: case 0x452U:
+    /* STM32G0 */
+    case 0x456U: case 0x460U: case 0x466U: case 0x467U:
+    /* STM32G4 */
+    case 0x468U: case 0x469U: case 0x479U:
+    /* STM32H7 */
+    case 0x450U: case 0x480U: case 0x483U:
+    /* STM32L0 */
+    case 0x417U: case 0x425U: case 0x447U: case 0x457U:
+    /* STM32L1 */
+    case 0x416U: case 0x427U: case 0x429U: case 0x436U: case 0x437U:
+    /* STM32L4 */
+    case 0x415U: case 0x435U: case 0x461U: case 0x462U: case 0x464U:
+    case 0x470U: case 0x471U:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Keep the historical model narrowing behavior (device[] field backwards
+ * compatibility): only H7/F4 special cases change the table's candidate list. */
+const char *tf_stm32_model_group(uint16_t dev_id, uint32_t flash_size,
+                                 const char *table_model, char *buf, size_t buf_len)
+{
+    switch (dev_id) {
+    case 0x483U: /* STM32H723/H725/H730/H733/H735 (single bank, <= 1 MiB) */
+        if (flash_size <= 1024U * 1024U) {
+            snprintf(buf, buf_len, "STM32H723/H725/H730/H733/H735");
+            return buf;
+        }
+        break;
+    case 0x450U: /* STM32H742/H743/H745/H747/H750/H753/H755/H757 */
+        if (flash_size >= 2048U * 1024U) {
+            snprintf(buf, buf_len, "STM32H743/H745/H747/H750/H755/H757");
+            return buf;
+        }
+        if (flash_size > 0U && flash_size <= 128U * 1024U) {
+            snprintf(buf, buf_len, "STM32H750");
+            return buf;
+        }
+        break;
+    case 0x413U: /* STM32F405/F407/F415/F417 - all 512 KiB/1 MiB order codes */
+        if (flash_size >= 1024U * 1024U) {
+            snprintf(buf, buf_len, "STM32F405/F407/F415/F417");
+            return buf;
+        }
+        break;
+    default:
+        break;
+    }
+    return table_model;
+}
+
+const char *tf_stm32_model_candidates(uint16_t dev_id, uint32_t flash_size,
+                                      const char *table_model, char *buf, size_t buf_len,
+                                      tf_narrow_t *confidence)
+{
+    char group[64];
+    const char *base = tf_stm32_model_group(dev_id, flash_size, table_model,
+                                            group, sizeof(group));
+    const char *density = NULL;
+
+    if (flash_size == 0U) {
+        snprintf(buf, buf_len, "%s", base);
+        if (confidence != NULL) {
+            *confidence = TF_NARROW_GROUP;
+        }
+        return buf;
+    }
+    if (tf_stm32_flash_density_applies(dev_id)) {
+        density = tf_stm32_flash_density_code(flash_size);
+    }
+    if (density != NULL) {
+        snprintf(buf, buf_len, "%s [%s, %u KiB]", base, density,
+                 (unsigned)(flash_size / 1024U));
+    } else {
+        snprintf(buf, buf_len, "%s [%u KiB]", base, (unsigned)(flash_size / 1024U));
+    }
+    if (confidence != NULL) {
+        *confidence = TF_NARROW_FLASH;
+    }
+    return buf;
 }

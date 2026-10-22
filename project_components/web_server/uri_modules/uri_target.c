@@ -311,6 +311,20 @@ static void target_yield_and_feed_wdt(void)
 /* GET /api/target/info                                                      */
 /* ------------------------------------------------------------------------- */
 
+/** wt_tf_confidence_t -> stable API string (v3 detection enrichment). */
+static const char *target_confidence_str(uint8_t confidence)
+{
+	switch ((wt_tf_confidence_t) confidence) {
+	case WT_TF_CONF_FLASH_NARROWED:
+		return "flash-narrowed";
+	case WT_TF_CONF_GROUP:
+		return "group";
+	case WT_TF_CONF_UNKNOWN:
+	default:
+		return "unknown";
+	}
+}
+
 static esp_err_t target_info_handler(httpd_req_t *req)
 {
 	wt_tf_info_t info = {0};
@@ -359,6 +373,15 @@ static esp_err_t target_info_handler(httpd_req_t *req)
 		cJSON_AddStringToObject(root, "flash_base", flash_base);
 		cJSON_AddNumberToObject(root, "flash_size", info.flash_size);
 		cJSON_AddNumberToObject(root, "max_image_size", info.max_image_size);
+		/* v3 detection enrichment (additive; old fields above unchanged).
+		 * DEV_ID only resolves a device group: model_candidates is narrowed
+		 * with FSIZE, package/order code still need a user-confirmed profile. */
+		cJSON_AddNumberToObject(root, "dev_id", (double) info.dev_id);
+		cJSON_AddNumberToObject(root, "flash_kib", (double) info.flash_kib);
+		cJSON_AddStringToObject(root, "model_candidates", info.model_candidates);
+		cJSON_AddStringToObject(root, "core", info.core);
+		cJSON_AddStringToObject(root, "detection_confidence",
+		                        target_confidence_str(info.confidence));
 	}
 	return target_send_json(req, 200, TARGET_CMD_INFO, root);
 }

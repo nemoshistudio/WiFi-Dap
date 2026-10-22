@@ -1,5 +1,5 @@
 <template>
-  <div class="curve-layout">
+  <div class="curve-layout" :class="{'mobile-advanced': mobileAdvanced}">
     <h1 class="page-title">{{ translate('page.debugCurve') }}</h1>
 
     <el-alert
@@ -86,6 +86,9 @@
           </el-button>
         </template>
         <el-button :disabled="sampleCount === 0" @click="clearData">{{ translate('curve.clear') }}</el-button>
+        <el-button class="mobile-only" size="small" @click="mobileAdvanced = !mobileAdvanced">
+          {{ mobileAdvanced ? translate('curve.mobileLess') : translate('curve.mobileMore') }}
+        </el-button>
       </div>
 
       <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
@@ -106,6 +109,7 @@
             <el-select v-model="localTrigger" size="small" style="width: 8rem" :disabled="sampling" @change="onLocalTriggerChange">
               <el-option value="periodic" :label="translate('curve.localTriggerPeriodic')"/>
               <el-option value="breakpoint" :label="translate('curve.localTriggerBreakpoint')"/>
+              <el-option value="watchpoint" :label="translate('curve.localTriggerWatchpoint')"/>
             </el-select>
           </label>
           <label v-if="localTrigger === 'breakpoint'" class="flex items-center gap-2">
@@ -156,6 +160,28 @@
             />
             <span v-if="breakpointResolution?.ok" class="font-mono text-xs opacity-70">{{ formatHex32(breakpointResolution.address) }}</span>
           </label>
+          <template v-if="localTrigger === 'watchpoint'">
+            <label class="flex items-center gap-2">
+              <span class="whitespace-nowrap">{{ translate('curve.watchpointAddress') }}</span>
+              <el-input v-model="watchAddressInput" size="small" style="width: 9.5rem" :disabled="sampling" placeholder="0x24001234"/>
+            </label>
+            <label class="flex items-center gap-2">
+              <span>{{ translate('curve.watchpointSize') }}</span>
+              <el-select v-model="watchSize" size="small" style="width: 4.5rem" :disabled="sampling">
+                <el-option :value="1" label="1"/>
+                <el-option :value="2" label="2"/>
+                <el-option :value="4" label="4"/>
+              </el-select>
+            </label>
+            <label class="flex items-center gap-2">
+              <span>{{ translate('curve.watchpointAccess') }}</span>
+              <el-select v-model="watchAccess" size="small" style="width: 6.5rem" :disabled="sampling">
+                <el-option value="write" :label="translate('curve.watchpointWrite')"/>
+                <el-option value="readwrite" :label="translate('curve.watchpointReadWrite')"/>
+              </el-select>
+            </label>
+            <span v-if="watchpointError" class="text-xs" style="color: #dc2626">{{ watchpointError }}</span>
+          </template>
           <label class="flex items-center gap-2">
             <span class="whitespace-nowrap">{{ localTrigger === 'breakpoint' ? translate('curve.localMinInterval') : translate('curve.localInterval') }}</span>
             <el-select v-model="localIntervalMs" size="small" style="width: 6rem" :disabled="sampling">
@@ -166,7 +192,18 @@
           <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
           <span>{{ translate('curve.localStatus') }}: <b>{{ (sampling && localStatusInfo?.running !== false) ? translate('curve.localRunning') : translate('curve.localStopped') }}</b></span>
           <span v-if="localTrigger === 'periodic'">Halt: <b>{{ localStatusInfo?.halt === false ? 'OFF' : (localStatusInfo?.halt === true ? 'ON' : '-') }}</b></span>
+          <span v-else-if="localTrigger === 'watchpoint'">
+            {{ translate('curve.watchpointArmed') }}: <b>{{ watchpointArmed === null ? '-' : (watchpointArmed ? 'ON' : 'OFF') }}</b>
+            · {{ translate('curve.watchpointHits') }}: <b>{{ watchpointHits ?? '-' }}</b>
+            · {{ translate('curve.watchpointTriggerSeq') }}: <b>{{ watchTriggerSeq ?? '-' }}</b>
+          </span>
           <span v-else>{{ translate('curve.localHits') }}: <b>{{ localStatusInfo?.hits ?? localHits ?? '-' }}</b></span>
+          <span v-if="activePc !== null">PC: <b class="font-mono">0x{{ activePc.toString(16).toUpperCase() }}</b>
+            <span v-if="activePcLocation" class="opacity-70">
+              {{ typeof activePcLocation.file === 'string' ? activePcLocation.file : (activePcLocation.file as any)?.relativePath ?? (activePcLocation.file as any)?.path ?? '' }}:{{ activePcLocation.line }}
+            </span>
+            <span v-if="pcLineStatusMessage" class="opacity-60"> · {{ pcLineStatusMessage }}</span>
+          </span>
           <span v-if="localTrigger === 'breakpoint'">{{ translate('curve.localSampled') }}: <b>{{ localStatusInfo?.sampled ?? localSampled ?? '-' }}</b></span>
           <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
           <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
@@ -176,6 +213,10 @@
           <span>{{ translate('curve.localGroups') }}: <b>{{ localActiveGroupCount }}</b></span>
           <span>{{ translate('curve.localCurrentGroup') }}: <b>{{ sampling ? ((localCurrentGroup ?? 0) + 1) + '/' + localActiveGroupCount : '-' }}</b></span>
           <span>{{ translate('curve.localGroupRate') }}: <b>{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
+          <span>{{ translate('curve.wsTransport') }}: <b>{{ wsTransport }}</b></span>
+          <span>{{ translate('curve.wsFrames') }}: <b>{{ wsFrames }}</b></span>
+          <span>{{ translate('curve.wsDropped') }}: <b>{{ wsDropped }}</b></span>
+          <span>{{ translate('curve.wsLatency') }}: <b>{{ wsLatencyMs.toFixed(1) }} ms</b></span>
         </template>
         <template v-else>
           <label class="flex items-center gap-2">
@@ -223,11 +264,88 @@
       <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs curve-field-error">
         {{ localBreakpointError }}
       </div>
+      <div v-if="isLocalSource && localTrigger === 'watchpoint'" class="mt-1 flex flex-wrap items-center gap-2 text-xs">
+        <span>{{ translate('curve.watchpointJump') }}</span>
+        <el-input-number v-model="jumpFrames" :min="1" :max="500" :controls="false" size="small" style="width: 4.5rem"/>
+        <el-button size="small" :disabled="watchTriggerSeq === null" @click="jumpToWatchTrigger(true)">{{ translate('curve.watchpointJumpPre') }}</el-button>
+        <el-button size="small" :disabled="watchTriggerSeq === null" @click="jumpToWatchTrigger(false)">{{ translate('curve.watchpointJumpPost') }}</el-button>
+        <span v-if="watchFramesTriggered" class="render-warning">{{ translate('curve.watchpointTriggered') }}</span>
+      </div>
       <div v-if="isLocalSource && localOutOfScopeCount > 0" class="mt-1 text-xs opacity-70">
         {{ translate('curve.localOutOfScopeHint') }}
       </div>
       <div v-if="isLocalSource" class="mt-1 text-xs opacity-70">
         {{ translate('curve.localGroupingHint') }}
+      </div>
+      <div v-if="isLocalSource" class="mt-2 rounded border border-gray-200 p-2 text-xs">
+        <div class="flex flex-wrap items-center gap-2">
+          <el-checkbox v-model="conditionEnabled" :disabled="sampling">{{ translate('curve.conditionEnable') }}</el-checkbox>
+          <template v-if="conditionEnabled">
+            <label class="flex items-center gap-1">
+              <span>{{ translate('curve.conditionAddress') }}</span>
+              <el-input v-model="conditionAddressInput" size="small" style="width: 8.5rem" :disabled="sampling" placeholder="0x24001234"/>
+            </label>
+            <label class="flex items-center gap-1">
+              <span>{{ translate('curve.conditionSize') }}</span>
+              <el-select v-model="conditionSize" size="small" style="width: 4rem" :disabled="sampling">
+                <el-option :value="1" label="1"/><el-option :value="2" label="2"/><el-option :value="4" label="4"/>
+              </el-select>
+            </label>
+            <label class="flex items-center gap-1">
+              <span>{{ translate('curve.conditionOp') }}</span>
+              <el-select v-model="conditionOp" size="small" style="width: 4.5rem" :disabled="sampling">
+                <el-option v-for="op in ['==','!=','>','>=','<','<=']" :key="op" :value="op" :label="op"/>
+              </el-select>
+            </label>
+            <label class="flex items-center gap-1">
+              <span>{{ translate('curve.conditionValue') }}</span>
+              <el-input-number v-model="conditionValue" :controls="false" size="small" style="width: 6rem" :disabled="sampling"/>
+            </label>
+            <el-checkbox v-model="conditionSigned" :disabled="sampling">{{ translate('curve.conditionSigned') }}</el-checkbox>
+            <label class="flex items-center gap-1">
+              <span>{{ translate('curve.conditionMode') }}</span>
+              <el-select v-model="conditionMode" size="small" style="width: 6rem" :disabled="sampling">
+                <el-option value="once" :label="translate('curve.conditionOnce')"/>
+                <el-option value="continuous" :label="translate('curve.conditionContinuous')"/>
+              </el-select>
+            </label>
+            <el-checkbox v-model="conditionStopAfter" :disabled="sampling">{{ translate('curve.conditionStopAfter') }}</el-checkbox>
+            <span v-if="conditionError" style="color: #dc2626">{{ conditionError }}</span>
+          </template>
+          <template v-if="conditionEnabled && (conditionArmed !== null || conditionHits !== null)">
+            <span>{{ translate('curve.conditionArmed') }}: <b>{{ conditionArmed === null ? '-' : (conditionArmed ? 'ON' : 'OFF') }}</b></span>
+            <span>{{ translate('curve.conditionMet') }}: <b>{{ conditionMet === null ? '-' : (conditionMet ? 'YES' : 'NO') }}</b></span>
+            <span>{{ translate('curve.conditionHits') }}: <b>{{ conditionHits ?? '-' }}</b></span>
+            <span>{{ translate('curve.conditionTriggerSeq') }}: <b>{{ conditionTriggerSeq ?? '-' }}</b></span>
+          </template>
+          <template v-if="conditionTriggerSeq !== null">
+            <span>{{ translate('curve.conditionJump') }}</span>
+            <el-button size="small" @click="jumpToConditionTrigger(true)">{{ translate('curve.watchpointJumpPre') }}</el-button>
+            <el-button size="small" @click="jumpToConditionTrigger(false)">{{ translate('curve.watchpointJumpPost') }}</el-button>
+            <span v-if="conditionFramesTriggered" class="render-warning">{{ translate('curve.watchpointTriggered') }}</span>
+          </template>
+        </div>
+      </div>
+      <div v-if="isLocalSource" class="group-weights mt-1 flex flex-wrap items-center gap-2 text-xs">
+        <span>{{ translate('curve.groupWeight') }}</span>
+        <label v-for="(weight, index) in groupWeights.slice(0, localActiveGroupCount)" :key="index" class="flex items-center gap-1">
+          <span>G{{ index + 1 }}</span>
+          <el-input-number
+              :model-value="weight"
+              :min="1"
+              :max="8"
+              :step="1"
+              size="small"
+              :controls="false"
+              :disabled="sampling"
+              style="width: 3.2rem"
+              @change="(value: number) => setGroupWeight(index, value)"
+          />
+        </label>
+        <span class="opacity-70">Σ{{ localGroupWeightSum }} (≤64)</span>
+        <span v-if="localGroupWeightedRates.length" class="font-mono opacity-70">
+          {{ localGroupWeightedRates.map((rate) => rate.toFixed(1)).join(' / ') }} Hz
+        </span>
       </div>
     </section>
 
@@ -287,6 +405,8 @@
               @input="onVariableSearchInput"
           />
           <el-checkbox v-model="onlySampleable" size="small">{{ translate('curve.onlySampleable') }}</el-checkbox>
+          <el-checkbox v-model="activeOnly" size="small">{{ translate('curve.activeOnly') }}</el-checkbox>
+          <el-checkbox v-model="currentFunctionOnly" size="small">{{ translate('curve.currentFunctionOnly') }}</el-checkbox>
           <label class="flex items-center gap-1 text-xs">
             <span class="whitespace-nowrap">{{ translate('curve.groupBy') }}</span>
             <el-select v-model="groupBy" size="small" style="width: 9rem">
@@ -322,7 +442,8 @@
                   onlySampleable, groupBy, variableSearch, samplingSource, row.groupLabel, row.groupCount]"
                 :class="row.kind === 'group'
                   ? 'var-group-row'
-                  : ['var-row', {selected: isRowSelected(row), unsampleable: !row.node.sampleable, selectable: nodeSelectable(row.node)}]"
+                  : ['var-row', {selected: isRowSelected(row), unsampleable: !row.node.sampleable,
+                    selectable: nodeSelectable(row.node), 'pc-stale': activePc !== null && !nodeValidAtPc(row.node)}]"
                 @click="row.kind === 'variable' ? onVariableRowClick(row, $event) : undefined"
             >
               <template v-if="row.kind === 'group'">
@@ -331,12 +452,24 @@
               </template>
               <template v-else>
                 <span class="var-check" @click.stop>
+                  <span
+                      v-if="activePc !== null && !nodeValidAtPc(row.node)"
+                      class="stale-dot"
+                      :title="translate('curve.activeStaleHint')"
+                  >●</span>
                   <el-checkbox
                       v-if="nodeSelectable(row.node)"
                       :model-value="isRowSelected(row)"
                       :disabled="isLocalSource && sampling"
                       @change="toggleRow(row)"
                   />
+                  <button
+                      type="button"
+                      class="watch-star"
+                      :class="{active: isWatched(row.key)}"
+                      :title="isWatched(row.key) ? translate('curve.watchRemove') : translate('curve.watchAdd')"
+                      @click.stop="toggleWatch(row.key, row.node.name)"
+                  >{{ isWatched(row.key) ? '★' : '☆' }}</button>
                 </span>
                 <span
                     class="var-name"
@@ -409,12 +542,48 @@
             :labels="sourceBrowserLabels"
             :live-values="sourceLiveValues"
             :active-key="activeSourceKey"
+            :active-file-line="sourceActiveFileLine"
             :line-addresses="sourceLineAddresses"
             @project-loaded="onSourceProjectLoaded"
             @select-variable="onSourceVariableSelected"
             @elf-file="onSourceElfFile"
             @line-click="onSourceLineClick"
         />
+      </div>
+    </section>
+
+    <!-- task-42：目标检测 / ELF 匹配 -->
+    <section class="curve-card target-panel advanced-control">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="text-sm font-bold">{{ translate('curve.targetTitle') }}</span>
+        <el-button size="small" :loading="targetLoading" @click="refreshTargetInfo">{{ translate('curve.targetRefresh') }}</el-button>
+        <span v-if="targetError" style="color: #dc2626">{{ targetError }}</span>
+        <span v-else-if="targetRaw" class="opacity-70">
+          <template v-if="detectedTarget.detected">
+            {{ translate('curve.targetDetected') }}: {{ detectedTarget.baseGroup || detectedTarget.series || '-' }}
+            · DEV_ID {{ detectedTarget.devId || '-' }}
+            · Flash {{ detectedTarget.flashKib || '-' }} KiB
+            · {{ translate('curve.targetConfidence') }} {{ detectedTarget.confidence }}
+          </template>
+          <template v-else>{{ translate('curve.targetNotDetected') }}</template>
+        </span>
+        <label class="flex items-center gap-1">
+          <span>{{ translate('curve.targetProfile') }}</span>
+          <el-select v-model="selectedTargetProfileId" size="small" clearable style="width: 12rem" :placeholder="translate('curve.targetProfileNone')">
+            <el-option v-for="profile in knownTargetProfiles" :key="profile.id" :value="profile.id" :label="`${profile.id} (${profile.flashKib} KiB)`"/>
+          </el-select>
+        </label>
+        <span v-if="selectedTargetProfile" class="opacity-70">
+          {{ translate('curve.targetMatch') }}: {{ targetMatch.level }}
+        </span>
+        <span v-if="elfFlashRange" class="font-mono opacity-70">
+          ELF: 0x{{ elfFlashRange[0].toString(16).toUpperCase() }}–0x{{ elfFlashRange[1].toString(16).toUpperCase() }}
+        </span>
+        <el-alert v-if="targetFlashWarning" type="warning" :title="targetFlashWarning" :closable="false" show-icon class="w-full"/>
+        <el-button size="small" :loading="verifyState === 'running'" @click="verifyElfAgainstTarget">{{ translate('curve.verifyButton') }}</el-button>
+        <span v-if="verifyState !== 'idle'" class="font-mono" :style="{color: verifyState === 'match' ? '#16a34a' : verifyState === 'mismatch' ? '#dc2626' : '#6b7280'}">
+          {{ verifyState }} {{ verifyDetail }}
+        </span>
       </div>
     </section>
 
@@ -426,6 +595,15 @@
           {{ selectedCollapsed ? translate('curve.selectedExpand') : translate('curve.selectedCollapse') }}
         </el-button>
         <el-button size="small" type="danger" link :disabled="isLocalSource && sampling" @click="clearSelection">{{ translate('curve.clearSelection') }}</el-button>
+        <el-button size="small" link :disabled="sampling" @click="addDerivedCurve('add')">{{ translate('curve.derivedAdd') }}</el-button>
+        <el-button size="small" link :disabled="sampling" @click="addDerivedCurve('sub')">{{ translate('curve.derivedSub') }}</el-button>
+        <el-input v-model="presetName" size="small" style="width: 9rem" :placeholder="translate('curve.presetName')"/>
+        <el-button size="small" @click="savePreset">{{ translate('curve.presetSave') }}</el-button>
+        <el-select v-model="selectedPresetId" size="small" style="width: 10rem" :placeholder="translate('curve.presetSelect')">
+          <el-option v-for="preset in presets" :key="preset.id" :value="preset.id" :label="preset.name"/>
+        </el-select>
+        <el-button size="small" :disabled="!selectedPresetId" @click="applyPreset">{{ translate('curve.presetLoad') }}</el-button>
+        <el-button size="small" :disabled="!selectedPresetId" @click="deletePreset">{{ translate('curve.presetDelete') }}</el-button>
       </div>
       <div v-if="!selectedCollapsed" class="selected-list mt-1">
         <div
@@ -467,8 +645,16 @@
         </div>
       </div>
 
-      <div class="render-bar mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      <div class="render-bar advanced-control mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <span>{{ translate('curve.rendering') }}: <b>{{ renderingLabel }}</b></span>
+        <label class="flex items-center gap-1">
+          <span>{{ translate('curve.smoothing') }}</span>
+          <el-select v-model="smoothingWindow" size="small" style="width: 4.5rem">
+            <el-option v-for="option in SMOOTHING_WINDOWS" :key="option" :value="option" :label="option === 1 ? translate('curve.smoothingOff') : String(option)"/>
+          </el-select>
+        </label>
+        <el-button size="small" @click="runFft">{{ translate('curve.fftButton') }}</el-button>
+        <el-checkbox v-model="autoPcSource" size="small">{{ translate('curve.pcSourceFollow') }}</el-checkbox>
         <label class="flex items-center gap-1">
           <span>{{ translate('curve.yAxis') }}</span>
           <el-select v-model="yAxisMode" size="small" style="width: 7.5rem">
@@ -514,6 +700,10 @@
       <div ref="chartWrapRef" class="chart-wrap">
         <canvas
             ref="canvasRef"
+            role="img"
+            tabindex="0"
+            :aria-label="translate('curve.ariaChart')"
+            @click="onCanvasCursorClick"
             @pointermove="onCanvasPointerMove"
             @pointerdown="onCanvasPointerDown"
             @pointerup="onCanvasPointerUp"
@@ -563,6 +753,129 @@
         >{{ translate('curve.legendCollapse') }}</button>
       </div>
     </section>
+
+    <!-- FFT 频谱（简单 DFT） -->
+    <section v-if="fftOpen && fftData" class="curve-card advanced-control fft-panel">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="text-sm font-bold">{{ translate('curve.fftTitle') }}</span>
+        <span class="truncate opacity-70">{{ fftData.name }}</span>
+        <span class="font-mono opacity-70">fs={{ fftData.sampleRate.toFixed(2) }} Hz</span>
+        <el-button size="small" link @click="fftOpen = false">×</el-button>
+      </div>
+      <table class="delta-table mt-1">
+        <thead><tr><th>Hz</th><th>{{ translate('curve.fftMagnitude') }}</th></tr></thead>
+        <tbody>
+        <tr v-for="peak in fftData.peaks" :key="peak.hz">
+          <td class="font-mono">{{ peak.hz.toFixed(3) }}</td>
+          <td class="font-mono">{{ peak.magnitude.toFixed(4) }}</td>
+        </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 双光标 Δ / 统计 -->
+    <section v-if="cursorDelta" class="curve-card delta-panel advanced-control" aria-live="polite">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="font-semibold">{{ translate('curve.cursorDeltaTitle') }}</span>
+        <span>Δt: <b class="font-mono">{{ cursorDelta.dt.toFixed(4) }} s</b></span>
+        <span class="opacity-70">{{ translate('curve.cursorHint') }}</span>
+        <el-button size="small" link @click="clearCursors">{{ translate('curve.cursorClear') }}</el-button>
+      </div>
+      <div class="delta-table-wrap mt-1">
+        <table class="delta-table">
+          <thead>
+          <tr>
+            <th>{{ translate('curve.colName') }}</th>
+            <th>A</th>
+            <th>B</th>
+            <th>Δ</th>
+            <th>min</th>
+            <th>max</th>
+            <th>avg</th>
+          </tr>
+          </thead>
+          <tbody>
+          <tr v-for="row in cursorDelta.rows" :key="row.name">
+            <td><span class="series-dot" :style="{background: row.color}"></span> {{ row.name }}</td>
+            <td class="font-mono">{{ row.aText }}</td>
+            <td class="font-mono">{{ row.bText }}</td>
+            <td class="font-mono">{{ row.delta }}</td>
+            <td class="font-mono">{{ row.min }}</td>
+            <td class="font-mono">{{ row.max }}</td>
+            <td class="font-mono">{{ row.avg }}</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Watch 列表（独立于曲线选择） -->
+    <section v-if="watchList.length > 0" class="curve-card watch-panel advanced-control">
+      <div class="text-xs font-semibold">{{ translate('curve.watchTitle') }}</div>
+      <div class="watch-list mt-1">
+        <div v-for="watch in watchList" :key="watch.key" class="watch-row">
+          <span class="truncate">{{ watch.name }}</span>
+          <span class="font-mono">{{ watchStats[watch.key]?.current ?? '-' }}</span>
+          <span class="font-mono opacity-70">min {{ watchStats[watch.key]?.min ?? '-' }}</span>
+          <span class="font-mono opacity-70">max {{ watchStats[watch.key]?.max ?? '-' }}</span>
+          <span class="font-mono opacity-70">Δn {{ watchStats[watch.key]?.changes ?? 0 }}</span>
+          <el-button link size="small" @click="toggleWatch(watch.key, watch.name)">×</el-button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 录制 / 回放 -->
+    <section class="curve-card record-panel advanced-control">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="font-semibold">{{ translate('curve.recordTitle') }}</span>
+        <el-button size="small" :disabled="!sampling || playbackMode" @click="startRecording">{{ translate('curve.recordStart') }}</el-button>
+        <el-button size="small" :disabled="!recordingActive" @click="stopRecordingCapture">{{ translate('curve.recordStop') }}</el-button>
+        <el-input v-model="recordingName" size="small" style="width: 10rem" :placeholder="translate('curve.recordName')"/>
+        <el-button size="small" :disabled="recordRowCount === 0" @click="saveCurrentRecording">{{ translate('curve.recordSave') }}</el-button>
+        <span class="opacity-70">{{ translate('curve.recordRows') }}: {{ recordRowCount }}</span>
+        <el-select v-model="selectedRecordingId" size="small" style="width: 12rem" :placeholder="translate('curve.recordSelect')">
+          <el-option v-for="recording in recordings" :key="recording.id" :value="recording.id" :label="`${recording.name} (${recording.rowCount})`"/>
+        </el-select>
+        <el-button size="small" :disabled="!selectedRecordingId" @click="loadRecordingById(selectedRecordingId)">{{ translate('curve.recordLoad') }}</el-button>
+        <el-button size="small" :disabled="!selectedRecordingId" @click="deleteSelectedRecording">{{ translate('curve.recordDelete') }}</el-button>
+        <el-button size="small" @click="refreshRecordings">{{ translate('curve.recordRefresh') }}</el-button>
+        <el-button size="small" :disabled="!selectedRecordingId" @click="exportSelectedRecordingJson">{{ translate('curve.recordExportJson') }}</el-button>
+        <el-button size="small" :disabled="!selectedRecordingId" @click="exportSelectedRecordingCsv">{{ translate('curve.recordExportCsv') }}</el-button>
+        <el-button v-if="playbackMode" size="small" @click="exitPlayback">{{ translate('curve.playbackExit') }}</el-button>
+      </div>
+      <div v-if="playbackMode" class="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <el-button size="small" @click="togglePlayback">{{ playbackPlaying ? translate('curve.playbackPause') : translate('curve.playbackPlay') }}</el-button>
+        <label class="flex items-center gap-1">
+          <span>{{ translate('curve.playbackSpeed') }}</span>
+          <el-select v-model="playbackSpeed" size="small" style="width: 4.5rem">
+            <el-option :value="0.5" label="0.5×"/>
+            <el-option :value="1" label="1×"/>
+            <el-option :value="2" label="2×"/>
+            <el-option :value="4" label="4×"/>
+          </el-select>
+        </label>
+        <input
+            class="playback-range"
+            type="range"
+            min="0"
+            :max="Math.max(0, playbackRows.length - 1)"
+            :value="playbackIndex"
+            @input="(event: Event) => applyPlaybackIndex(Number((event.target as HTMLInputElement).value))"
+        />
+        <span class="font-mono">{{ playbackIndex }}/{{ Math.max(0, playbackRows.length - 1) }}</span>
+        <span class="opacity-70">{{ playbackRows[playbackIndex]?.time.toFixed(3) ?? '0.000' }} s</span>
+      </div>
+    </section>
+
+    <!-- 诊断面板 -->
+    <details class="curve-card diag-panel" :open="diagnosticsOpen" @toggle="(event: Event) => diagnosticsOpen = (event.target as HTMLDetailsElement).open">
+      <summary class="cursor-pointer text-sm font-semibold">{{ translate('curve.diagTitle') }}</summary>
+      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <el-button size="small" @click="copyDiagnostics">{{ diagnosticsCopied ? translate('curve.diagCopied') : translate('curve.diagCopy') }}</el-button>
+        <span class="opacity-70">{{ translate('curve.diagHint') }}</span>
+      </div>
+      <pre class="diag-json mt-2">{{ diagnosticsJson }}</pre>
+    </details>
       </div>
     </div>
   </div>
@@ -570,12 +883,26 @@
 
 <script setup lang="ts">
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
+import CurveFramesWorker from '../utils/curveFramesWorker?worker&inline'
+import CurveChartWorker from '../utils/curveChartWorker?worker&inline'
 import {ElMessageBox} from 'element-plus'
 import {translate, translateRaw, type TranslationKeys} from '@/locales'
 import {globalNotify} from '@/composables/notification'
 import SourceBrowser from '@/components/source/SourceBrowser.vue'
 import type {SourceBrowserLabels} from '@/components/source/labels'
 import type {SourceLineAddressMap, SourceLineClickPayload, SourceLiveValueMap} from '@/utils/sourceProject'
+import type {SourceActiveFileLine} from '@/components/source/lineTarget'
+import {
+  deleteRecording,
+  listRecordings,
+  loadRecording,
+  newRecordingId,
+  saveRecording,
+  type CurveRecordingData,
+  type RecordingMeta,
+  type RecordingRow,
+  type RecordingSeriesData,
+} from '@/utils/curveRecording'
 import type {SourceProject} from '@/components/source/projectLoader'
 import type {SourceVariableSelectionPayload} from '@/utils/sourceProject'
 import {CmsisDapClient, DapError, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} from '@/api/wsDap'
@@ -593,6 +920,25 @@ import {
 } from '@/utils/elfSymbols'
 import {addressExprIsLive, addressExprRegisters, addressExprText} from '@/utils/dwarfLocation'
 import {
+  fileLineToAddress,
+  findElfLineFiles,
+  parseElfLineIndex,
+  pcToLine,
+  type ElfLineIndex,
+  type ElfLineLocation,
+} from '@/utils/elfLineIndex'
+import {getTargetInfo, type TargetInfo} from '@/api/apiTarget'
+import {
+  allTargetProfiles,
+  compactTargetProfileApi,
+  compareDetectedToProfile,
+  detectionLimitations,
+  findKnownTargetProfile,
+  parseTargetDetection,
+  type CompactTargetProfile,
+} from '@/utils/targetProfile'
+import {parseElfImage} from '@/utils/firmwareImage'
+import {
   buildFunctionSymbols,
   chooseBreakpointFunction,
   formatBreakpointAddress,
@@ -603,6 +949,10 @@ import {
 import {
   CURVE_LOCAL_FLASH_END,
   CURVE_LOCAL_FLASH_START,
+  CURVE_LOCAL_FRAMES_DEFAULT,
+  CURVE_LOCAL_FRAMES_PATH,
+  deviceApiUrl,
+  decodeCurveFrames,
   CURVE_LOCAL_MAX_GROUPS,
   CURVE_LOCAL_MAX_SERIES_PER_GROUP,
   CURVE_LOCAL_MAX_TOTAL_SERIES,
@@ -614,8 +964,10 @@ import {
   parseBreakpointAddressInput,
   startLocalCurve,
   stopLocalCurve,
+  type CurveConditionSpec,
   type CurveLocalFrame,
   type CurveLocalFramesPage,
+  type CurveLocalWatchpointSpec,
   type CurveLocalSeriesSpec,
   type CurveLocalTrigger,
   type LocalCurveStatus,
@@ -733,6 +1085,8 @@ interface CurveSeries {
   loclistMulti?: boolean
   /** loclist 多段变体（协议 v2：随系列下发，固件按 PC 选择） */
   pcVariants?: CurveLocalLocationVariant[]
+  /** 简单派生曲线：A+B / A-B（不参与采集，只用于显示/导出）。 */
+  derived?: {a: number; b: number; op: 'add' | 'sub'}
 }
 
 interface CurveNotice {
@@ -842,8 +1196,10 @@ const localBreakpointError = computed(() => {
 const localStartDisabled = computed(() => {
   if (seriesList.value.length === 0) return true
   if (!isLocalSource.value) return false
-  if (localTrigger.value !== 'breakpoint') return false
-  return breakpointResolution.value?.ok !== true
+  if (localTrigger.value === 'breakpoint') return breakpointResolution.value?.ok !== true
+  if (localTrigger.value === 'watchpoint') return watchpointSpec.value === null
+  if (conditionEnabled.value && conditionSpec.value === null) return true
+  return false
 })
 /** 本地采样器是否已 start（用于保证 stop/卸载时 POST /api/curve/stop）。 */
 const localActive = ref(false)
@@ -865,6 +1221,12 @@ const globalFormat = ref<CurveFormat>('auto')
 /** B/A 渲染模式：B（默认）只绘制前 drawCap 条可见曲线；A 绘制全部可见（降采样）。 */
 const renderAll = ref(false)
 const drawCap = ref(DEFAULT_DRAW_CAP)
+/** task-44：滑动平均窗口（1=off，3/5/9）与 FFT 面板。 */
+const smoothingWindow = ref(1)
+const SMOOTHING_WINDOWS = [1, 3, 5, 9]
+const fftOpen = ref(false)
+const fftData = ref<{name: string; sampleRate: number; peaks: Array<{hz: number; magnitude: number}>} | null>(null)
+const mobileAdvanced = ref(false)
 const legendExpanded = ref(false)
 const selectedCollapsed = ref(false)
 const selectedShowAll = ref(false)
@@ -885,6 +1247,100 @@ const lastDataTime = ref(0)
 const valueMultiplier = ref(1)
 const valueOffset = ref(0)
 const VALUE_SCALE_STORAGE_KEY = 'curve.valueScale'
+
+// ---- task-37：group weight / watch / 双光标 / 预设 / 诊断 / 录制回放 ----
+/** 每组采样权重 1..8（默认1，sum(weight)≤64，契约 §9.7）。 */
+const groupWeights = ref<number[]>([1])
+/** task-35：当前帧 PC（active frame）——用于标记 pcLow/pcHigh 不含 PC 的变量为 stale。 */
+const activePc = ref<number | null>(null)
+let latestFramePc: number | undefined
+/** task-42：ELF 行表索引（shallowRef 避免大对象深响应式）。 */
+const lineIndex = shallowRef<ElfLineIndex | null>(null)
+const lineIndexError = ref('')
+/** PC 当前源码行/当前函数过滤。 */
+const activeOnly = ref(false)
+const currentFunctionOnly = ref(false)
+/** 目标检测 / profile（显式选择，不自动推断）。 */
+const targetRaw = shallowRef<TargetInfo | null>(null)
+const targetLoading = ref(false)
+const targetError = ref('')
+const selectedTargetProfileId = ref('')
+const elfFlashRange = shallowRef<[number, number] | null>(null)
+const watchAddressInput = ref('')
+const watchSize = ref<1 | 2 | 4>(4)
+const watchAccess = ref<'write' | 'readwrite'>('write')
+/** watchpoint 触发状态（task-38）。 */
+const watchTriggerSeq = ref<number | null>(null)
+const watchpointArmed = ref<boolean | null>(null)
+const watchpointHits = ref<number | null>(null)
+const watchFramesTriggered = ref(false)
+const jumpFrames = ref(10)
+/** task-45 条件触发 UI/状态（可与 periodic/breakpoint/watchpoint 组合）。 */
+const conditionEnabled = ref(false)
+const conditionAddressInput = ref('')
+const conditionSize = ref<1 | 2 | 4>(4)
+const conditionOp = ref<'==' | '!=' | '>' | '>=' | '<' | '<='>('<')
+const conditionValue = ref(0)
+const conditionSigned = ref(false)
+const conditionMode = ref<'once' | 'continuous'>('once')
+const conditionStopAfter = ref(true)
+const conditionArmed = ref<boolean | null>(null)
+const conditionMet = ref<boolean | null>(null)
+const conditionHits = ref<number | null>(null)
+const conditionTriggerSeq = ref<number | null>(null)
+const conditionFramesTriggered = ref(false)
+/** task-42：显式 ELF/目标固件一致性校验（本地 no-halt 读 Flash 首段首字）。 */
+const elfVerifySegment = shallowRef<{address: number; bytes: Uint8Array} | null>(null)
+const verifyState = ref<'idle' | 'running' | 'match' | 'mismatch' | 'error'>('idle')
+const verifyDetail = ref('')
+/** task-39：/ws/curve 实时推送（WS 优先，失败自动回退 HTTP）。 */
+const CURVE_WS_PATH = '/ws/curve'
+const wsTransport = ref<'http' | 'ws' | 'fallback'>('http')
+const wsFrames = ref(0)
+const wsDropped = ref(0)
+const wsLatencyMs = ref(0)
+let curveWs: WebSocket | null = null
+let wsFallbackTimer = 0
+let wsFirstMessageTimer = 0
+let wsLastMessageAt = 0
+let wsWindowStart = 0
+let wsWindowFrames = 0
+const PRESET_STORAGE_KEY = 'curve.presets'
+interface PresetRecord {id: string; name: string; createdAt: number; series: RecordingSeriesData[]}
+const presets = ref<PresetRecord[]>([])
+const presetName = ref('')
+const selectedPresetId = ref('')
+/** Watch 列表独立于曲线选择：只记录 key，有对应已选曲线时展示统计。 */
+const watchKeys = ref<string[]>([])
+const watchStats = ref<Record<string, {current: string; min: string; max: string; changes: number}>>({})
+/** 双光标（order 为 ring order 下标）+ Δ/统计面板。 */
+const cursorA = ref<{index: number; time: number} | null>(null)
+const cursorB = ref<{index: number; time: number} | null>(null)
+const cursorPulse = ref(0)
+/** 诊断面板。 */
+const diagnosticsOpen = ref(false)
+const diagnosticsCopied = ref(false)
+const lastElfName = ref('')
+const lastElfBytes = ref(0)
+/** IndexedDB 录制/回放。 */
+const recordings = ref<RecordingMeta[]>([])
+const selectedRecordingId = ref('')
+const recordingName = ref('')
+const recordingActive = ref(false)
+const recordRowCount = ref(0)
+let recordRows: RecordingRow[] = []
+let recordSnapshot: CurveSeries[] = []
+let recordStartTimestamp = 0
+const MAX_RECORD_ROWS = 6000
+const playbackMode = ref(false)
+const playbackRows = ref<RecordingRow[]>([])
+const playbackSeries = ref<CurveSeries[]>([])
+const playbackIndex = ref(0)
+const playbackPlaying = ref(false)
+const playbackSpeed = ref(1)
+let playbackTimer = 0
+let playbackWallStart = 0
+let playbackRecordStart = 0
 const seriesList = ref<CurveSeries[]>([])
 const variableSearch = ref('')
 /** 搜索框输入值；经 150ms debounce 后才驱动变量树过滤。 */
@@ -982,6 +1438,8 @@ const sourceBrowserLabels = computed<SourceBrowserLabels>(() => ({
   liveValueStale: translateRaw('curve.sourceLiveValueStale'),
   breakpointLineHint: translateRaw('curve.sourceBreakpointLineHint'),
   liveValues: translateRaw('curve.sourceLiveValues'),
+  activePcLine: translateRaw('curve.sourceActivePcLine'),
+  lineNoAddressHint: translateRaw('curve.sourceLineNoAddressHint'),
   close: translateRaw('curve.sourceClose'),
 }))
 
@@ -993,7 +1451,13 @@ const sourceSelectedKeys = computed<string[]>(() => seriesList.value.map((item) 
  * 也避免影响只做变量选择的既有流程）；挂载后保持（v-show），切换视图不丢浏览状态。
  */
 const sourceViewEverOpened = ref(false)
-const sourceBrowserRef = ref<{scrollToVariableByKey(key: string): Promise<boolean>} | null>(null)
+const sourceBrowserRef = ref<{
+  scrollToVariableByKey(key: string): Promise<boolean>
+  openFile?(file: string): Promise<void>
+  scrollToLine?(line: number, highlight?: boolean): void
+} | null>(null)
+/** task-44：PC 当前行自动联动 Source（可开关，避免抢用户滚动）。 */
+const autoPcSource = ref(true)
 watch(elfView, (view) => {
   if (view === 'source') sourceViewEverOpened.value = true
 }, {immediate: true})
@@ -1121,6 +1585,8 @@ const timestamps = new Float64Array(MAX_POINTS)
 const slotSeq = new Float64Array(MAX_POINTS)
 /** 每点所属本地 group（CSV 导出组/时间戳；CVF1/Web 恒 0）。 */
 const slotGroup = new Uint8Array(MAX_POINTS)
+/** task-42：每个 ring 点对应的设备帧 seq（watchpoint 跳转 trigger_seq 用）。 */
+const slotDeviceSeq = new Float64Array(MAX_POINTS)
 const seriesLo = new Map<number, Uint32Array>()
 const seriesHi = new Map<number, Uint32Array>()
 /** 每系列解码后的数值缓存（Float64Array），绘制/缩放直接读，避免每帧重复 decode。 */
@@ -1409,6 +1875,12 @@ function flushStats(): void {
   const dataTime = lastDataTimestamp()
   if (lastDataTime.value !== dataTime) lastDataTime.value = dataTime
   sourceLivePulse.value += 1
+  if (latestFramePc !== undefined && activePc.value !== latestFramePc) {
+    activePc.value = latestFramePc
+  }
+  if (watchKeys.value.length > 0) updateWatchStats()
+  if (cursorA.value || cursorB.value) cursorPulse.value += 1
+  if (seriesList.value.some((item) => item.derived)) updateDerivedValues()
   if (isLocalSource.value) {
     const rate = localRateTimestamps.length
     if (effectiveRate.value !== rate) effectiveRate.value = rate
@@ -1762,6 +2234,13 @@ async function refreshLocalStatus(): Promise<void> {
   localOutOfScopeCount.value = status.outOfScope ?? 0
   if (status.groupCount !== undefined && status.groupCount > 0) localGroupCount.value = status.groupCount
   if (status.currentGroup !== undefined) localCurrentGroup.value = status.currentGroup
+  watchpointArmed.value = status.watchpointArmed ?? null
+  watchpointHits.value = status.watchpointHits ?? null
+  if (status.triggerSeq !== undefined) watchTriggerSeq.value = status.triggerSeq
+  conditionArmed.value = status.conditionArmed ?? null
+  conditionMet.value = status.conditionMet ?? null
+  conditionHits.value = status.conditionHits ?? null
+  if (status.conditionTriggerSeq !== undefined) conditionTriggerSeq.value = status.conditionTriggerSeq
   if (status.running !== true && status.error > 0) {
     localGap.value = true
   }
@@ -1787,7 +2266,9 @@ function stopLocalSampling(): void {
   sampling.value = false
   localRunId += 1
   localActive.value = false
+  latestFramePc = undefined
   clearLocalPollTimers()
+  stopCurveWs()
   localPollsInFlightCount = 0
   localFrameBuffer.clear()
   if (wasActive) void postLocalStop()
@@ -1800,7 +2281,11 @@ async function startLocalSampling(): Promise<void> {
   if (connected.value || connecting.value) {
     await onDisconnect()
   }
-  const snapshot = seriesList.value.slice()
+  const snapshot = seriesList.value.filter((item) => !item.derived)
+  if (snapshot.length === 0) {
+    notice.value = {type: 'error', title: translate('curve.derivedNeedTwo')}
+    return
+  }
   // v2：自动按每组 32 路切分（最多 8 组/256 路）；超出明确提示，不伪造。
   const split = splitSeriesIntoGroups(snapshot, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS)
   if (split.error === 'empty') return
@@ -1808,7 +2293,8 @@ async function startLocalSampling(): Promise<void> {
     notice.value = {type: 'error', title: translate('curve.localGroupLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES})}
     return
   }
-  const groupSpecs: Array<{id: number; series: CurveLocalSeriesSpec[]}> = []
+  const groupSpecs: Array<{id: number; weight: number; series: CurveLocalSeriesSpec[]}> = []
+  ensureGroupWeights(split.groupCount)
   const groupEntries: Array<Array<{index: number; item: CurveSeries; size: number}>> = []
   let flatIndex = 0
   let needsHalt = false
@@ -1828,13 +2314,14 @@ async function startLocalSampling(): Promise<void> {
       if ((built.spec.variants?.length ?? 0) > 0) hasVariants = true
       flatIndex += 1
     }
-    groupSpecs.push({id: groupSpecs.length, series})
+    groupSpecs.push({id: groupSpecs.length, weight: groupWeights.value[groupSpecs.length] ?? 1, series})
     groupEntries.push(entries)
   }
   statusError.value = false
   notice.value = null
   const trigger = localTrigger.value
   let breakpointAddress: number | undefined
+  let watchpoint: CurveLocalWatchpointSpec | undefined
   if (trigger === 'breakpoint') {
     const resolution = breakpointResolution.value
     if (!resolution || !resolution.ok) {
@@ -1842,6 +2329,16 @@ async function startLocalSampling(): Promise<void> {
       return
     }
     breakpointAddress = resolution.address
+  } else if (trigger === 'watchpoint') {
+    if (!watchpointSpec.value) {
+      notice.value = {type: 'error', title: translate('curve.watchpointInvalid')}
+      return
+    }
+    watchpoint = watchpointSpec.value
+  }
+  if (conditionEnabled.value && !conditionSpec.value) {
+    notice.value = {type: 'error', title: translate('curve.conditionInvalid')}
+    return
   }
   if (needsHalt && localIntervalMs.value < 5) {
     notice.value = {type: 'error', title: translate('curve.localHaltIntervalTooFast')}
@@ -1851,6 +2348,8 @@ async function startLocalSampling(): Promise<void> {
     intervalUs: localIntervalMs.value * 1000,
     trigger,
     breakpointAddress,
+    watchpoint,
+    triggerCondition: conditionEnabled.value ? (conditionSpec.value ?? undefined) : undefined,
     // variants 必须 halt（契约 §9.4）；固定地址仅在有寄存器表达式时 halt。breakpoint 忽略 halt。
     halt: trigger === 'periodic' ? (hasVariants ? true : needsHalt) : undefined,
   }
@@ -1894,6 +2393,24 @@ async function startLocalSampling(): Promise<void> {
   localPollsInFlightCount = 0
   localFrameBuffer.clear()
   localPollError = false
+  latestFramePc = undefined
+  activePc.value = null
+  watchTriggerSeq.value = null
+  watchpointArmed.value = null
+  watchpointHits.value = null
+  watchFramesTriggered.value = false
+  conditionArmed.value = null
+  conditionMet.value = null
+  conditionHits.value = null
+  conditionTriggerSeq.value = null
+  conditionFramesTriggered.value = false
+  wsTransport.value = 'http'
+  wsFrames.value = 0
+  wsDropped.value = 0
+  wsLatencyMs.value = 0
+  wsLastMessageAt = 0
+  wsWindowStart = 0
+  wsWindowFrames = 0
   localRateTimestamps = []
   localFramesReceived.value = 0
   localInvalidCount.value = 0
@@ -1932,8 +2449,9 @@ function startLocalPolling(runId: number): void {
     if (!sampling.value || runId !== localRunId || localPollError) return
     void refreshLocalStatus().catch(() => { /* 状态刷新失败不终止采样 */ })
   }, 1000)
-  localPollTimer = window.setInterval(() => issueLocalPoll(runId), LOCAL_POLL_MS)
-  issueLocalPoll(runId)
+  startSamplingDrawLoop()
+  startHttpPollingOnly(runId)
+  connectCurveWs(runId)
 }
 
 /** 采样期间固定 30fps 视觉刷新（数据未到也重绘脏视图，hover/时间轴保持流畅）。 */
@@ -1949,7 +2467,7 @@ function issueLocalPoll(runId: number): void {
   if (localPollsInFlightCount >= LOCAL_POLL_MAX_IN_FLIGHT) return
   const since = localSince
   localPollsInFlightCount += 1
-  void getLocalCurveFrames(since, LOCAL_POLL_MAX_FRAMES)
+  void requestLocalFrames(since)
     .then((page) => {
       if (!sampling.value || runId !== localRunId) return
       handleLocalFramesPage(page)
@@ -1968,6 +2486,7 @@ function issueLocalPoll(runId: number): void {
 
 /** 单帧映射：group payload -> series ring（CVF1 单组/CVF2 按 frame.group）。 */
 function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
+  if (frame.pc !== undefined) latestFramePc = frame.pc
   if (localBaseTimestampUs === 0) localBaseTimestampUs = frame.timestampUs
   const groupIndex = version >= 2 ? frame.group : 0
   const groupEntries = localGroupEntries[groupIndex]
@@ -1989,7 +2508,7 @@ function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
     return latest ?? new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
   })
   const seconds = (frame.timestampUs - localBaseTimestampUs) / 1e6
-  pushSample(seconds, rawValues, localSeriesOrder, groupIndex)
+  pushSample(seconds, rawValues, localSeriesOrder, groupIndex, frame.seq)
   localRateTimestamps.push(seconds)
   trimLocalRateWindow(seconds)
   localPendingGroup = groupIndex
@@ -2002,6 +2521,14 @@ function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
  */
 function handleLocalFramesPage(page: CurveLocalFramesPage): void {
   localPollCounter += 1
+  if (page.triggered) {
+    watchFramesTriggered.value = true
+    void refreshLocalStatus()
+  }
+  if (page.conditionTriggered) {
+    conditionFramesTriggered.value = true
+    void refreshLocalStatus()
+  }
   const now = performance.now()
   if (pollCounterState.windowStart === 0) pollCounterState.windowStart = now
   pollCounterState.completions += 1
@@ -2281,11 +2808,12 @@ function extractSampleBits(bytes: Uint8Array, leaf: SampleLeaf): {lo: number; hi
   return {lo: lo >>> 0, hi: hi >>> 0}
 }
 
-function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly CurveSeries[], group = 0): void {
+function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly CurveSeries[], group = 0, deviceSeq = 0): void {
   const slot = ringHead
   timestamps[slot] = time
   slotSeq[slot] = sampleSeq
   slotGroup[slot] = group & 0xff
+  slotDeviceSeq[slot] = deviceSeq
   for (let i = 0; i < snapshot.length; i++) {
     const item = snapshot[i]
     const loBuffer = seriesLo.get(item.id)
@@ -2301,6 +2829,16 @@ function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly Cu
   ringHead = (ringHead + 1) % MAX_POINTS
   if (ringCount < MAX_POINTS) ringCount += 1
   sampleSeq += 1
+  if (recordingActive.value && !playbackMode.value) {
+    if (recordRowCount.value >= MAX_RECORD_ROWS) {
+      recordingActive.value = false
+      globalNotify(translate('curve.recordLimit', {count: MAX_RECORD_ROWS}), 'warning')
+    } else {
+      if (recordSnapshot.length === 0) recordSnapshot = snapshot.slice()
+      recordRows.push({time, group, payloads: rawValues.map((value) => new Uint8Array(value)), seq: deviceSeq, pc: latestFramePc})
+      recordRowCount.value += 1
+    }
+  }
   scheduleStatsFlush()
 }
 
@@ -2518,6 +3056,8 @@ const variableRows = computed<VariableRow[]>(() => {
 
   // 默认只列当前模式下可采样的变量；关闭过滤后把“有名字但无位置”的变量也列出（标记不可采样）。
   const base = info.variables.filter((node) => {
+    if (activeOnly.value && activePc.value !== null && !nodeValidAtPc(node)) return false
+    if (currentFunctionOnly.value && activePc.value !== null && !nodeInActiveFunction(node)) return false
     if (!onlySampleable.value) return true
     if (isLocalSource.value) return !!localExprForNode(node)
     return samplingMode.value === 'debug' ? node.sampleable : node.liveSamplable
@@ -2946,6 +3486,1116 @@ function legendLabel(item: CurveSeries): string {
   return item.typeName ? `${item.name} [${item.typeName}]` : item.name
 }
 
+// ---- task-42：精确行表 / PC 当前行 / 目标匹配 / watchpoint ---------------
+/** 读 ELF32 PT_LOAD 的 Flash 地址范围（仅用于与 target flash_size 比对）。 */
+function elfPtLoadRange(buffer: ArrayBuffer): [number, number] | null {
+  const bytes = new Uint8Array(buffer)
+  if (bytes.length < 52) return null
+  const view = new DataView(buffer)
+  if (view.getUint8(0) !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) return null
+  const phoff = view.getUint32(28, true)
+  const phentsize = view.getUint16(42, true)
+  const phnum = view.getUint16(44, true)
+  if (phoff <= 0 || phentsize < 32 || phnum <= 0 || phoff + phentsize * phnum > bytes.length) return null
+  let min = Number.POSITIVE_INFINITY
+  let max = 0
+  for (let index = 0; index < phnum; index++) {
+    const offset = phoff + index * phentsize
+    if (view.getUint32(offset, true) !== 1) continue // PT_LOAD
+    const fileSize = view.getUint32(offset + 16, true)
+    if (fileSize === 0) continue
+    const lma = view.getUint32(offset + 12, true) || view.getUint32(offset + 8, true)
+    const end = lma + fileSize
+    if (lma < 0x08000000 || lma >= 0x09000000) continue
+    if (lma < min) min = lma
+    if (end > max) max = end
+  }
+  return Number.isFinite(min) ? [min >>> 0, max >>> 0] : null
+}
+
+/** 取第一个 PT_LOAD Flash 段地址与前 4 字节（用于真实固件一致性校验）。 */
+function elfFirstLoadableSegment(buffer: ArrayBuffer): {address: number; bytes: Uint8Array} | null {
+  const bytes = new Uint8Array(buffer)
+  if (bytes.length < 52) return null
+  const view = new DataView(buffer)
+  const phoff = view.getUint32(28, true)
+  const phentsize = view.getUint16(42, true)
+  const phnum = view.getUint16(44, true)
+  if (phoff <= 0 || phentsize < 32 || phnum <= 0 || phoff + phentsize * phnum > bytes.length) return null
+  for (let index = 0; index < phnum; index++) {
+    const offset = phoff + index * phentsize
+    if (view.getUint32(offset, true) !== 1) continue
+    const fileOffset = view.getUint32(offset + 4, true)
+    const lma = view.getUint32(offset + 12, true) || view.getUint32(offset + 8, true)
+    const fileSize = view.getUint32(offset + 16, true)
+    if (fileSize < 4 || lma < 0x08000000 || lma >= 0x09000000) continue
+    if (fileOffset + 4 > bytes.length) continue
+    return {address: lma >>> 0, bytes: bytes.slice(fileOffset, fileOffset + 4)}
+  }
+  return null
+}
+
+const detectedTarget = computed(() => parseTargetDetection(targetRaw.value))
+const knownTargetProfiles = allTargetProfiles()
+const selectedTargetProfile = computed(() => findKnownTargetProfile(selectedTargetProfileId.value))
+const compactTarget = computed<CompactTargetProfile>(() => compactTargetProfileApi(detectedTarget.value, selectedTargetProfile.value))
+const targetMatch = computed(() => compareDetectedToProfile(detectedTarget.value, selectedTargetProfile.value))
+const targetLimitations = computed(() => detectionLimitations(detectedTarget.value, selectedTargetProfile.value))
+const targetFlashWarning = computed(() => {
+  const flash = compactTarget.value.flashRange
+  const elf = elfFlashRange.value
+  if (!flash || !elf) return ''
+  const [flashStart, flashEnd] = flash
+  const [elfStart, elfEnd] = elf
+  if (elfStart < flashStart || elfEnd > flashEnd) return translate('curve.targetFlashMismatch')
+  if (detectedTarget.value.flashKib > 0 && elfEnd - flashStart > detectedTarget.value.flashKib * 1024) return translate('curve.targetFlashBeyond')
+  return ''
+})
+const activePcLocation = computed<ElfLineLocation | null>(() => {
+  if (activePc.value === null || !lineIndex.value) return null
+  return pcToLine(lineIndex.value, activePc.value, {allowNonFlash: true})
+})
+
+/** task-43/44：声明式 PC 行（关闭 Follow 时传 null；组件负责高亮+滚动）。 */
+const sourceActiveFileLine = computed<SourceActiveFileLine | null>(() => {
+  if (!autoPcSource.value || activePc.value === null || !lineIndex.value) return null
+  const location = activePcLocation.value
+  if (!location) return null
+  const file = typeof location.file === 'string'
+    ? location.file
+    : (location.file as {relativePath?: string; path?: string} | null)?.relativePath
+      ?? (location.file as {path?: string} | null)?.path
+      ?? ''
+  if (!file) return null
+  return {path: file, line: location.line, address: location.address}
+})
+
+/** 无行表/PC 无行时的降级提示（不阻塞 Variables/图表）。 */
+const pcLineStatusMessage = computed(() => {
+  if (!autoPcSource.value || activePc.value === null) return ''
+  if (!lineIndex.value) return translate('curve.pcLineNoLineIndex')
+  if (!activePcLocation.value) return translate('curve.pcLineNoLine')
+  return ''
+})
+
+
+
+
+async function refreshTargetInfo(): Promise<void> {
+  targetLoading.value = true
+  targetError.value = ''
+  try {
+    targetRaw.value = await getTargetInfo()
+    if (targetRaw.value.httpStatus && targetRaw.value.detected === false) {
+      targetError.value = targetRaw.value.err ?? `HTTP ${targetRaw.value.httpStatus}`
+    }
+  } catch (error) {
+    targetError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    targetLoading.value = false
+  }
+}
+
+function nodeInActiveFunction(node: VariableNode): boolean {
+  if (activePc.value === null) return true
+  const location = activePcLocation.value
+  const file = node.relativeFile ?? node.file
+  const locationFile = typeof location?.file === 'string'
+    ? location.file
+    : (location?.file as {relativePath?: string; path?: string} | null)?.relativePath
+      ?? (location?.file as {path?: string} | null)?.path
+      ?? ''
+  if (locationFile && file) {
+    const current = locationFile.replace(/\\/g, '/')
+    const candidate = file.replace(/\\/g, '/')
+    if (!candidate.endsWith(current) && !current.endsWith(candidate)) return false
+  }
+  return nodeValidAtPc(node)
+}
+
+function parseWatchAddressInput(text: string): number | null {
+  let value = String(text ?? '').trim()
+  if (!value) return null
+  if (/^0x/i.test(value)) value = value.slice(2)
+  if (!/^[0-9a-fA-F]{1,8}$/.test(value)) return null
+  const address = Number.parseInt(value, 16) >>> 0
+  return address === 0 ? null : address
+}
+
+const watchpointSpec = computed<CurveLocalWatchpointSpec | null>(() => {
+  const address = parseWatchAddressInput(watchAddressInput.value)
+  if (address === null) return null
+  if (address % watchSize.value !== 0) return null
+  return {address, size: watchSize.value, access: watchAccess.value}
+})
+const conditionSpec = computed<CurveConditionSpec | null>(() => {
+  if (!conditionEnabled.value) return null
+  const address = parseWatchAddressInput(conditionAddressInput.value)
+  if (address === null || address % conditionSize.value !== 0) return null
+  return {
+    address,
+    size: conditionSize.value,
+    op: conditionOp.value,
+    value: conditionValue.value,
+    signed: conditionSigned.value,
+    mode: conditionMode.value,
+    stopAfter: conditionStopAfter.value,
+  }
+})
+const conditionError = computed(() => {
+  if (!conditionEnabled.value) return ''
+  if (!conditionAddressInput.value.trim()) return translate('curve.conditionAddressRequired')
+  if (conditionSpec.value === null) return translate('curve.conditionInvalid')
+  return ''
+})
+const activeTriggerSeq = computed(() => conditionTriggerSeq.value ?? watchTriggerSeq.value)
+
+const watchpointError = computed(() => {
+  if (!isLocalSource.value || localTrigger.value !== 'watchpoint') return ''
+  if (!watchAddressInput.value.trim()) return translate('curve.watchpointAddressRequired')
+  if (watchpointSpec.value === null) return translate('curve.watchpointInvalid')
+  return ''
+})
+
+function jumpToTriggerSeq(targetSeq: number | null, preTrigger: boolean): void {
+  if (targetSeq === null || ringCount === 0) {
+    globalNotify(translate('curve.watchpointNoTrigger'), 'warning')
+    return
+  }
+  let foundSlot = -1
+  for (let order = ringCount - 1; order >= 0; order--) {
+    const slot = ringSlot(order)
+    if (slotDeviceSeq[slot] === targetSeq) { foundSlot = slot; break }
+  }
+  if (foundSlot < 0) {
+    globalNotify(translate('curve.watchpointNoTrigger'), 'warning')
+    return
+  }
+  const triggerTime = timestamps[foundSlot]
+  const firstTime = timestamps[ringSlot(0)]
+  const dt = ringCount > 1 ? Math.max(1e-4, (lastDataTimestamp() - firstTime) / (ringCount - 1)) : 0.02
+  const desired = Math.max(1, jumpFrames.value * dt * 2)
+  const window = TIME_WINDOW_OPTIONS.find((option) => option >= desired) ?? 60
+  timeWindowSeconds.value = window
+  followLatest.value = false
+  const shift = preTrigger ? -jumpFrames.value * dt : jumpFrames.value * dt
+  viewEndTime.value = clampViewEnd(triggerTime + shift + window / 2)
+  cursorA.value = {index: ringSlotToOrder(foundSlot), time: triggerTime}
+  cursorPulse.value += 1
+  scheduleDraw()
+}
+
+async function verifyElfAgainstTarget(): Promise<void> {
+  const segment = elfVerifySegment.value
+  if (!segment) {
+    verifyState.value = 'error'
+    verifyDetail.value = translate('curve.verifyNeedElf')
+    return
+  }
+  if (sampling.value) {
+    verifyState.value = 'error'
+    verifyDetail.value = translate('curve.verifyStopFirst')
+    return
+  }
+  verifyState.value = 'running'
+  verifyDetail.value = translate('curve.verifyRunning')
+  try {
+    // 显式 no-halt 单变量采样读取 Flash 首段 4 字节；结束立即 stop 恢复目标运行。
+    await startLocalCurve({
+      intervalUs: 20000,
+      trigger: 'periodic',
+      halt: false,
+      series: [{id: 0, size: 4, expr: {kind: 'addr', address: segment.address}}],
+    })
+    let read: Uint8Array | null = null
+    const deadline = performance.now() + 2500
+    while (performance.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 120))
+      try {
+        const page = await getLocalCurveFrames(0, 16)
+        const frame = page.frames.find((item) => item.payload.length >= 4)
+        if (frame) { read = frame.payload.slice(0, 4); break }
+      } catch { /* keep polling */ }
+    }
+    if (!read) {
+      verifyState.value = 'error'
+      verifyDetail.value = translate('curve.verifyNoFrames')
+      return
+    }
+    const expected = Array.from(segment.bytes)
+    const actual = Array.from(read)
+    const same = expected.every((value, index) => value === actual[index])
+    verifyState.value = same ? 'match' : 'mismatch'
+    verifyDetail.value = `${formatHex32(segment.address)} ELF=${expected.map((v) => v.toString(16).padStart(2, '0')).join('')} TARGET=${actual.map((v) => v.toString(16).padStart(2, '0')).join('')}`
+    if (!same) globalNotify(translate('curve.verifyMismatch'), 'warning')
+  } catch (error) {
+    verifyState.value = 'error'
+    verifyDetail.value = localErrorText(error)
+  } finally {
+    try { await stopLocalCurve() } catch { /* best effort */ }
+  }
+}
+
+function jumpToWatchTrigger(preTrigger: boolean): void {
+  jumpToTriggerSeq(watchTriggerSeq.value, preTrigger)
+}
+
+function jumpToConditionTrigger(preTrigger: boolean): void {
+  jumpToTriggerSeq(conditionTriggerSeq.value, preTrigger)
+}
+
+/** task-44：对当前窗口第一条绘制曲线做简单 DFT（N≤256，按需执行，不阻塞主流程）。 */
+function runFft(): void {
+  const item = drawnSeriesList.value[0]
+  const geometry = lastGeometry
+  if (!item || !geometry || ringCount < 16) {
+    globalNotify(translate('curve.fftNoSeries'), 'warning')
+    return
+  }
+  const values = seriesValues.get(item.id)
+  if (!values) return
+  const startOrder = Math.max(0, lowerBoundTime(geometry.xMin))
+  const endOrder = Math.min(ringCount, Math.max(startOrder + 2, lowerBoundTime(geometry.xMax)))
+  const available = endOrder - startOrder
+  const n = Math.min(256, available)
+  if (n < 16) {
+    globalNotify(translate('curve.fftNoSeries'), 'warning')
+    return
+  }
+  const samples = new Float64Array(n)
+  for (let index = 0; index < n; index++) {
+    const order = startOrder + Math.floor(index * available / n)
+    const slot = ringSlot(Math.min(ringCount - 1, order))
+    samples[index] = Number.isFinite(values[slot]) ? values[slot] : 0
+  }
+  const mean = samples.reduce((sum, value) => sum + value, 0) / n
+  for (let index = 0; index < n; index++) samples[index] -= mean
+  const dt = Math.max(1e-6, (geometry.xMax - geometry.xMin) / n)
+  const sampleRate = 1 / dt
+  const peaks: Array<{hz: number; magnitude: number}> = []
+  for (let k = 1; k <= n / 2; k++) {
+    let real = 0
+    let imag = 0
+    for (let t = 0; t < n; t++) {
+      const angle = (2 * Math.PI * k * t) / n
+      real += samples[t] * Math.cos(angle)
+      imag -= samples[t] * Math.sin(angle)
+    }
+    peaks.push({hz: (k * sampleRate) / n, magnitude: Math.hypot(real, imag) / n})
+  }
+  peaks.sort((left, right) => right.magnitude - left.magnitude)
+  fftData.value = {name: item.name, sampleRate, peaks: peaks.slice(0, 8)}
+  fftOpen.value = true
+}
+
+async function exportSelectedRecordingJson(): Promise<void> {
+  if (!selectedRecordingId.value) return
+  try {
+    const data = await loadRecording(selectedRecordingId.value)
+    if (!data) return
+    const exported = {
+      ...data,
+      rows: data.rows.map((row) => ({
+        ...row,
+        payloads: row.payloads.map((payload) => Array.from(payload).map((byte) => byte.toString(16).padStart(2, '0')).join('')),
+      })),
+    }
+    downloadBlob(new Blob([JSON.stringify(exported, null, 2)], {type: 'application/json'}), `recording-${data.name.replace(/[^a-zA-Z0-9_-]+/g, '-')}.json`)
+  } catch (error) {
+    globalNotify(translate('curve.recordLoadFailed', {err: localErrorText(error)}), 'error')
+  }
+}
+
+async function exportSelectedRecordingCsv(): Promise<void> {
+  if (!selectedRecordingId.value) return
+  try {
+    const data = await loadRecording(selectedRecordingId.value)
+    if (!data) return
+    const header = ['time_s', 'group', 'seq', 'pc', ...data.series.map((series) => csvEscape(`${series.name} [${series.typeName}]`))]
+    const lines = [header.join(',')]
+    for (const row of data.rows) {
+      const cells: string[] = [
+        row.time.toFixed(6),
+        String(row.group ?? 0),
+        row.seq !== undefined ? String(row.seq) : '',
+        row.pc !== undefined ? `0x${row.pc.toString(16).toUpperCase()}` : '',
+      ]
+      for (const payload of row.payloads) {
+        cells.push(Array.from(payload).map((byte) => byte.toString(16).padStart(2, '0')).join(''))
+      }
+      lines.push(cells.join(','))
+    }
+    downloadBlob(new Blob([lines.join('\n')], {type: 'text/csv;charset=utf-8'}), `recording-${data.name.replace(/[^a-zA-Z0-9_-]+/g, '-')}.csv`)
+  } catch (error) {
+    globalNotify(translate('curve.recordLoadFailed', {err: localErrorText(error)}), 'error')
+  }
+}
+
+function ringSlotToOrder(slot: number): number {
+  return (slot - ringHead + ringCount + MAX_POINTS) % MAX_POINTS
+}
+
+// ---- task-37：group weight / 预设 / watch / 光标 / 派生 / 诊断 -----------
+const localGroupWeightSum = computed(() => groupWeights.value.slice(0, localActiveGroupCount.value).reduce((sum, weight) => sum + weight, 0))
+/** 每组实际帧刷新率 = interval 总节拍按 weight 分配。 */
+const localGroupWeightedRates = computed(() => {
+  const count = localActiveGroupCount.value
+  const total = localGroupWeightSum.value
+  if (total <= 0 || localIntervalMs.value <= 0) return [] as number[]
+  return Array.from({length: count}, (_, index) => (1000 / localIntervalMs.value) * (groupWeights.value[index] ?? 1) / total)
+})
+
+function ensureGroupWeights(count: number): void {
+  const next = groupWeights.value.slice(0, Math.max(1, count))
+  while (next.length < Math.max(1, count)) next.push(1)
+  groupWeights.value = next
+}
+
+watch(localActiveGroupCount, (count) => ensureGroupWeights(count), {immediate: true})
+
+function setGroupWeight(index: number, value: number): void {
+  if (index < 0 || index >= groupWeights.value.length) return
+  const next = [...groupWeights.value]
+  next[index] = Math.min(8, Math.max(1, Math.round(Number(value) || 1)))
+  groupWeights.value = next
+}
+
+/** PC 是否落入变量/变体的半开区间（无 PC 信息时不判定为 stale）。 */
+function pcRangeContains(low: number | undefined, high: number | undefined, pc: number): boolean {
+  return typeof low === 'number' && typeof high === 'number' && pc >= low && pc < high
+}
+
+function nodeHasPcRange(node: VariableNode): boolean {
+  if (node.locationVariants && node.locationVariants.length > 0) return true
+  return typeof node.pcLow === 'number' && typeof node.pcHigh === 'number'
+}
+
+function nodeValidAtPc(node: VariableNode): boolean {
+  const pc = activePc.value
+  if (pc === null || !nodeHasPcRange(node)) return true
+  if (node.locationVariants && node.locationVariants.length > 0) {
+    return node.locationVariants.some((variant) => pcRangeContains(variant.pcLow, variant.pcHigh, pc))
+  }
+  return pcRangeContains(node.pcLow, node.pcHigh, pc)
+}
+
+function seriesActiveAtPc(item: CurveSeries, pc: number | null): boolean {
+  if (pc === null) return true
+  if (item.pcVariants && item.pcVariants.length > 0) {
+    return item.pcVariants.some((variant) => pcRangeContains(variant.pcLow, variant.pcHigh, pc))
+  }
+  if (typeof item.pcLow === 'number' && typeof item.pcHigh === 'number') {
+    return pcRangeContains(item.pcLow, item.pcHigh, pc)
+  }
+  return true
+}
+
+const staleSeriesKeys = computed<Set<string>>(() => new Set(seriesList.value
+  .filter((item) => !seriesActiveAtPc(item, activePc.value))
+  .map((item) => item.key)))
+
+// ---- 显式预设（localStorage，用户点击保存；不自动保存选择） ----
+function serializeSeriesData(item: CurveSeries): RecordingSeriesData {
+  // Vue reactive proxy 不能被 IndexedDB structured clone；JSON 往返得到纯对象。
+  const plain = JSON.parse(JSON.stringify(item)) as CurveSeries
+  return {
+    name: plain.name,
+    key: plain.key,
+    typeName: plain.typeName,
+    address: plain.address,
+    size: plain.size,
+    sample: plain.sample,
+    format: plain.format,
+    color: plain.color,
+    visible: plain.visible,
+    location: plain.location,
+    register: plain.register,
+    pcLow: plain.pcLow,
+    pcHigh: plain.pcHigh,
+    loclistMulti: plain.loclistMulti,
+    variants: plain.pcVariants,
+  }
+}
+
+function loadPresets(): void {
+  try {
+    const raw = window.localStorage.getItem(PRESET_STORAGE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as PresetRecord[]
+    if (Array.isArray(parsed)) presets.value = parsed.filter((item) => item && typeof item.id === 'string' && Array.isArray(item.series))
+  } catch { /* ignore corrupted presets */ }
+}
+
+function persistPresets(): void {
+  try { window.localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(presets.value)) } catch { /* ignore */ }
+}
+
+function restoreSeriesFromData(data: RecordingSeriesData): CurveSeries {
+  const series: CurveSeries = {
+    id: nextSeriesId++,
+    name: data.name,
+    key: data.key,
+    typeName: data.typeName,
+    address: data.address,
+    size: data.size,
+    sample: data.sample,
+    format: data.format as CurveFormat,
+    color: data.color,
+    visible: data.visible !== false,
+    startSeq: 0,
+    mode: 'live',
+    location: data.location,
+    register: data.register,
+    pcLow: data.pcLow,
+    pcHigh: data.pcHigh,
+    loclistMulti: data.loclistMulti,
+    pcVariants: data.variants,
+  }
+  registerSeries(series)
+  return series
+}
+
+function savePreset(): void {
+  if (seriesList.value.length === 0) {
+    globalNotify(translate('curve.presetEmpty'), 'warning')
+    return
+  }
+  const name = presetName.value.trim() || `${translate('curve.presetDefault')} ${presets.value.length + 1}`
+  const preset: PresetRecord = {
+    id: `preset-${Date.now().toString(36)}`,
+    name,
+    createdAt: Date.now(),
+    series: seriesList.value.filter((item) => !item.derived).map(serializeSeriesData),
+  }
+  presets.value = [preset, ...presets.value]
+  selectedPresetId.value = preset.id
+  presetName.value = ''
+  persistPresets()
+  globalNotify(translate('curve.presetSaved'), 'success')
+}
+
+function applyPreset(): void {
+  const preset = presets.value.find((item) => item.id === selectedPresetId.value)
+  if (!preset) return
+  if (sampling.value) void stopSampling()
+  for (const item of seriesList.value) {
+    seriesLo.delete(item.id)
+    seriesHi.delete(item.id)
+    seriesValues.delete(item.id)
+  }
+  hover.value = null
+  cursorA.value = null
+  cursorB.value = null
+  seriesList.value = preset.series.map(restoreSeriesFromData)
+  clearData()
+  selectedCollapsed.value = false
+  invalidateYRange()
+  scheduleDraw()
+  globalNotify(translate('curve.presetApplied'), 'success')
+}
+
+function deletePreset(): void {
+  presets.value = presets.value.filter((item) => item.id !== selectedPresetId.value)
+  selectedPresetId.value = presets.value[0]?.id ?? ''
+  persistPresets()
+}
+
+// ---- Watch（独立于曲线选择；有对应已选曲线时展示统计） ----
+const watchNames = ref<Record<string, string>>({})
+const watchList = computed(() => watchKeys.value.map((key) => ({key, name: watchNames.value[key] ?? key})))
+
+function isWatched(key: string): boolean {
+  return watchKeys.value.includes(key)
+}
+
+function toggleWatch(key: string, name: string): void {
+  if (isWatched(key)) {
+    watchKeys.value = watchKeys.value.filter((item) => item !== key)
+  } else {
+    watchKeys.value = [...watchKeys.value, key]
+    watchNames.value[key] = name
+  }
+  updateWatchStats()
+}
+
+function updateWatchStats(): void {
+  if (watchKeys.value.length === 0) return
+  const next: Record<string, {current: string; min: string; max: string; changes: number}> = {}
+  for (const key of watchKeys.value) {
+    const item = seriesList.value.find((candidate) => candidate.key === key)
+    if (!item) continue
+    const values = seriesValues.get(item.id)
+    if (!values || ringCount === 0) continue
+    let min = Number.POSITIVE_INFINITY
+    let max = Number.NEGATIVE_INFINITY
+    let last = Number.NaN
+    let changes = 0
+    const stride = Math.max(1, Math.ceil(ringCount / 4000))
+    for (let order = 0; order < ringCount; order += stride) {
+      const slot = ringSlot(order)
+      if (slotSeq[slot] < item.startSeq) continue
+      const value = values[slot]
+      if (!Number.isFinite(value)) continue
+      if (value < min) min = value
+      if (value > max) max = value
+      if (Number.isFinite(last) && value !== last) changes += 1
+      last = value
+    }
+    if (!Number.isFinite(min)) continue
+    next[key] = {
+      current: latestText(item),
+      min: formatFloatText(min),
+      max: formatFloatText(max),
+      changes,
+    }
+  }
+  watchStats.value = next
+}
+
+// ---- 双光标 A/B + Δ/统计 ----
+function formatNumeric(value: number | undefined): string {
+  return value === undefined || !Number.isFinite(value) ? '-' : formatFloatText(value)
+}
+
+function seriesValueAt(item: CurveSeries, order: number): number | undefined {
+  const values = seriesValues.get(item.id)
+  if (!values || order < 0 || order >= ringCount) return undefined
+  const slot = ringSlot(order)
+  if (slotSeq[slot] < item.startSeq) return undefined
+  const value = values[slot]
+  return Number.isFinite(value) ? value : undefined
+}
+
+function onCanvasCursorClick(event: MouseEvent): void {
+  if (panMoved) {
+    panMoved = false
+    return
+  }
+  const canvas = canvasRef.value
+  const geometry = lastGeometry
+  if (!canvas || !geometry || ringCount === 0) return
+  const rect = canvas.getBoundingClientRect()
+  const x = event.clientX - rect.left
+  if (x < geometry.padding.left || x > geometry.padding.left + geometry.plotWidth) return
+  const time = geometry.xMin + ((x - geometry.padding.left) / geometry.plotWidth) * (geometry.xMax - geometry.xMin)
+  const order = Math.min(ringCount - 1, Math.max(0, lowerBoundTime(time)))
+  const point = {index: order, time: timestamps[ringSlot(order)]}
+  if (event.shiftKey) cursorB.value = point
+  else cursorA.value = point
+  cursorPulse.value += 1
+  scheduleHoverDraw()
+}
+
+function clearCursors(): void {
+  if (!cursorA.value && !cursorB.value) return
+  cursorA.value = null
+  cursorB.value = null
+  cursorPulse.value += 1
+  scheduleHoverDraw()
+}
+
+const cursorDelta = computed(() => {
+  void cursorPulse.value
+  const a = cursorA.value
+  if (!a) return null
+  const b = cursorB.value ?? a
+  const rows: Array<{name: string; color: string; aText: string; bText: string; delta: string; min: string; max: string; avg: string}> = []
+  for (const item of drawnSeriesList.value.slice(0, 24)) {
+    const aValue = seriesValueAt(item, a.index)
+    const bValue = seriesValueAt(item, b.index)
+    let min = Number.POSITIVE_INFINITY
+    let max = Number.NEGATIVE_INFINITY
+    let sum = 0
+    let count = 0
+    const low = Math.min(a.index, b.index)
+    const high = Math.max(a.index, b.index)
+    const stride = Math.max(1, Math.ceil((high - low + 1) / 2000))
+    for (let order = low; order <= high; order += stride) {
+      const value = seriesValueAt(item, order)
+      if (value === undefined) continue
+      if (value < min) min = value
+      if (value > max) max = value
+      sum += value
+      count += 1
+    }
+    rows.push({
+      name: item.name,
+      color: seriesDisplayColor(item.color),
+      aText: formatNumeric(aValue),
+      bText: formatNumeric(bValue),
+      delta: aValue !== undefined && bValue !== undefined ? formatNumeric(aValue - bValue) : '-',
+      min: count > 0 ? formatNumeric(min) : '-',
+      max: count > 0 ? formatNumeric(max) : '-',
+      avg: count > 0 ? formatNumeric(sum / count) : '-',
+    })
+  }
+  return {dt: b.time - a.time, rows}
+})
+
+// ---- A±B 派生曲线 ----
+function addDerivedCurve(op: 'add' | 'sub'): void {
+  if (sampling.value) {
+    globalNotify(translate('curve.derivedWhileSampling'), 'warning')
+    return
+  }
+  const base = seriesList.value.filter((item) => !item.derived)
+  if (base.length < 2) {
+    globalNotify(translate('curve.derivedNeedTwo'), 'warning')
+    return
+  }
+  const a = base[0]
+  const b = base[1]
+  const derived: CurveSeries = {
+    id: nextSeriesId++,
+    name: `${a.name} ${op === 'add' ? '+' : '−'} ${b.name}`,
+    key: `derived:${Date.now().toString(36)}:${a.id}:${op}:${b.id}`,
+    typeName: translate('curve.derivedType'),
+    address: 0,
+    size: Math.max(a.size, b.size),
+    sample: a.sample,
+    format: 'auto',
+    color: COLORS[seriesList.value.length % COLORS.length],
+    visible: true,
+    startSeq: 0,
+    mode: 'live',
+    derived: {a: a.id, b: b.id, op},
+  }
+  registerSeries(derived)
+  seriesList.value = [...seriesList.value, derived]
+  updateDerivedValues()
+  invalidateYRange()
+  scheduleDraw()
+}
+
+function updateDerivedValues(): void {
+  for (const item of seriesList.value) {
+    if (!item.derived) continue
+    const target = seriesValues.get(item.id)
+    const left = seriesValues.get(item.derived.a)
+    const right = seriesValues.get(item.derived.b)
+    if (!target || !left || !right) continue
+    for (let order = 0; order < ringCount; order++) {
+      const slot = ringSlot(order)
+      const leftValue = left[slot]
+      const rightValue = right[slot]
+      target[slot] = Number.isFinite(leftValue) && Number.isFinite(rightValue)
+        ? (item.derived.op === 'add' ? leftValue + rightValue : leftValue - rightValue)
+        : Number.NaN
+    }
+  }
+}
+
+// ---- 诊断 ----
+const diagnosticsData = computed(() => {
+  const info = elfInfo.value
+  const variables = info?.variables ?? []
+  const sourceMatched = variables.filter((node) => !!(node.relativeFile ?? node.file)).length
+  const status = localStatusInfo.value
+  return {
+    time: new Date().toISOString(),
+    source: samplingSource.value,
+    sampling: sampling.value,
+    playback: playbackMode.value,
+    elf: {
+      name: lastElfName.value,
+      bytes: lastElfBytes.value,
+      variables: variables.length,
+      sourceMatched,
+      unsampleable: unsampleableCount.value,
+    },
+    device: status ? {
+      running: status.running,
+      halt: status.halt,
+      frames: status.frames,
+      overwritten: status.overwritten,
+      invalid: status.invalid,
+      outOfScope: status.outOfScope,
+      groupCount: status.groupCount,
+      currentGroup: status.currentGroup,
+      intervalUs: status.intervalUs,
+      sampleBytes: status.sampleBytes,
+      error: status.error,
+    } : null,
+    ring: {points: ringCount, selected: seriesList.value.length, maxSeries: seriesLimit.value},
+    render: {
+      yAxisMode: yAxisMode.value,
+      renderAll: renderAll.value,
+      drawn: drawnSeriesList.value.length,
+      pollsPerSecond: Math.round(pollCounterState.pollsPerSecond * 10) / 10,
+      avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
+      draws: perfCounter.draws,
+    },
+    recording: {active: recordingActive.value, rows: recordRowCount.value, saved: recordings.value.length},
+    activeFrame: {
+      pc: activePc.value !== null ? `0x${activePc.value.toString(16).toUpperCase()}` : null,
+      staleSeries: staleSeriesKeys.value.size,
+      line: activePcLocation.value ? `${typeof activePcLocation.value.file === 'string' ? activePcLocation.value.file : (activePcLocation.value.file as any)?.relativePath ?? ''}:${activePcLocation.value.line}` : null,
+    },
+    target: {
+      detected: detectedTarget.value.detected,
+      group: detectedTarget.value.baseGroup,
+      devId: detectedTarget.value.devId,
+      flashKib: detectedTarget.value.flashKib,
+      confidence: detectedTarget.value.confidence,
+      selectedProfile: selectedTargetProfile.value?.id ?? null,
+      match: targetMatch.value.level,
+      limitations: targetLimitations.value,
+      elfFlashRange: elfFlashRange.value,
+      warning: targetFlashWarning.value,
+    },
+    lineIndex: lineIndex.value ? {files: lineIndex.value.files.length, rows: lineIndex.value.rows.length} : null,
+    watchpoint: {armed: watchpointArmed.value, hits: watchpointHits.value, triggerSeq: watchTriggerSeq.value},
+    playbackState: {active: playbackMode.value, index: playbackIndex.value},
+    cursor: {a: cursorA.value?.time ?? null, b: cursorB.value?.time ?? null},
+    watch: watchKeys.value.length,
+    presets: presets.value.length,
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+  }
+})
+
+const diagnosticsJson = computed(() => JSON.stringify(diagnosticsData.value, null, 2))
+
+async function copyDiagnostics(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(diagnosticsJson.value)
+    diagnosticsCopied.value = true
+    window.setTimeout(() => { diagnosticsCopied.value = false }, 1500)
+  } catch {
+    globalNotify(translate('curve.diagCopyFailed'), 'warning')
+  }
+}
+
+// ---- IndexedDB 录制 / 回放 ----
+async function refreshRecordings(): Promise<void> {
+  try { recordings.value = await listRecordings() } catch { recordings.value = [] }
+}
+
+function startRecording(): void {
+  if (!sampling.value) {
+    globalNotify(translate('curve.recordNeedSampling'), 'warning')
+    return
+  }
+  if (recordingActive.value) return
+  recordRows = []
+  recordSnapshot = []
+  recordStartTimestamp = 0
+  recordRowCount.value = 0
+  recordingActive.value = true
+  globalNotify(translate('curve.recordStarted'), 'success')
+}
+
+function stopRecordingCapture(): void {
+  if (!recordingActive.value) return
+  recordingActive.value = false
+}
+
+async function saveCurrentRecording(): Promise<void> {
+  stopRecordingCapture()
+  if (recordRows.length === 0 || recordSnapshot.length === 0) {
+    globalNotify(translate('curve.recordEmpty'), 'warning')
+    return
+  }
+  const name = recordingName.value.trim() || `${translate('curve.recordDefault')} ${new Date().toLocaleTimeString()}`
+  const data: CurveRecordingData = {
+    id: newRecordingId(),
+    name,
+    createdAt: Date.now(),
+    series: recordSnapshot.map(serializeSeriesData),
+    rows: recordRows,
+    trigger: localTrigger.value,
+    triggerSeq: watchTriggerSeq.value,
+    watchpoint: watchpointSpec.value ? {address: watchpointSpec.value.address, size: watchpointSpec.value.size, access: watchpointSpec.value.access} : null,
+  }
+  try {
+    await saveRecording(data)
+    recordingName.value = ''
+    recordRows = []
+    recordSnapshot = []
+    recordRowCount.value = 0
+    await refreshRecordings()
+    globalNotify(translate('curve.recordSaved'), 'success')
+  } catch (error) {
+    globalNotify(translate('curve.recordSaveFailed', {err: localErrorText(error)}), 'error')
+  }
+}
+
+function stopPlayback(): void {
+  playbackPlaying.value = false
+  if (playbackTimer) { window.clearInterval(playbackTimer); playbackTimer = 0 }
+}
+
+function applyPlaybackIndex(index: number): void {
+  if (!playbackMode.value || playbackRows.value.length === 0) return
+  stopPlayback()
+  const target = Math.max(0, Math.min(playbackRows.value.length - 1, Math.floor(index)))
+  clearData()
+  for (let rowIndex = 0; rowIndex <= target; rowIndex++) {
+    const row = playbackRows.value[rowIndex]
+    if (!row) continue
+    pushSample(row.time, row.payloads, playbackSeries.value, row.group)
+  }
+  playbackIndex.value = target
+  followLatest.value = true
+  flushStats()
+  scheduleDraw()
+}
+
+function togglePlayback(): void {
+  if (!playbackMode.value || playbackRows.value.length === 0) return
+  if (playbackPlaying.value) {
+    stopPlayback()
+    return
+  }
+  if (playbackIndex.value >= playbackRows.value.length - 1) applyPlaybackIndex(0)
+  playbackPlaying.value = true
+  playbackWallStart = performance.now()
+  playbackRecordStart = playbackRows.value[playbackIndex.value]?.time ?? 0
+  playbackTimer = window.setInterval(() => {
+    if (!playbackPlaying.value) return
+    const targetTime = playbackRecordStart + ((performance.now() - playbackWallStart) / 1000) * playbackSpeed.value
+    let advanced = false
+    while (playbackIndex.value + 1 < playbackRows.value.length
+      && (playbackRows.value[playbackIndex.value + 1]?.time ?? Number.POSITIVE_INFINITY) <= targetTime) {
+      playbackIndex.value += 1
+      const row = playbackRows.value[playbackIndex.value]
+      if (row) {
+        pushSample(row.time, row.payloads, playbackSeries.value, row.group)
+        advanced = true
+      }
+    }
+    if (advanced) {
+      flushStats()
+      scheduleDraw()
+    }
+    if (playbackIndex.value >= playbackRows.value.length - 1) stopPlayback()
+  }, 33)
+}
+
+async function loadRecordingById(id: string): Promise<void> {
+  if (!id) return
+  try {
+    const data = await loadRecording(id)
+    if (!data) return
+    if (sampling.value) void stopSampling()
+    stopPlayback()
+    recordingActive.value = false
+    playbackMode.value = true
+    for (const item of seriesList.value) {
+      seriesLo.delete(item.id)
+      seriesHi.delete(item.id)
+      seriesValues.delete(item.id)
+    }
+    playbackSeries.value = data.series.map(restoreSeriesFromData)
+    seriesList.value = playbackSeries.value
+    playbackRows.value = data.rows
+    playbackIndex.value = 0
+    selectedRecordingId.value = id
+    clearData()
+    applyPlaybackIndex(0)
+    globalNotify(translate('curve.recordLoaded'), 'success')
+  } catch (error) {
+    globalNotify(translate('curve.recordLoadFailed', {err: localErrorText(error)}), 'error')
+  }
+}
+
+async function deleteSelectedRecording(): Promise<void> {
+  if (!selectedRecordingId.value) return
+  try {
+    await deleteRecording(selectedRecordingId.value)
+    if (playbackMode.value) exitPlayback()
+    selectedRecordingId.value = ''
+    await refreshRecordings()
+  } catch { /* ignore */ }
+}
+
+function exitPlayback(): void {
+  stopPlayback()
+  playbackMode.value = false
+  playbackRows.value = []
+  playbackSeries.value = []
+  playbackIndex.value = 0
+  clearSelection()
+  clearData()
+}
+
+// ---- /ws/curve 推送（task-39；WS 优先，失败回退 HTTP） -------------------
+function stopCurveWs(): void {
+  if (wsFallbackTimer) { window.clearTimeout(wsFallbackTimer); wsFallbackTimer = 0 }
+  if (wsFirstMessageTimer) { window.clearTimeout(wsFirstMessageTimer); wsFirstMessageTimer = 0 }
+  if (curveWs) {
+    try { curveWs.close() } catch { /* ignore */ }
+    curveWs = null
+  }
+}
+
+function startHttpPollingOnly(runId: number): void {
+  if (localPollTimer) { window.clearInterval(localPollTimer); localPollTimer = 0 }
+  if (!sampling.value || runId !== localRunId) return
+  localPollTimer = window.setInterval(() => issueLocalPoll(runId), LOCAL_POLL_MS)
+  issueLocalPoll(runId)
+}
+
+function stopHttpPolling(): void {
+  if (localPollTimer) { window.clearInterval(localPollTimer); localPollTimer = 0 }
+}
+
+function fallbackToHttpPolling(runId: number): void {
+  if (runId !== localRunId || !sampling.value) return
+  stopCurveWs()
+  stopHttpPolling()
+  wsTransport.value = 'fallback'
+  startHttpPollingOnly(runId)
+}
+
+function connectCurveWs(runId: number): void {
+  stopCurveWs()
+  if (typeof WebSocket === 'undefined') { wsTransport.value = 'http'; return }
+  wsTransport.value = 'ws'
+  let socket: WebSocket
+  try {
+    socket = new WebSocket(deviceApiUrl(CURVE_WS_PATH).replace(/^http(s?):/, 'ws$1:'))
+    curveWs = socket
+  } catch {
+    fallbackToHttpPolling(runId)
+    return
+  }
+  wsFallbackTimer = window.setTimeout(() => {
+    if (curveWs === socket && wsFrames.value === 0) fallbackToHttpPolling(runId)
+  }, 2000)
+  socket.onopen = () => {
+    if (runId !== localRunId) return
+    stopHttpPolling()
+    try { socket.send(JSON.stringify({cmd: 'subscribe'})) } catch { /* ignore */ }
+    wsFirstMessageTimer = window.setTimeout(() => {
+      if (curveWs === socket && wsFrames.value === 0) fallbackToHttpPolling(runId)
+    }, 1500)
+  }
+  socket.onmessage = (event: MessageEvent) => {
+    if (runId !== localRunId) return
+    if (typeof event.data === 'string') return
+    void (async () => {
+      try {
+        const buffer = event.data instanceof Blob
+          ? await event.data.arrayBuffer()
+          : event.data instanceof ArrayBuffer ? event.data : null
+        if (!buffer) return
+        const page = decodeCurveFrames(new Uint8Array(buffer))
+        if (wsFirstMessageTimer) { window.clearTimeout(wsFirstMessageTimer); wsFirstMessageTimer = 0 }
+        if (wsFallbackTimer) { window.clearTimeout(wsFallbackTimer); wsFallbackTimer = 0 }
+        const now = performance.now()
+        if (wsLastMessageAt > 0) wsLatencyMs.value = Math.round((wsLatencyMs.value * 0.8 + (now - wsLastMessageAt) * 0.2) * 10) / 10
+        wsLastMessageAt = now
+        if (wsWindowStart === 0) wsWindowStart = now
+        wsWindowFrames += 1
+        if (now - wsWindowStart >= 1000) {
+          wsLatencyMs.value = Math.round((now - wsWindowStart) / wsWindowFrames * 10) / 10
+          wsWindowStart = now
+          wsWindowFrames = 0
+        }
+        wsFrames.value += 1
+        if (page.triggered) { watchFramesTriggered.value = true; void refreshLocalStatus() }
+        handleLocalFramesPage(page)
+      } catch {
+        wsDropped.value += 1
+        if (wsDropped.value >= 5) fallbackToHttpPolling(runId)
+      }
+    })()
+  }
+  socket.onerror = () => fallbackToHttpPolling(runId)
+  socket.onclose = () => {
+    if (curveWs === socket) curveWs = null
+    if (sampling.value && runId === localRunId) fallbackToHttpPolling(runId)
+  }
+}
+
+// ---- frames Worker（CVF2 解码移出主线程；失败 fallback 主线程） ----
+let framesWorker: Worker | null = null
+let framesWorkerSeq = 0
+const framesWorkerPending = new Map<number, {resolve: (page: CurveLocalFramesPage) => void; reject: (error: Error) => void; timeout: number}>()
+
+function initFramesWorker(): void {
+  if (typeof Worker === 'undefined') return
+  try {
+    framesWorker = new CurveFramesWorker()
+    framesWorker.onmessage = (event: MessageEvent<{id: number; page?: CurveLocalFramesPage; error?: string}>) => {
+      const pending = framesWorkerPending.get(event.data.id)
+      if (!pending) return
+      window.clearTimeout(pending.timeout)
+      framesWorkerPending.delete(event.data.id)
+      if (event.data.error || !event.data.page) pending.reject(new Error(event.data.error ?? 'worker error'))
+      else pending.resolve(event.data.page)
+    }
+    framesWorker.onerror = () => {
+      framesWorker = null
+      for (const pending of framesWorkerPending.values()) {
+        window.clearTimeout(pending.timeout)
+        pending.reject(new Error('frames worker failed'))
+      }
+      framesWorkerPending.clear()
+    }
+  } catch {
+    framesWorker = null
+  }
+}
+
+function requestWorkerFrames(since: number): Promise<CurveLocalFramesPage> {
+  const worker = framesWorker
+  if (!worker) return Promise.reject(new Error('frames worker unavailable'))
+  return new Promise((resolve, reject) => {
+    const id = ++framesWorkerSeq
+    const timeout = window.setTimeout(() => {
+      framesWorkerPending.delete(id)
+      reject(new Error('frames worker timeout'))
+    }, 10000)
+    framesWorkerPending.set(id, {resolve, reject, timeout})
+    const query = `?since=${Math.max(0, Math.floor(since))}&max=${LOCAL_POLL_MAX_FRAMES}`
+    worker.postMessage({id, url: deviceApiUrl(CURVE_LOCAL_FRAMES_PATH + query)})
+  })
+}
+
+async function requestLocalFrames(since: number): Promise<CurveLocalFramesPage> {
+  if (framesWorker) {
+    try {
+      return await requestWorkerFrames(since)
+    } catch {
+      framesWorker = null
+    }
+  }
+  return getLocalCurveFrames(since, LOCAL_POLL_MAX_FRAMES)
+}
+
+// ---- 键盘快捷键 ----
+function onGlobalKeydown(event: KeyboardEvent): void {
+  const target = event.target as HTMLElement | null
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return
+  if (event.key === ' ' && !sampling.value) {
+    event.preventDefault()
+    void startSampling()
+  } else if (event.key === ' ' && sampling.value) {
+    event.preventDefault()
+    void stopSampling()
+  } else if (event.key === 'f' || event.key === 'F') {
+    toggleFreeze()
+  } else if (event.key === 'd' || event.key === 'D') {
+    diagnosticsOpen.value = !diagnosticsOpen.value
+  } else if (event.key === '+' || event.key === '=') {
+    const index = TIME_WINDOW_OPTIONS.indexOf(timeWindowSeconds.value)
+    if (index > 0) timeWindowSeconds.value = TIME_WINDOW_OPTIONS[index - 1]
+  } else if (event.key === '-' || event.key === '_') {
+    const index = TIME_WINDOW_OPTIONS.indexOf(timeWindowSeconds.value)
+    if (index < TIME_WINDOW_OPTIONS.length - 1) timeWindowSeconds.value = TIME_WINDOW_OPTIONS[index + 1]
+  } else if (event.key === 'Escape') {
+    clearCursors()
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    if (ringCount === 0) return
+    event.preventDefault()
+    followLatest.value = false
+    const direction = event.key === 'ArrowLeft' ? -1 : 1
+    viewEndTime.value = clampViewEnd((viewEndTime.value || lastDataTime.value) + direction * timeWindowSeconds.value * 0.1)
+    scheduleDraw()
+  }
+}
+
 // ---- ELF 加载 -------------------------------------------------------------
 const dwarfFallbackReason = computed(() => {
   const info = elfInfo.value
@@ -2967,8 +4617,22 @@ async function parseElfFile(file: File): Promise<void> {
   elfError.value = ''
   try {
     const buffer = await file.arrayBuffer()
+    lastElfName.value = file.name
+    lastElfBytes.value = buffer.byteLength
     const result = parseElfVariables(buffer)
     elfInfo.value = result
+    elfFlashRange.value = elfPtLoadRange(buffer)
+    elfVerifySegment.value = elfFirstLoadableSegment(buffer)
+    verifyState.value = 'idle'
+    verifyDetail.value = ''
+    try {
+      lineIndex.value = parseElfLineIndex(buffer)
+      lineIndexError.value = ''
+    } catch (error) {
+      lineIndex.value = null
+      lineIndexError.value = error instanceof Error ? error.message : String(error)
+    }
+    void refreshTargetInfo()
     prewarmSearchIndex(result)
     try {
       elfFunctionSymbols.value = buildFunctionSymbols(parseElf32Symbols(buffer).symbols)
@@ -3047,30 +4711,26 @@ const sourceLiveValues = computed<SourceLiveValueMap>(() => {
     map[item.key] = {
       text,
       color: seriesDisplayColor(item.color),
-      stale: !sampling.value || text === '-',
+      stale: !sampling.value || text === '-' || !seriesActiveAtPc(item, activePc.value),
     }
   }
   return map
 })
 
-/**
- * 行地址表（近似）：DWARF 变量所属函数 low_pc 是真实可执行 Flash 地址，用它给
- * gutter 断点；不能用 sample.address（0x2000xxxx 是数据 RAM，FPB 会设错）。
- * 这是函数入口近似，不是精确行表；后续解析 .debug_line 行程序后可替换。
- */
+/** task-42：精确行表 file:line -> 可执行地址（不再用函数 low_pc/变量地址近似）。 */
 const sourceLineAddresses = computed<SourceLineAddressMap>(() => {
-  const info = elfInfo.value
-  if (!info) return {}
+  const index = lineIndex.value
+  if (!index) return {}
   const map: Record<string, Record<number, number>> = {}
-  for (const node of info.variables) {
-    const file = node.relativeFile ?? node.file
-    const low = node.pcLow
-    const high = node.pcHigh
-    if (!file || !node.line || low === undefined || high === undefined) continue
-    if (low < CURVE_LOCAL_FLASH_START || high > CURVE_LOCAL_FLASH_END || low >= high) continue
-    const normalized = file.replace(/^\+/, '').replace(/\\/g, '/')
-    if (!map[normalized]) map[normalized] = {}
-    if (map[normalized][node.line] === undefined) map[normalized][node.line] = low >>> 0
+  for (const row of index.rows) {
+    if (!row.flash) continue
+    const file = index.files[row.fileIndex]
+    if (!file) continue
+    const path = (file.relativePath || file.path || '').replace(/\\/g, '/')
+    if (!path) continue
+    if (!map[path]) map[path] = {}
+    const previous = map[path][row.line]
+    if (previous === undefined || row.isStmt) map[path][row.line] = row.address
   }
   return map
 })
@@ -3089,16 +4749,22 @@ function onSourceLineClick(payload: SourceLineClickPayload): void {
     globalNotify(translate('curve.localSeriesLocked'), 'warning')
     return
   }
-  if (!payload.address) {
-    globalNotify(translate('curve.sourceLineNoAddress'), 'warning')
+  let address = payload.address
+  if (address === undefined && lineIndex.value) {
+    const files = findElfLineFiles(lineIndex.value, payload.path)
+    const best = files.length > 0 ? fileLineToAddress(lineIndex.value, files[0], payload.line) : null
+    address = best?.address
+  }
+  if (address === undefined) {
+    globalNotify(translate('curve.sourceLineNoLineTable'), 'warning')
     return
   }
   samplingSource.value = 'local'
   localTrigger.value = 'breakpoint'
-  localBreakpointInput.value = formatHex32(payload.address >>> 0)
+  localBreakpointInput.value = formatHex32(address >>> 0)
   selectedFunctionAddress.value = null
   localBreakpointOffsetInput.value = ''
-  globalNotify(`${translate('curve.sourceBreakpointSet')} ${formatHex32(payload.address >>> 0)}`, 'success')
+  globalNotify(`${translate('curve.sourceBreakpointSet')} ${formatHex32(address >>> 0)}`, 'success')
 }
 
 function parseAddressToken(token: string): number | null {
@@ -3275,6 +4941,16 @@ function decodeText(item: CurveSeries, lo: number, hi: number): string {
 
 function latestText(item: CurveSeries): string {
   if (ringCount === 0) return '-'
+  if (item.derived) {
+    const values = seriesValues.get(item.id)
+    if (!values) return '-'
+    for (let order = ringCount - 1; order >= 0; order--) {
+      const slot = ringSlot(order)
+      if (slotSeq[slot] < item.startSeq) continue
+      return formatFloatText(values[slot])
+    }
+    return '-'
+  }
   const loBuffer = seriesLo.get(item.id)
   const hiBuffer = seriesHi.get(item.id)
   if (!loBuffer || !hiBuffer) return '-'
@@ -3532,7 +5208,204 @@ function formatYTick(value: number): string {
   return formatAxisValue(value)
 }
 
+// ---- OffscreenCanvas 图表 Worker（task-47；失败自动回退主线程 drawChartLocal） ----
+interface ChartWorkerSeries {id: string; color: string; values: Float32Array}
+interface ChartWorkerScene {
+  requestId: number
+  width: number
+  height: number
+  dpr: number
+  padding: {left: number; right: number; top: number; bottom: number}
+  xMin: number
+  xMax: number
+  times: Float32Array
+  series: ChartWorkerSeries[]
+  yMode: YAxisMode
+  smoothingWindow: number
+  palette: {bg: string; grid: string; text: string; axis: string}
+}
+interface ChartWorkerGeometry {
+  padding: {left: number; right: number; top: number; bottom: number}
+  plotWidth: number; plotHeight: number
+  xMin: number; xMax: number
+  minValue: number; maxValue: number
+  yMode: YAxisMode
+  ranges: Record<string, [number, number]>
+}
+let chartWorker: Worker | null = null
+let chartWorkerReady = false
+let chartWorkerFailed = false
+let chartWorkerInFlight = false
+let chartWorkerSuspended = false
+let chartRequestId = 0
+const chartRenderMode = ref<'offscreen' | 'main'>('main')
+
+function initChartWorker(): void {
+  if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') {
+    chartRenderMode.value = 'main'
+    return
+  }
+  try {
+    const worker = new CurveChartWorker()
+    chartWorker = worker
+    worker.onmessage = (event: MessageEvent<{
+      type: 'bitmap' | 'error' | 'geometry'
+      requestId: number
+      bitmap?: ImageBitmap
+      drawMs?: number
+      error?: string
+      geometry?: ChartWorkerGeometry
+    }>) => {
+      const message = event.data
+      if (message.type === 'error') {
+        chartWorkerFailed = true
+        chartWorkerReady = false
+        chartRenderMode.value = 'main'
+        chartWorkerInFlight = false
+        chartDirty = true
+        scheduleDraw()
+        return
+      }
+      if (message.type !== 'bitmap') return
+      const geometry = message.geometry
+      if (!geometry) {
+        // Worker 无法产出几何（空窗口/全部 NaN）：结束 in-flight 并回退主线程。
+        chartWorkerInFlight = false
+        if (message.bitmap) message.bitmap.close()
+        chartDirty = true
+        drawChartLocal()
+        return
+      }
+      const canvas = canvasRef.value
+      const wrap = chartWrapRef.value
+      if (canvas && wrap) {
+        const width = Math.max(1, Math.floor(wrap.clientWidth))
+        const height = Math.max(1, Math.floor(wrap.clientHeight))
+        const dpr = Math.min(2, window.devicePixelRatio || 1)
+        const pixelWidth = Math.max(1, Math.round(width * dpr))
+        const pixelHeight = Math.max(1, Math.round(height * dpr))
+        if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+          canvas.width = pixelWidth
+          canvas.height = pixelHeight
+        }
+        const context = canvas.getContext('2d')
+        if (context && message.bitmap) {
+          context.setTransform(1, 0, 0, 1, 0, 0)
+          context.clearRect(0, 0, canvas.width, canvas.height)
+          context.drawImage(message.bitmap, 0, 0, canvas.width, canvas.height)
+          message.bitmap.close()
+        }
+        const normalizedRanges = new Map<number, {min: number; max: number}>()
+        for (const [id, range] of Object.entries(geometry.ranges)) {
+          normalizedRanges.set(Number(id), {min: range[0], max: range[1]})
+        }
+        lastGeometry = {
+          padding: geometry.padding,
+          plotWidth: geometry.plotWidth,
+          plotHeight: geometry.plotHeight,
+          xMin: geometry.xMin,
+          xMax: geometry.xMax,
+          minValue: geometry.minValue,
+          maxValue: geometry.maxValue,
+          yAxisMode: geometry.yMode,
+          normalizedRanges,
+          width,
+          height,
+        }
+      }
+      perfCounter.draws += 1
+      perfCounter.lastDrawMs = message.drawMs ?? 0
+      perfCounter.drawMsTotal += message.drawMs ?? 0
+      chartWorkerInFlight = false
+      drawHoverOverlay()
+      if (chartDirty) scheduleDraw()
+    }
+    worker.onerror = () => {
+      chartWorkerFailed = true
+      chartWorkerReady = false
+      chartRenderMode.value = 'main'
+      chartWorkerInFlight = false
+      chartWorker = null
+      chartDirty = true
+      scheduleDraw()
+    }
+    chartWorkerReady = true
+    chartRenderMode.value = 'offscreen'
+  } catch {
+    chartWorkerFailed = true
+    chartWorkerReady = false
+    chartRenderMode.value = 'main'
+  }
+}
+
+function sendChartToWorker(): boolean {
+  const worker = chartWorker
+  const canvas = canvasRef.value
+  const wrap = chartWrapRef.value
+  if (!worker || !chartWorkerReady || chartWorkerFailed || chartWorkerSuspended || !canvas || !wrap) return false
+  const visible = visibleSeriesList.value
+  const drawn = drawnSeriesList.value
+  if (ringCount === 0 || visible.length === 0 || drawn.length === 0) return false
+  // 大系列数时 OffscreenCanvas 场景传输/软件光栅在部分环境会退化；
+  // 阈值内走 worker，超过后使用已优化的主线程 drawChartLocal。
+  if (drawn.length > 48) return false
+  const width = Math.max(1, Math.floor(wrap.clientWidth))
+  const height = Math.max(1, Math.floor(wrap.clientHeight))
+  if (width < 40 || height < 40) return false
+  const lastTime = lastDataTimestamp()
+  const {xMin, xMax} = currentXRange(lastTime)
+  const startOrder = lowerBoundTime(xMin)
+  if (startOrder >= ringCount) return false
+  const count = ringCount - startOrder
+  const times = new Float32Array(count)
+  for (let index = 0; index < count; index++) times[index] = timestamps[ringSlot(startOrder + index)]
+  const series: ChartWorkerSeries[] = []
+  const transfers: Transferable[] = [times.buffer]
+  for (const item of drawn) {
+    const values = seriesValues.get(item.id)
+    if (!values) continue
+    const snapshot = new Float32Array(count)
+    for (let index = 0; index < count; index++) {
+      const slot = ringSlot(startOrder + index)
+      snapshot[index] = slotSeq[slot] >= item.startSeq && Number.isFinite(values[slot]) ? values[slot] : Number.NaN
+    }
+    series.push({id: String(item.id), color: seriesDisplayColor(item.color), values: snapshot})
+    transfers.push(snapshot.buffer)
+  }
+  if (series.length === 0) return false
+  const palette = chartPalette()
+  const scene: ChartWorkerScene = {
+    requestId: ++chartRequestId,
+    width,
+    height,
+    dpr: Math.min(2, window.devicePixelRatio || 1),
+    padding: {left: 58, right: 14, top: 12, bottom: 26},
+    xMin,
+    xMax,
+    times,
+    series,
+    yMode: yAxisMode.value,
+    smoothingWindow: smoothingWindow.value,
+    palette,
+  }
+  if (chartWorkerInFlight) {
+    chartDirty = true
+    return true
+  }
+  chartWorkerInFlight = true
+  worker.postMessage(scene, transfers)
+  return true
+}
+
+/** 主入口：优先 OffscreenCanvas worker；不支持/失败/冻结/导出时回退主线程。 */
 function drawChart(now = performance.now()): void {
+  if (!chartWorkerSuspended && !chartFrozen.value && chartWorkerReady && !chartWorkerFailed) {
+    if (sendChartToWorker()) return
+  }
+  drawChartLocal(now)
+}
+
+function drawChartLocal(now = performance.now()): void {
   const drawStart = performance.now()
   const canvas = canvasRef.value
   const wrap = chartWrapRef.value
@@ -3599,6 +5472,7 @@ function drawChart(now = performance.now()): void {
 
   const toX = (time: number) => padding.left + ((time - xMin) / (xMax - xMin)) * plotWidth
   const toY = (value: number) => padding.top + (1 - (value - minValue) / (maxValue - minValue)) * plotHeight
+  if (seriesList.value.some((item) => item.derived)) updateDerivedValues()
   const orderCount = ringCount - startOrder
   if (xCache.length < orderCount) xCache = new Float32Array(orderCount)
   for (let offset = 0; offset < orderCount; offset++) {
@@ -3669,6 +5543,7 @@ function drawChart(now = performance.now()): void {
       if (!values) continue
       if (!useDecimation) {
         let started = false
+        const smoothQueue: number[] = []
         for (let order = startOrder; order < ringCount; order++) {
           const slot = ringSlot(order)
           if (slotSeq[slot] < item.startSeq) {
@@ -3681,8 +5556,14 @@ function drawChart(now = performance.now()): void {
             started = false
             continue
           }
+          let drawValue = value
+          if (smoothingWindow.value > 1) {
+            smoothQueue.push(value)
+            if (smoothQueue.length > smoothingWindow.value) smoothQueue.shift()
+            drawValue = smoothQueue.reduce((sum, itemValue) => sum + itemValue, 0) / smoothQueue.length
+          }
           const x = xCache[order - startOrder]
-          const y = toY(value)
+          const y = toY(drawValue)
           if (!started) {
             context.moveTo(x, y)
             started = true
@@ -3693,6 +5574,7 @@ function drawChart(now = performance.now()): void {
       } else {
         const minBuf = columnMin
         const maxBuf = columnMax
+        const smoothQueue: number[] = []
         for (let column = 0; column < plotColumns; column++) {
           minBuf[column] = Number.POSITIVE_INFINITY
           maxBuf[column] = Number.NEGATIVE_INFINITY
@@ -3703,9 +5585,15 @@ function drawChart(now = performance.now()): void {
           const raw = values[slot]
           const value = yMode === 'auto' ? (Number.isFinite(raw) ? raw : null) : transformYValue(item, raw, normalizedRanges)
           if (value === null) continue
+          let drawValue = value
+          if (smoothingWindow.value > 1) {
+            smoothQueue.push(value)
+            if (smoothQueue.length > smoothingWindow.value) smoothQueue.shift()
+            drawValue = smoothQueue.reduce((sum, itemValue) => sum + itemValue, 0) / smoothQueue.length
+          }
           const column = Math.min(plotColumns - 1, Math.max(0, Math.floor((xCache[order - startOrder] - padding.left) / columnScale)))
-          if (value < minBuf[column]) minBuf[column] = value
-          if (value > maxBuf[column]) maxBuf[column] = value
+          if (drawValue < minBuf[column]) minBuf[column] = drawValue
+          if (drawValue > maxBuf[column]) maxBuf[column] = drawValue
         }
         let previousColumn = -2
         for (let column = 0; column < plotColumns; column++) {
@@ -3775,6 +5663,27 @@ function drawHoverOverlay(): void {
     context.beginPath()
     context.arc(x, y, 3, 0, Math.PI * 2)
     context.fill()
+  }
+  // task-37：双光标 A/B 竖线（overlay）。
+  for (const cursor of [
+    {point: cursorA.value, color: '#0ea5e9', label: 'A'},
+    {point: cursorB.value, color: '#f59e0b', label: 'B'},
+  ]) {
+    if (!cursor.point) continue
+    const cursorX = geometry.padding.left + ((cursor.point.time - geometry.xMin) / (geometry.xMax - geometry.xMin)) * geometry.plotWidth
+    if (cursorX < geometry.padding.left || cursorX > geometry.padding.left + geometry.plotWidth) continue
+    context.strokeStyle = cursor.color
+    context.lineWidth = 1
+    context.setLineDash([2, 3])
+    context.beginPath()
+    context.moveTo(cursorX, geometry.padding.top)
+    context.lineTo(cursorX, geometry.padding.top + geometry.plotHeight)
+    context.stroke()
+    context.setLineDash([])
+    context.fillStyle = cursor.color
+    context.font = '10px system-ui, sans-serif'
+    context.textAlign = 'left'
+    context.fillText(cursor.label, cursorX + 2, geometry.padding.top + 10)
   }
 }
 
@@ -3848,6 +5757,7 @@ function onCanvasLeave(): void {
 
 // ---- X 时间轴交互：滚轮缩放 / 拖拽平移 / 双击复位 / 跟随最新 ---------------
 let panning = false
+let panMoved = false
 let panStartX = 0
 let panStartEnd = 0
 let activePointerId: number | null = null
@@ -3912,6 +5822,7 @@ function onCanvasPointerMove(event: PointerEvent): void {
     if (!canvas) return
     const dx = event.clientX - panStartX
     if (Math.abs(dx) > 2) {
+      panMoved = true
       const rect = canvas.getBoundingClientRect()
       const plotWidth = Math.max(1, rect.width - 58 - 14)
       const secondsPerPixel = timeWindowSeconds.value / plotWidth
@@ -3985,7 +5896,10 @@ function exportCsv(): void {
     for (const item of seriesList.value) {
       const loBuffer = seriesLo.get(item.id)
       const hiBuffer = seriesHi.get(item.id)
-      if (!loBuffer || !hiBuffer || slotSeq[slot] < item.startSeq) {
+      if (item.derived) {
+        const values = seriesValues.get(item.id)
+        cells.push(values && slotSeq[slot] >= item.startSeq ? formatFloatText(values[slot]) : '')
+      } else if (!loBuffer || !hiBuffer || slotSeq[slot] < item.startSeq) {
         cells.push('')
       } else {
         cells.push(decodeText(item, loBuffer[slot], hiBuffer[slot]))
@@ -4002,10 +5916,12 @@ function exportPng(): void {
   if (!canvas || ringCount === 0) return
   const previousHover = hover.value
   hover.value = null
-  drawChart()
+  chartWorkerSuspended = true
+  drawChartLocal()
   const filename = `data-curve-${fileStamp()}.png`
   const restore = () => {
     hover.value = previousHover
+    chartWorkerSuspended = false
     scheduleDraw()
   }
   if (typeof canvas.toBlob === 'function') {
@@ -4040,6 +5956,7 @@ function installDebugSnapshot(): void {
     pollsPerSecond: Math.round(pollCounterState.pollsPerSecond * 10) / 10,
     pollsInFlight: localPollsInFlightCount,
     drawIntervalMs: adaptiveDrawIntervalMs(),
+    renderMode: chartRenderMode.value,
     lastDrawMs: Math.round(perfCounter.lastDrawMs * 100) / 100,
     avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
     drawn: drawnSeriesList.value.length,
@@ -4058,6 +5975,12 @@ function installDebugSnapshot(): void {
 
 onMounted(() => {
   loadValueScale()
+  loadPresets()
+  void refreshRecordings()
+  initFramesWorker()
+  initChartWorker()
+  void refreshTargetInfo()
+  window.addEventListener('keydown', onGlobalKeydown)
   resizeObserver = new ResizeObserver(() => scheduleDraw())
   if (chartWrapRef.value) resizeObserver.observe(chartWrapRef.value)
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -4077,6 +6000,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopSampling()
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('keydown', onGlobalKeydown)
+  stopPlayback()
+  if (framesWorker) { framesWorker.terminate(); framesWorker = null }
+  if (chartWorker) { chartWorker.terminate(); chartWorker = null }
   themeObserver?.disconnect()
   themeObserver = null
   chartPaletteCache = null
@@ -4162,7 +6089,7 @@ onBeforeUnmount(() => {
 .var-head,
 .var-row {
   display: grid;
-  grid-template-columns: 1.5rem minmax(0, 1.7fr) minmax(0, 1.2fr) 6.5rem 3.5rem minmax(0, 1fr);
+  grid-template-columns: 2.6rem minmax(0, 1.7fr) minmax(0, 1.2fr) 6.5rem 3.5rem minmax(0, 1fr);
   align-items: center;
   gap: 0.25rem;
   padding: 0 0.375rem;
@@ -4321,6 +6248,100 @@ onBeforeUnmount(() => {
   touch-action: none;
   cursor: crosshair;
 }
+.group-weights {
+  color: #4b5563;
+}
+
+.watch-star {
+  margin-left: 0.15rem;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.watch-star.active { color: #d97706; }
+
+.stale-dot {
+  color: #dc2626;
+  font-size: 0.55rem;
+  line-height: 1;
+}
+
+.var-row.pc-stale { opacity: 0.55; }
+
+.stale-badge {
+  background-color: #fee2e2;
+  color: #b91c1c;
+}
+
+.watch-list { max-height: 10rem; overflow: auto; }
+
+.watch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) repeat(3, minmax(0, 1fr)) 1.5rem;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  align-items: center;
+  padding: 0.1rem 0;
+}
+
+.delta-table-wrap { max-height: 14rem; overflow: auto; }
+
+.delta-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+}
+
+.delta-table th,
+.delta-table td {
+  border-bottom: 1px solid #eef0f3;
+  padding: 0.15rem 0.3rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.delta-table th:first-child,
+.delta-table td:first-child { text-align: left; }
+
+.diag-json {
+  max-height: 18rem;
+  overflow: auto;
+  border-radius: 0.375rem;
+  background: #f8fafc;
+  padding: 0.5rem;
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.playback-range { flex: 1; min-width: 8rem; }
+
+.mobile-only { display: none; }
+
+@media (max-width: 760px) {
+  .mobile-only { display: inline-flex; }
+  .advanced-control { display: none !important; }
+  .curve-layout.mobile-advanced .advanced-control { display: flex !important; }
+}
+
+@media (max-width: 760px) {
+  .curve-layout { padding-left: 0.4rem; padding-right: 0.4rem; }
+  .render-bar { flex-direction: column; align-items: flex-start; }
+  .chart-wrap { height: 62vw; min-height: 220px; }
+  .var-head, .var-row {
+    grid-template-columns: 2.4rem minmax(0, 2fr) minmax(0, 1.2fr) 4.5rem 2.5rem minmax(0, 1fr);
+    font-size: 0.7rem;
+  }
+  .var-list { max-height: 16rem; }
+  .selected-list { max-height: 30vh; }
+  .legend-item { max-width: 100%; }
+  .delta-table-wrap { overflow-x: auto; }
+  .page-title { font-size: 1.15rem; }
+}
+
 
 .render-bar {
   color: var(--bb-text-muted, #69727f);

@@ -51,7 +51,7 @@
 /* The ESP httpd task has a single instance and a 4 KiB stack: request bodies
  * and response JSON use static buffers (same pattern as tf_debug_http.c). */
 static char s_body[CURVE_JSON_BODY_MAX + 1U];
-static char s_json[768];
+static char s_json[1024];
 static curve_config_t s_http_cfg;
 
 /* ------------------------------------------------------------------------- */
@@ -282,14 +282,22 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
                    "{\"ok\":true,\"group_count\":%u,\"series_count\":%u,"
                    "\"sample_bytes\":%u,\"interval_us\":%u,"
                    "\"trigger\":\"%s\",\"breakpoint_address\":%u,"
-                   "\"halt\":%s,\"link_hz\":%u,\"dpidr\":\"0x%08X\"}",
+                   "\"halt\":%s,\"pc_capture\":%s,"
+                   "\"watchpoint_address\":%u,\"watchpoint_size\":%u,"
+                   "\"watchpoint_access\":\"%s\","
+                   "\"link_hz\":%u,\"dpidr\":\"0x%08X\"}",
                    (unsigned)s_http_cfg.group_count,
                    (unsigned)s_http_cfg.series_count,
                    (unsigned)s_http_cfg.sample_bytes,
                    (unsigned)s_http_cfg.interval_us,
                    curve_trigger_name(s_http_cfg.trigger),
                    (unsigned)s_http_cfg.breakpoint_address,
-                   s_http_cfg.halt ? "true" : "false", (unsigned)status.link_hz,
+                   s_http_cfg.halt ? "true" : "false",
+                   status.pc_available ? "true" : "false",
+                   (unsigned)s_http_cfg.watch_address,
+                   (unsigned)s_http_cfg.watch_size,
+                   curve_watch_access_name(s_http_cfg.watch_access),
+                   (unsigned)status.link_hz,
                    (unsigned)status.dpidr);
     return curve_send_json(req, "200 OK", s_json);
 }

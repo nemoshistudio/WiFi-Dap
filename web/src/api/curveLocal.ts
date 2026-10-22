@@ -36,7 +36,7 @@ export const CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT = 1000000
 export const CURVE_LOCAL_FLASH_START = 0x08000000
 export const CURVE_LOCAL_FLASH_END = 0x08ffffff
 
-export type CurveLocalTrigger = 'periodic' | 'breakpoint'
+export type CurveLocalTrigger = 'periodic' | 'breakpoint' | 'watchpoint'
 export const CURVE_LOCAL_MAX_EXPR_DEPTH = 8
 export const CURVE_LOCAL_FRAMES_MAX = 64
 export const CURVE_LOCAL_FRAMES_DEFAULT = 32
@@ -52,6 +52,12 @@ const CVF2_FRAME_HEADER_BYTES = 15
 const CVF2_MAGIC = 0x32465643 // 'CVF2'（字节 43 56 46 32）
 const CVF2_VERSION = 2
 const CVF_FLAG_GAP = 0x01
+/** task-35：flags bit1 = 帧中带 PC（19B 帧头），否则 15B。 */
+const CVF_FLAG_PC = 0x02
+/** task-38：flags bit2 = 本批包含 watchpoint 触发帧。 */
+const CVF_FLAG_TRIGGER = 0x04
+/** task-45：flags bit3 = 本批包含条件触发帧。 */
+const CVF_FLAG_CONDITION = 0x08
 
 export class CurveLocalError extends Error {
     /** HTTP 状态码；0 = 网络/解析错误。 */
@@ -88,9 +94,36 @@ export interface CurveLocalSeriesSpec {
 }
 
 /** 协议 v2 分组（每组 ≤32 路，总和 ≤256）。 */
+/** 固件 watchpoint 配置（地址按 size 对齐；access write/readwrite）。 */
+export interface CurveLocalWatchpointSpec {
+    address: number
+    size: 1 | 2 | 4
+    access: 'write' | 'readwrite'
+}
+
+/** task-45 条件触发适配层（Web 先行预留；固件支持后由 start 直接发送）。 */
+export type CurveConditionOp = '==' | '!=' | '>' | '>=' | '<' | '<='
+export interface CurveConditionSpec {
+    address: number
+    size: 1 | 2 | 4
+    op: CurveConditionOp
+    value: number
+    /** 有符号比较（默认 false）。 */
+    signed?: boolean
+    /** 命中模式：once（默认，命中后停）/ continuous。 */
+    mode?: 'once' | 'continuous'
+    /** 命中后停止采样（默认 true，与 mode=once 一致）。 */
+    stopAfter?: boolean
+    /** 兼容 task-44 adapter 旧字段。 */
+    once?: boolean
+    stop?: boolean
+}
+
 export interface CurveLocalGroupSpec {
     id: number
     series: readonly CurveLocalSeriesSpec[]
+    /** 采样调度权重 1..8（默认 1；sum(weight) ≤64，契约 §9.7）。 */
+    weight?: number
 }
 
 export interface StartLocalCurveOptions {
@@ -99,8 +132,16 @@ export interface StartLocalCurveOptions {
     trigger?: CurveLocalTrigger
     /** breakpoint 触发地址；Thumb bit0 忽略，范围 Flash 且半字对齐。 */
     breakpointAddress?: number
+    /** watchpoint 触发配置（task-38；trigger='watchpoint' 时必填）。 */
+    watchpoint?: CurveLocalWatchpointSpec
+    /** task-45 条件触发（与 periodic/breakpoint/watchpoint 组合）。 */
+    triggerCondition?: CurveConditionSpec
+    /** task-44 adapter 旧字段（兼容映射到 trigger_condition）。 */
+    condition?: CurveConditionSpec
     /** periodic 是否每拍 halt；breakpoint 时忽略且不下发（命中时核心已暂停）。 */
     halt?: boolean
+    /** 是否请求固件在帧中带 PC（task-35，默认 true；halt/breakpoint 会话才有效）。 */
+    wantPc?: boolean
     /** 旧单组路径（与 groups 二选一；缺省 groups 时作为单 group）。 */
     series?: readonly CurveLocalSeriesSpec[]
     /** 协议 v2 多组（1..8 组；每组 1..32 路）。 */
@@ -135,6 +176,18 @@ export interface LocalCurveStatus {
     /** 协议 v2：group 数 / 当前轮转到的 group。 */
     groupCount?: number
     currentGroup?: number
+    /** watchpoint 状态（task-38）。 */
+    watchpointArmed?: boolean
+    watchpointAddress?: number
+    watchpointSize?: number
+    watchpointAccess?: 'write' | 'readwrite'
+    watchpointHits?: number
+    triggerSeq?: number
+    /** task-45 条件触发状态。 */
+    conditionArmed?: boolean
+    conditionMet?: boolean
+    conditionHits?: number
+    conditionTriggerSeq?: number
     intervalUs: number
     frames: number
     overwritten: number
@@ -149,6 +202,10 @@ export interface CurveLocalFrame {
     timestampUs: number
     /** CVF2 帧所属 group；CVF1 恒为 0。 */
     group: number
+    /** task-35：flags bit1=PC_PRESENT 时帧头携带的当前 PC。 */
+    pc?: number
+    /** task-38：flags bit2=TRIGGER，表示本批含 watchpoint 触发帧。 */
+    trigger?: boolean
     /** 该 group 的 series.size 之和字节，按该 group series 顺序拼接。 */
     payload: Uint8Array
 }
@@ -156,6 +213,10 @@ export interface CurveLocalFrame {
 export interface CurveLocalFramesPage {
     version: number
     flags: number
+    /** task-38：flags bit2（watchpoint 触发批次）。 */
+    triggered?: boolean
+    /** task-45：flags bit3（条件触发批次）。 */
+    conditionTriggered?: boolean
     /** bit0=gap（since 已被 ring 覆盖，存在丢帧）。 */
     gap: boolean
     count: number
@@ -338,8 +399,8 @@ export function isValidAddressExprShape(expr: AddressExpr): boolean {
 export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
     const {intervalUs} = options
     const trigger = options.trigger ?? 'periodic'
-    const maxInterval = trigger === 'breakpoint' ? CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT : CURVE_LOCAL_MAX_INTERVAL_US
-    const minInterval = trigger === 'breakpoint' ? 5000 : CURVE_LOCAL_MIN_INTERVAL_US
+    const maxInterval = trigger === 'breakpoint' || trigger === 'watchpoint' ? CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT : CURVE_LOCAL_MAX_INTERVAL_US
+    const minInterval = trigger === 'breakpoint' || trigger === 'watchpoint' ? 5000 : CURVE_LOCAL_MIN_INTERVAL_US
     if (!Number.isInteger(intervalUs) || intervalUs < minInterval || intervalUs > maxInterval) {
         throw new CurveLocalError(`interval_us must be ${minInterval}..${maxInterval} for trigger=${trigger}`)
     }
@@ -353,12 +414,41 @@ export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
             )
         }
     }
+    const customCondition = options.triggerCondition ?? options.condition
+    if (customCondition) {
+        const condition = customCondition
+        const address = condition.address >>> 0
+        if (!Number.isInteger(address) || address === 0) throw new CurveLocalError('condition address must be non-zero u32')
+        if (![1, 2, 4].includes(condition.size)) throw new CurveLocalError('condition size must be 1, 2 or 4')
+        if (address % condition.size !== 0) throw new CurveLocalError('condition address must be aligned to size')
+        if (!['==', '!=', '>', '>=', '<', '<='].includes(condition.op)) throw new CurveLocalError('invalid condition op')
+        if (!Number.isFinite(condition.value)) throw new CurveLocalError('condition value must be a number')
+        const mode = condition.mode ?? 'once'
+        if (mode !== 'once' && mode !== 'continuous') throw new CurveLocalError("condition mode must be 'once' or 'continuous'")
+    }
+    if (trigger === 'watchpoint') {
+        const watchpoint = options.watchpoint
+        if (!watchpoint) throw new CurveLocalError('watchpoint config required for watchpoint trigger')
+        const address = watchpoint.address >>> 0
+        if (!Number.isInteger(address) || address === 0) throw new CurveLocalError('watchpoint address must be non-zero u32')
+        if (![1, 2, 4].includes(watchpoint.size)) throw new CurveLocalError('watchpoint size must be 1, 2 or 4')
+        if (address % watchpoint.size !== 0) throw new CurveLocalError('watchpoint address must be aligned to size')
+        if (watchpoint.access !== 'write' && watchpoint.access !== 'readwrite') {
+            throw new CurveLocalError("watchpoint access must be 'write' or 'readwrite'")
+        }
+    }
     const groups = normalizeLocalGroups(options)
     if (groups.length < 1 || groups.length > CURVE_LOCAL_MAX_GROUPS) {
         throw new CurveLocalError(`groups count must be 1..${CURVE_LOCAL_MAX_GROUPS}`)
     }
     let totalSeries = 0
+    let totalWeight = 0
     for (const group of groups) {
+        const weight = group.weight ?? 1
+        if (!Number.isInteger(weight) || weight < 1 || weight > 8) {
+            throw new CurveLocalError(`group[${group.id}] weight must be 1..8`)
+        }
+        totalWeight += weight
         if (!Array.isArray(group.series) || group.series.length < CURVE_LOCAL_MIN_SERIES
             || group.series.length > CURVE_LOCAL_MAX_SERIES_PER_GROUP) {
             throw new CurveLocalError(`group[${group.id}] series count must be ${CURVE_LOCAL_MIN_SERIES}..${CURVE_LOCAL_MAX_SERIES_PER_GROUP}`)
@@ -390,6 +480,9 @@ export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
     }
     if (totalSeries > CURVE_LOCAL_MAX_TOTAL_SERIES) {
         throw new CurveLocalError(`total series count must be <= ${CURVE_LOCAL_MAX_TOTAL_SERIES}`)
+    }
+    if (totalWeight > 64) {
+        throw new CurveLocalError('sum(group.weight) must be <= 64')
     }
 }
 
@@ -474,10 +567,13 @@ export async function startLocalCurve(options: StartLocalCurveOptions): Promise<
     const payload: Record<string, unknown> = {
         trigger,
         interval_us: options.intervalUs,
+        // task-35：默认请求 PC（固件在 halt/breakpoint 会话才带；no-halt 会话忽略）。
+        want_pc: options.wantPc !== false,
     }
     if (useGroups) {
         payload.groups = groups.map((group, index) => ({
             id: Number.isInteger(group.id) ? group.id : index,
+            weight: group.weight ?? 1,
             series: group.series.map(serializeSeriesSpec),
         }))
     } else {
@@ -486,9 +582,26 @@ export async function startLocalCurve(options: StartLocalCurveOptions): Promise<
     if (trigger === 'breakpoint') {
         // 断点命中时核心已暂停，halt 字段无意义且契约要求忽略；不下发避免冲突。
         payload.breakpoint_address = normalizeBreakpointAddress(options.breakpointAddress ?? 0)
+    } else if (trigger === 'watchpoint' && options.watchpoint) {
+        payload.watch_address = options.watchpoint.address >>> 0
+        payload.watch_size = options.watchpoint.size
+        payload.watch_access = options.watchpoint.access
     } else {
         // loclist variants 要求固件按 PC 选择，必须 halt（契约 §9.4）。
         payload.halt = hasVariants ? true : options.halt !== false
+    }
+    const customCondition = options.triggerCondition ?? options.condition
+    if (customCondition) {
+        // task-45：可与 periodic/breakpoint/watchpoint 组合；字段使用 trigger_condition。
+        payload.trigger_condition = {
+            address: customCondition.address >>> 0,
+            size: customCondition.size,
+            op: customCondition.op,
+            value: customCondition.value,
+            signed: customCondition.signed === true,
+            mode: customCondition.mode ?? (customCondition.once === true ? 'once' : 'continuous'),
+            stop_after: customCondition.stopAfter ?? customCondition.stop ?? true,
+        }
     }
     const body = await requestJson(CURVE_LOCAL_START_PATH, {
         method: 'POST',
@@ -534,7 +647,7 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
         ok: body.ok !== false,
         running: body.running === true,
         halt: body.halt === true ? true : body.halt === false ? false : undefined,
-        trigger: body.trigger === 'breakpoint' ? 'breakpoint' : body.trigger === 'periodic' ? 'periodic' : undefined,
+        trigger: body.trigger === 'breakpoint' ? 'breakpoint' : body.trigger === 'watchpoint' ? 'watchpoint' : body.trigger === 'periodic' ? 'periodic' : undefined,
         breakpointAddress: optionalFiniteNumber(body.breakpoint_address),
         hits: optionalFiniteNumber(body.hits),
         sampled: optionalFiniteNumber(body.sampled),
@@ -542,6 +655,16 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
         outOfScope: optionalFiniteNumber(body.out_of_scope),
         groupCount: optionalFiniteNumber(body.group_count),
         currentGroup: optionalFiniteNumber(body.current_group),
+        watchpointArmed: body.watchpoint_armed === true ? true : body.watchpoint_armed === false ? false : undefined,
+        watchpointAddress: optionalFiniteNumber(body.watchpoint_address),
+        watchpointSize: optionalFiniteNumber(body.watchpoint_size),
+        watchpointAccess: body.watchpoint_access === 'readwrite' ? 'readwrite' : body.watchpoint_access === 'write' ? 'write' : undefined,
+        watchpointHits: optionalFiniteNumber(body.watchpoint_hits),
+        triggerSeq: optionalFiniteNumber(body.trigger_seq),
+        conditionArmed: body.condition_armed === true ? true : body.condition_armed === false ? false : undefined,
+        conditionMet: body.condition_met === true ? true : body.condition_met === false ? false : undefined,
+        conditionHits: optionalFiniteNumber(body.condition_hits),
+        conditionTriggerSeq: optionalFiniteNumber(body.condition_trigger_seq),
         intervalUs: finiteNumber(body.interval_us, 0),
         frames: finiteNumber(body.frames, 0),
         overwritten: finiteNumber(body.overwritten, 0),
@@ -603,7 +726,8 @@ function decodeCvf1(bytes: Uint8Array): CurveLocalFramesPage {
         frames.push({seq, timestampUs, group: 0, payload: bytes.slice(payloadStart, payloadStart + frameBytes)})
         offset += stride
     }
-    return {version: 1, flags, gap: (flags & CVF_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
+    return {version: 1, flags, triggered: (flags & CVF_FLAG_TRIGGER) !== 0,
+      conditionTriggered: (flags & CVF_FLAG_CONDITION) !== 0, gap: (flags & CVF_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
 }
 
 function decodeCvf2(bytes: Uint8Array): CurveLocalFramesPage {
@@ -613,10 +737,14 @@ function decodeCvf2(bytes: Uint8Array): CurveLocalFramesPage {
     const count = readU16(bytes, 6)
     const firstSeq = readU32(bytes, 8)
     const frameBytes = readU16(bytes, 12)
+    // task-35：必须先按 flags 判断 PC_PRESENT；有 PC 的帧头是 19B（含 pc u32），
+    // 无 PC 15B。否则 halt 会话的 payload 会错位。
+    const pcPresent = (flags & CVF_FLAG_PC) !== 0
+    const frameHeaderBytes = CVF2_FRAME_HEADER_BYTES + (pcPresent ? 4 : 0)
     const frames: CurveLocalFrame[] = []
     let offset = CURVE_FRAME_HEADER_BYTES
     for (let index = 0; index < count; index++) {
-        if (offset + CVF2_FRAME_HEADER_BYTES > bytes.length) {
+        if (offset + frameHeaderBytes > bytes.length) {
             throw new CurveLocalError(`CVF2 truncated frame header at index ${index}`)
         }
         const seq = readU32(bytes, offset)
@@ -626,14 +754,18 @@ function decodeCvf2(bytes: Uint8Array): CurveLocalFramesPage {
         if (payloadLen > frameBytes) {
             throw new CurveLocalError(`CVF2 invalid payload_len ${payloadLen} (frame_bytes ${frameBytes})`)
         }
-        const payloadStart = offset + CVF2_FRAME_HEADER_BYTES
+        const pc = pcPresent ? readU32(bytes, offset + 15) : undefined
+        const payloadStart = offset + frameHeaderBytes
         if (payloadStart + payloadLen > bytes.length) {
             throw new CurveLocalError(`CVF2 truncated payload at index ${index}`)
         }
-        frames.push({seq, timestampUs, group, payload: bytes.slice(payloadStart, payloadStart + payloadLen)})
+        const frame: CurveLocalFrame = {seq, timestampUs, group, payload: bytes.slice(payloadStart, payloadStart + payloadLen)}
+        if (pc !== undefined) frame.pc = pc
+        frames.push(frame)
         offset = payloadStart + payloadLen
     }
-    return {version: 2, flags, gap: (flags & CVF_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
+    return {version: 2, flags, triggered: (flags & CVF_FLAG_TRIGGER) !== 0,
+      conditionTriggered: (flags & CVF_FLAG_CONDITION) !== 0, gap: (flags & CVF_FLAG_GAP) !== 0, count, firstSeq, frameBytes, frames}
 }
 
 /** 轮询设备本地采样帧；since=0 从 ring 最旧帧开始。 */

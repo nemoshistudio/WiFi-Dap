@@ -135,6 +135,13 @@ export interface SourceBrowserLabels {
     breakpointLineHint?: string
     /** 源码行尾实时值区域标题 */
     liveValues?: string
+
+    // ---- task-43 新增（可选；不放入 DEFAULT 对象，组件内有英文 fallback，
+    //      避免 task-26 的 labels 完整性契约（DEFAULT 字段 <-> locales key）被破坏） ----
+    /** 当前 PC/活动行标记（默认 fallback: PC） */
+    activePcLine?: string
+    /** 行没有可执行地址时的 gutter hover 提示，`{line}`（默认 fallback 英文） */
+    lineNoAddressHint?: string
 }
 
 export const DEFAULT_SOURCE_BROWSER_LABELS: SourceBrowserLabels = {

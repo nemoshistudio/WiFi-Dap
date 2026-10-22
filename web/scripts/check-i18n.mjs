@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 549
+const EXPECTED_TOTAL = 731
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 401
+const EXPECTED_ADDED = 583
 
 const errors = []
 const warnings = []
@@ -133,6 +133,23 @@ const ADDED_KEYS = [
         'sourceFile', 'fileFormat', 'convertedImage', 'imageSize', 'flashUsage', 'segments',
         'formatBin', 'formatElf', 'formatHex', 'formatSrec', 'ignoredSegments', 'filledGaps',
         'debugInfoIgnored', 'convertComputing', 'convertFailed',
+        // task-40: target detection precision + MCU/board profile (v3)
+        'flashKib', 'core', 'confidence', 'confidenceUnknown', 'confidenceGroup',
+        'confidenceFlashNarrowed', 'modelCandidates', 'limitations',
+        'profileTitle', 'profileHint', 'profileNone', 'profileSelectPlaceholder',
+        'profileKnownGroup', 'profileCustomGroup', 'profileDelete',
+        'orderCode', 'package', 'sourceKnown', 'sourceCustom', 'profileFlash',
+        'ramRanges', 'flashRange', 'profileNotes', 'detectedGroup', 'selectedProfile',
+        'profileCustomTitle', 'profileCustomExample', 'profileAdd', 'profileClearJson',
+        'profileSaved', 'copyDiagnostics', 'diagnosticsHint', 'diagnosticsCopyFailed',
+        'flashOnlyBoundary',
+        'matchNoDetection', 'matchNoProfile', 'matchDevIdMismatch', 'matchFlashMismatch',
+        'matchConsistent', 'matchUnverified', 'matchDevIdDetail', 'matchFlashDetail',
+        'matchCandidateMatch', 'matchCandidateMismatch', 'matchWordMatch', 'matchWordMismatch',
+        'limitNoDetection', 'limitDevIdUnknown', 'limitDevIdGroup', 'limitFlashSizeUnknown',
+        'limitSwdNoPackage', 'limitFlashUnsupported', 'limitProfileNotSelected',
+        'limitProfileDevIdMismatch', 'limitProfileFlashMismatch',
+        'limitProfileOrderCodeMismatch', 'limitProfileUnverified',
     ]),
     // 变量曲线页面（WS-DAP 采样 + ELF 选变量 + canvas 实时图）新增 41 个 + page.debugCurve
     ...keys('curve', [
@@ -199,6 +216,14 @@ const ADDED_KEYS = [
         'sourceOnlyFilesWithVariables', 'sourceShowAllProjectFiles', 'sourceNoFilesWithVariables',
         'sourceLiveValueStale', 'sourceLiveValues', 'sourceLineNoAddress', 'sourceBreakpointSet',
         'sourceBreakpointLineHint',
+        // task-37：录制回放/预设/watch/光标/派生/诊断/移动端
+        'activeStale', 'activeStaleHint',
+        // task-42：行断点/PC/target/Watchpoint/WS
+        'conditionEnable', 'conditionAddress', 'conditionSize', 'conditionOp', 'conditionValue', 'conditionSigned', 'conditionMode', 'conditionOnce', 'conditionContinuous', 'conditionStopAfter', 'conditionArmed', 'conditionMet', 'conditionHits', 'conditionTriggerSeq', 'conditionJump', 'conditionAddressRequired', 'conditionInvalid',
+        'sourceActivePcLine', 'sourceLineNoAddressHint', 'pcLineNoLineIndex', 'pcLineNoLine',
+        'smoothing', 'smoothingOff', 'fftNoSeries', 'fftButton', 'fftTitle', 'fftMagnitude', 'pcSourceFollow', 'mobileMore', 'mobileLess', 'recordExportJson', 'recordExportCsv', 'localTriggerConditional', 'conditionalPending',
+        'localTriggerWatchpoint', 'watchpointAddress', 'watchpointSize', 'watchpointAccess', 'watchpointWrite', 'watchpointReadWrite', 'watchpointAddressRequired', 'watchpointInvalid', 'watchpointArmed', 'watchpointHits', 'watchpointTriggerSeq', 'watchpointJump', 'watchpointJumpPre', 'watchpointJumpPost', 'watchpointTriggered', 'watchpointNoTrigger', 'activeOnly', 'currentFunctionOnly', 'sourceLineNoLineTable', 'targetTitle', 'targetRefresh', 'targetDetected', 'targetNotDetected', 'targetConfidence', 'targetProfile', 'targetProfileNone', 'targetMatch', 'targetFlashMismatch', 'targetFlashBeyond', 'verifyButton', 'verifyNeedElf', 'verifyStopFirst', 'verifyRunning', 'verifyNoFrames', 'verifyMismatch', 'wsTransport', 'wsFrames', 'wsDropped', 'wsLatency',
+        'presetEmpty', 'presetDefault', 'presetSaved', 'presetApplied', 'presetName', 'presetSave', 'presetSelect', 'presetLoad', 'presetDelete', 'watchAdd', 'watchRemove', 'watchTitle', 'derivedWhileSampling', 'derivedNeedTwo', 'derivedType', 'derivedAdd', 'derivedSub', 'diagCopyFailed', 'diagTitle', 'diagCopied', 'diagCopy', 'diagHint', 'recordNeedSampling', 'recordStarted', 'recordEmpty', 'recordDefault', 'recordSaved', 'recordSaveFailed', 'recordLimit', 'recordLoaded', 'recordLoadFailed', 'recordTitle', 'recordStart', 'recordStop', 'recordName', 'recordSave', 'recordRows', 'recordSelect', 'recordLoad', 'recordDelete', 'recordRefresh', 'playbackExit', 'playbackPause', 'playbackPlay', 'playbackSpeed', 'cursorDeltaTitle', 'cursorHint', 'cursorClear', 'ariaChart', 'groupWeight',
     ]),
     ...keys('page', ['debugCurve']),
 ]
@@ -211,6 +236,8 @@ const ADDED_SET_RE = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/
 const ALLOWED_PLACEHOLDERS = new Set([
     'err', 'max', 'size', 'code', 'web', 'fw', 'count', 'ssid', 'fixed',
     'name', 'matched', 'total', 'maxFiles', 'maxBytes', 'time', 'type', 'file', 'line', 'shown',
+    // task-40: target detection/profile match details
+    'detected', 'profile', 'result', 'candidates',
 ])
 
 function selfCheckContract() {

@@ -554,6 +554,127 @@ static esp_err_t parse_series_array(const cJSON *series_array,
     return ESP_OK;
 }
 
+/** Map "eq"/"ne"/"lt"/"le"/"gt"/"ge" (plus common symbol aliases) to op. */
+static bool parse_condition_op(const char *text, uint8_t *op_out)
+{
+    static const struct {
+        const char *name;
+        uint8_t op;
+    } ops[] = {
+        {"eq", (uint8_t)CURVE_COND_OP_EQ},  {"==", (uint8_t)CURVE_COND_OP_EQ},
+        {"ne", (uint8_t)CURVE_COND_OP_NE},  {"!=", (uint8_t)CURVE_COND_OP_NE},
+        {"lt", (uint8_t)CURVE_COND_OP_LT},  {"<", (uint8_t)CURVE_COND_OP_LT},
+        {"le", (uint8_t)CURVE_COND_OP_LE},  {"<=", (uint8_t)CURVE_COND_OP_LE},
+        {"gt", (uint8_t)CURVE_COND_OP_GT},  {">", (uint8_t)CURVE_COND_OP_GT},
+        {"ge", (uint8_t)CURVE_COND_OP_GE},  {">=", (uint8_t)CURVE_COND_OP_GE},
+    };
+
+    if (text == NULL) {
+        return false;
+    }
+    for (size_t i = 0U; i < sizeof(ops) / sizeof(ops[0]); i++) {
+        if (strcmp(text, ops[i].name) == 0) {
+            *op_out = ops[i].op;
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Optional P1.8 `trigger_condition` object (works on top of any trigger):
+ *   {address, size 1/2/4, op, value int32, signed?, mode once|continuous,
+ *    stop_after bool}
+ */
+static esp_err_t parse_trigger_condition(const cJSON *root,
+                                         curve_config_t *cfg, char *err,
+                                         size_t err_len)
+{
+    const cJSON *cond =
+        cJSON_GetObjectItemCaseSensitive(root, "trigger_condition");
+    const cJSON *item;
+    uint32_t address = 0U;
+    uint32_t size = 4U;
+    int32_t value = 0;
+    uint8_t op = (uint8_t)CURVE_COND_OP_EQ;
+
+    if (cond == NULL) {
+        return ESP_OK;
+    }
+    if (!cJSON_IsObject(cond)) {
+        return curve_parse_fail(err, err_len,
+                                "trigger_condition must be an object");
+    }
+    if (!json_u32(cJSON_GetObjectItemCaseSensitive(cond, "address"), 0.0,
+                  4294967295.0, &address)) {
+        return curve_parse_fail(err, err_len,
+                                "trigger_condition.address missing");
+    }
+    item = cJSON_GetObjectItemCaseSensitive(cond, "size");
+    if (item != NULL &&
+        (!json_u32(item, 1.0, 4.0, &size) ||
+         (size != CURVE_COND_SIZE_MIN && size != 2U &&
+          size != CURVE_COND_SIZE_MAX))) {
+        return curve_parse_fail(err, err_len,
+                                "trigger_condition.size must be 1, 2 or 4");
+    }
+    if (!curve_addr_range_ok(address, size)) {
+        return curve_parse_fail(err, err_len,
+                                "bad trigger_condition address");
+    }
+    item = cJSON_GetObjectItemCaseSensitive(cond, "op");
+    if (!cJSON_IsString(item) || item->valuestring == NULL ||
+        !parse_condition_op(item->valuestring, &op)) {
+        return curve_parse_fail(err, err_len,
+                                "trigger_condition.op must be eq/ne/lt/le/gt/ge");
+    }
+    if (!json_i32(cJSON_GetObjectItemCaseSensitive(cond, "value"),
+                  INT32_MIN, INT32_MAX, &value)) {
+        return curve_parse_fail(err, err_len,
+                                "trigger_condition.value must be int32");
+    }
+
+    cfg->cond_enabled = true;
+    cfg->cond_address = address;
+    cfg->cond_size = (uint8_t)size;
+    cfg->cond_op = op;
+    cfg->cond_value = value;
+    cfg->cond_mode = (uint8_t)CURVE_COND_MODE_ONCE;
+    cfg->cond_signed = false;
+    cfg->cond_stop_after = false;
+
+    item = cJSON_GetObjectItemCaseSensitive(cond, "signed");
+    if (item != NULL) {
+        if (!cJSON_IsBool(item)) {
+            return curve_parse_fail(err, err_len,
+                                    "trigger_condition.signed must be a boolean");
+        }
+        cfg->cond_signed = cJSON_IsTrue(item) ? true : false;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(cond, "mode");
+    if (item != NULL) {
+        if (!cJSON_IsString(item) || item->valuestring == NULL ||
+            (strcmp(item->valuestring, "once") != 0 &&
+             strcmp(item->valuestring, "continuous") != 0)) {
+            return curve_parse_fail(err, err_len,
+                                    "trigger_condition.mode must be "
+                                    "\"once\" or \"continuous\"");
+        }
+        cfg->cond_mode = (strcmp(item->valuestring, "continuous") == 0)
+                             ? (uint8_t)CURVE_COND_MODE_CONTINUOUS
+                             : (uint8_t)CURVE_COND_MODE_ONCE;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(cond, "stop_after");
+    if (item != NULL) {
+        if (!cJSON_IsBool(item)) {
+            return curve_parse_fail(err, err_len,
+                                    "trigger_condition.stop_after must be a boolean");
+        }
+        cfg->cond_stop_after = cJSON_IsTrue(item) ? true : false;
+    }
+    return ESP_OK;
+}
+
 esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
                              char *err, size_t err_len)
 {
@@ -571,6 +692,7 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
     }
     memset(cfg, 0, sizeof(*cfg));
     cfg->halt = true;
+    cfg->want_pc = true; /* CVF2 PC_PRESENT is on by default when readable */
 
     if (json == NULL || len == 0U) {
         return curve_parse_fail(err, err_len, "empty body");
@@ -581,27 +703,89 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         return curve_parse_fail(err, err_len, "invalid JSON object");
     }
 
-    /* Phase 2 trigger selector: "periodic" (default) or "breakpoint". */
+    /* Trigger selector: "periodic" (default), "breakpoint" (FPB) or
+     * "watchpoint" (P1.8/P1.9 DWT data watchpoint). */
     item = cJSON_GetObjectItemCaseSensitive(root, "trigger");
     if (item != NULL) {
         if (!cJSON_IsString(item) || item->valuestring == NULL) {
             result = curve_parse_fail(err, err_len,
-                                      "trigger must be \"periodic\" or \"breakpoint\"");
+                                      "trigger must be \"periodic\", "
+                                      "\"breakpoint\" or \"watchpoint\"");
             goto out;
         }
         if (strcmp(item->valuestring, "breakpoint") == 0) {
             cfg->trigger = (uint8_t)CURVE_TRIGGER_BREAKPOINT;
+        } else if (strcmp(item->valuestring, "watchpoint") == 0) {
+            cfg->trigger = (uint8_t)CURVE_TRIGGER_WATCHPOINT;
         } else if (strcmp(item->valuestring, "periodic") == 0) {
             cfg->trigger = (uint8_t)CURVE_TRIGGER_PERIODIC;
         } else {
             result = curve_parse_fail(err, err_len,
-                                      "trigger must be \"periodic\" or \"breakpoint\"");
+                                      "trigger must be \"periodic\", "
+                                      "\"breakpoint\" or \"watchpoint\"");
             goto out;
         }
     }
 
     item = cJSON_GetObjectItemCaseSensitive(root, "interval_us");
-    if (cfg->trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+    if (cfg->trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
+        const cJSON *watch_item =
+            cJSON_GetObjectItemCaseSensitive(root, "watch_address");
+        const cJSON *size_item =
+            cJSON_GetObjectItemCaseSensitive(root, "watch_size");
+        const cJSON *access_item =
+            cJSON_GetObjectItemCaseSensitive(root, "watch_access");
+        uint32_t watch_address = 0U;
+        uint32_t watch_size = CURVE_WATCH_DEFAULT_SIZE;
+
+        if (!json_u32(watch_item, 0.0, 4294967295.0, &watch_address)) {
+            result = curve_parse_fail(err, err_len, "bad watchpoint address");
+            goto out;
+        }
+        if (size_item != NULL) {
+            if (!json_u32(size_item, 1.0, 4.0, &watch_size) ||
+                (watch_size != CURVE_WATCH_SIZE_1 &&
+                 watch_size != CURVE_WATCH_SIZE_2 &&
+                 watch_size != CURVE_WATCH_SIZE_4)) {
+                result = curve_parse_fail(err, err_len,
+                                          "watch_size must be 1, 2 or 4");
+                goto out;
+            }
+        }
+        if (!curve_watchpoint_params_ok(watch_address, (uint8_t)watch_size)) {
+            result = curve_parse_fail(err, err_len, "bad watchpoint address");
+            goto out;
+        }
+        cfg->watch_address = watch_address;
+        cfg->watch_size = (uint8_t)watch_size;
+        cfg->watch_access = (uint8_t)CURVE_WATCH_ACCESS_WRITE;
+        if (access_item != NULL) {
+            if (!cJSON_IsString(access_item) || access_item->valuestring == NULL ||
+                (strcmp(access_item->valuestring, "write") != 0 &&
+                 strcmp(access_item->valuestring, "readwrite") != 0)) {
+                result = curve_parse_fail(err, err_len,
+                                          "watch_access must be \"write\" "
+                                          "or \"readwrite\"");
+                goto out;
+            }
+            cfg->watch_access = (strcmp(access_item->valuestring, "readwrite") == 0)
+                                    ? (uint8_t)CURVE_WATCH_ACCESS_RW
+                                    : (uint8_t)CURVE_WATCH_ACCESS_WRITE;
+        }
+        /* interval_us is the throttle floor; optional, 5 ms..1 s. */
+        if (item == NULL) {
+            cfg->interval_us = CURVE_TRIGGER_WATCH_DEFAULT_US;
+        } else if (!json_u32(item, (double)CURVE_TRIGGER_WATCH_MIN_US,
+                             (double)CURVE_TRIGGER_WATCH_MAX_US, &interval_us)) {
+            result = curve_parse_fail(err, err_len,
+                                      "interval_us must be %u..%u for watchpoint",
+                                      (unsigned)CURVE_TRIGGER_WATCH_MIN_US,
+                                      (unsigned)CURVE_TRIGGER_WATCH_MAX_US);
+            goto out;
+        } else {
+            cfg->interval_us = interval_us;
+        }
+    } else if (cfg->trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
         const cJSON *bp_item =
             cJSON_GetObjectItemCaseSensitive(root, "breakpoint_address");
         uint32_t bp_address = 0U;
@@ -643,6 +827,20 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
             goto out;
         }
         cfg->halt = cJSON_IsTrue(item) ? true : false;
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "want_pc");
+    if (item != NULL) {
+        if (!cJSON_IsBool(item)) {
+            result = curve_parse_fail(err, err_len, "want_pc must be a boolean");
+            goto out;
+        }
+        cfg->want_pc = cJSON_IsTrue(item) ? true : false;
+    }
+
+    result = parse_trigger_condition(root, cfg, err, err_len);
+    if (result != ESP_OK) {
+        goto out;
     }
 
     /* Periodic + halt: a debug tick costs ~1-3 ms; below 5 ms the target would

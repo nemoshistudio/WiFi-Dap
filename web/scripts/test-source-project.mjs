@@ -28,6 +28,7 @@ const esbuild = path.join(root, 'node_modules', '.bin', 'esbuild')
 const utilsOut = path.join(os.tmpdir(), `source-project-test-${process.pid}.mjs`)
 const labelsOut = path.join(os.tmpdir(), `source-labels-test-${process.pid}.mjs`)
 const loaderOut = path.join(os.tmpdir(), `source-loader-test-${process.pid}.mjs`)
+const lineTargetOut = path.join(os.tmpdir(), `source-line-target-test-${process.pid}.mjs`)
 
 execFileSync(esbuild, [
   path.join(root, 'src', 'utils', 'sourceProject.ts'),
@@ -43,9 +44,16 @@ execFileSync(esbuild, [
   '--bundle', '--format=esm', '--platform=node', '--alias:@=./src', `--outfile=${loaderOut}`,
 ], {stdio: 'pipe', cwd: root})
 
+// task-43 lineTarget 依赖 @/utils/sourceProject 别名
+execFileSync(esbuild, [
+  path.join(root, 'src', 'components', 'source', 'lineTarget.ts'),
+  '--bundle', '--format=esm', '--platform=node', '--alias:@=./src', `--outfile=${lineTargetOut}`,
+], {stdio: 'pipe', cwd: root})
+
 const sp = await import(utilsOut)
 const labels = await import(labelsOut)
 const loader = await import(loaderOut)
+const lineTarget = await import(lineTargetOut)
 
 let checks = 0
 let failures = 0
@@ -615,6 +623,107 @@ eq('labels: showAllProjectFiles 默认文案', labels.DEFAULT_SOURCE_BROWSER_LAB
 check('docs: SourceBrowser API 文档覆盖 task-29', ['liveValues', 'line-click', 'scrollToVariableByKey', 'lineAddresses', 'Files with variables'].every((needle) => sourceBrowserDocs.includes(needle)))
 
 // ---------------------------------------------------------------------------
+console.log('\n[14] task-43：activeFileLine 路径匹配（exact/suffix/basename）')
+// ---------------------------------------------------------------------------
+const lineProjectFiles = fileMetas([
+  'src/main.c',
+  'src/pid.c',
+  'lib/motor/motor.cpp',
+  'src/system/FreeRTOS/db.cpp',
+  'include/common.h',
+  'other/common.h',
+])
+const resolveLine = (target) => lineTarget.resolveFileLineTarget(target, lineProjectFiles)
+eq('lineTarget: relativePath exact', resolveLine({path: 'src/main.c', line: 10}), {
+  filePath: 'src/main.c', line: 10, match: 'exact', ambiguous: false, score: 110,
+})
+eq('lineTarget: windows relativePath exact', resolveLine({path: 'src\\main.c', line: 10})?.filePath, 'src/main.c')
+eq('lineTarget: full path suffix', (() => {
+  const result = resolveLine({path: '/work/build/proj/src/main.c', line: 12})
+  return result ? {filePath: result.filePath, match: result.match} : null
+})(), {filePath: 'src/main.c', match: 'suffix'})
+eq('lineTarget: windows full path', resolveLine({path: 'C:\\work\\proj\\src\\main.c', line: 12})?.filePath, 'src/main.c')
+eq('lineTarget: short suffix', (() => {
+  const result = resolveLine({path: 'FreeRTOS/db.cpp', line: 3})
+  return result ? {filePath: result.filePath, match: result.match} : null
+})(), {filePath: 'src/system/FreeRTOS/db.cpp', match: 'suffix'})
+eq('lineTarget: basename exact file', resolveLine({path: 'motor.cpp', line: 1})?.filePath, 'lib/motor/motor.cpp')
+const ambiguousLine = resolveLine({path: 'common.h', line: 2})
+eq('lineTarget: basename ambiguous flag', ambiguousLine?.ambiguous, true)
+eq('lineTarget: basename ambiguous shortest', ambiguousLine?.filePath, 'include/common.h')
+eq('lineTarget: relativePath candidate priority', (() => {
+  const result = resolveLine({relativePath: 'src/main.c', path: '/work/build/proj/src/main.c', line: 5})
+  return result ? {filePath: result.filePath, match: result.match} : null
+})(), {filePath: 'src/main.c', match: 'exact'})
+const lineWithAddress = resolveLine({path: 'src/main.c', line: 10, address: 0x08001235})
+eq('lineTarget: address passthrough', lineWithAddress?.address, 0x08001235)
+eq('lineTarget: address 0 dropped', resolveLine({path: 'src/main.c', line: 10, address: 0})?.address, undefined)
+eq('lineTarget: line floored', resolveLine({path: 'src/main.c', line: 10.9})?.line, 10)
+eq('lineTarget: invalid line 0', resolveLine({path: 'src/main.c', line: 0}), null)
+eq('lineTarget: invalid line negative', resolveLine({path: 'src/main.c', line: -3}), null)
+eq('lineTarget: invalid line NaN', resolveLine({path: 'src/main.c', line: Number.NaN}), null)
+eq('lineTarget: unmatched path', resolveLine({path: 'not/here/zzz.c', line: 1}), null)
+eq('lineTarget: empty path', resolveLine({path: '   ', line: 1}), null)
+eq('lineTarget: null target', lineTarget.resolveFileLineTarget(null, lineProjectFiles), null)
+eq('lineTarget: empty project', lineTarget.resolveFileLineTarget({path: 'src/main.c', line: 1}, []), null)
+eq('lineTarget: normalizes filePath', resolveLine({path: './src//main.c', line: 1})?.filePath, 'src/main.c')
+
+// ---------------------------------------------------------------------------
+console.log('\n[15] task-43：SourceBrowser PC 行高亮/scrollToLine 静态契约')
+// ---------------------------------------------------------------------------
+const sourceBrowser43 = fs.readFileSync(path.join(componentRoot, 'SourceBrowser.vue'), 'utf8')
+const labels43 = fs.readFileSync(path.join(componentRoot, 'labels.ts'), 'utf8')
+const lineTargetSource = fs.readFileSync(path.join(componentRoot, 'lineTarget.ts'), 'utf8')
+check('task43: prop activeFileLine({path,line})',
+  /activeFileLine\?: SourceActiveFileLine \| null/.test(sourceBrowser43)
+  && /import \{resolveFileLineTarget, type SourceActiveFileLine\} from '\.\/lineTarget'/.test(sourceBrowser43))
+check('task43: lineTarget 纯函数导出/注释完整',
+  /export function resolveFileLineTarget\(/.test(lineTargetSource)
+  && /exact -> suffix -> basename/.test(lineTargetSource)
+  && /export interface SourceActiveFileLine/.test(lineTargetSource))
+check('task43: expose scrollToLine(path,line)（兼容旧 line 签名）',
+  /scrollToLine: async \(pathOrLine: string \| number, line\?: number\): Promise<boolean>/.test(sourceBrowser43)
+  && /typeof pathOrLine === 'number'[\s\S]{0,120}scrollCodeLine\(pathOrLine\)/.test(sourceBrowser43))
+check('task43: expose highlightLine(path,line,{scroll}) + getActiveFileLine',
+  /highlightLine: async \(path: string, line: number, options: \{scroll\?: boolean\} = \{\}\): Promise<boolean>/.test(sourceBrowser43)
+  && /getActiveFileLine: \(\): \{filePath: string; line: number; address\?: number\} \| null/.test(sourceBrowser43))
+check('task43: applyActiveFileLine 用 resolveFileLineTarget + 找不到返回 false',
+  /async function applyActiveFileLine\(/.test(sourceBrowser43)
+  && /resolveFileLineTarget\(target, fileIndex\.value \?\? project\.files\)/.test(sourceBrowser43)
+  && /if \(!resolved\) return false/.test(sourceBrowser43))
+check('task43: prop activeFileLine 变化会打开/滚动并高亮 PC 行',
+  /watch\(\(\) => props\.activeFileLine, \(target\) => \{[\s\S]{0,140}applyActiveFileLine\(target, \{scroll: true\}\)/.test(sourceBrowser43)
+  && /'sb-line-pc': row\.pcLine/.test(sourceBrowser43) && /sb-pc-badge/.test(sourceBrowser43))
+check('task43: PC 行地址兜底给 gutter/断点',
+  /function addressForLine\(line: number\)/.test(sourceBrowser43)
+  && /resolveLineAddress\(props\.lineAddresses, path, line\)[\s\S]{0,220}pc\.address/.test(sourceBrowser43))
+check('task43: gutter 无地址 hover 提示（有地址时带 hex 地址）',
+  /function lineNoAddressHint\(line: number\)/.test(sourceBrowser43)
+  && /LINE_NO_ADDRESS_FALLBACK/.test(sourceBrowser43)
+  && /function gutterHint\(line: number, address: number \| undefined\)/.test(sourceBrowser43)
+  && /gutterTitle: gutterHint\(lineNumber, gutterAddress\)/.test(sourceBrowser43)
+  && /:title="row\.gutterTitle"/.test(sourceBrowser43)
+  && /:class="\{'no-address': row\.gutterAddress === undefined\}"/.test(sourceBrowser43)
+  && /\.sb-gutter\.no-address/.test(sourceBrowser43))
+check('task43: labels 可选 activePcLine/lineNoAddressHint 且不破坏 DEFAULT 契约',
+  /activePcLine\?: string/.test(labels43) && /lineNoAddressHint\?: string/.test(labels43)
+  && !Object.prototype.hasOwnProperty.call(labels.DEFAULT_SOURCE_BROWSER_LABELS, 'activePcLine')
+  && !Object.prototype.hasOwnProperty.call(labels.DEFAULT_SOURCE_BROWSER_LABELS, 'lineNoAddressHint'))
+check('task43: 不清除 selected/live（applyActiveFileLine 不写 selectedKeys/liveValues）',
+  (() => {
+    const start = sourceBrowser43.indexOf('async function applyActiveFileLine(')
+    const end = sourceBrowser43.indexOf('// ---- 变量 token 点击', start) > start
+      ? sourceBrowser43.indexOf('// ---- 变量 token 点击', start)
+      : start + 2400
+    const block = sourceBrowser43.slice(start, end)
+    return !/selectedKeySet\.value\s*=/.test(block) && !/liveValues\s*=/.test(block)
+  })())
+check('task43: docs 覆盖 activeFileLine/scrollToLine/highlightLine/无地址提示/task-44 调用',
+  ['activeFileLine', 'scrollToLine(path, line)', 'highlightLine', 'lineNoAddressHint', 'task-44'].every((needle) => sourceBrowserDocs.includes(needle)))
+check('task43: index.ts 导出 lineTarget API',
+  fs.readFileSync(path.join(componentRoot, 'index.ts'), 'utf8').includes('resolveFileLineTarget'))
+
+// ---------------------------------------------------------------------------
 console.log('\n[10] 可选：只读扫描真实项目根目录')
 // ---------------------------------------------------------------------------
 const realRoot = process.env.REFERENCE_ROOT ?? '$HOME/reference firmware'
@@ -693,6 +802,10 @@ if (fs.existsSync(realRoot)) {
       {name: 'probe_var', shortName: 'probe_var', relativeFile: realFirstSource.path, line: 1, address: 0x20000000, sampleable: true, sample: {address: 0x20000000}},
     ], realMeta.files)
     eq('real: variable maps to real source path', realMatch.matchedCount, 1)
+    const realLineTarget = lineTarget.resolveFileLineTarget({path: realFirstSource.path, line: 1}, realMeta.files)
+    eq('real: lineTarget resolves real relative path', realLineTarget?.filePath, realFirstSource.path)
+    const realAbsTarget = lineTarget.resolveFileLineTarget({path: `/work/reference/${realFirstSource.path}`, line: 1}, realMeta.files)
+    eq('real: lineTarget resolves real full path suffix', realAbsTarget?.filePath, realFirstSource.path)
     eq('real: common source dirs indexed', realFullMeta.tree.dirs.map((dir) => dir.name).includes('src'), true)
   }
 } else {
@@ -701,7 +814,7 @@ if (fs.existsSync(realRoot)) {
 
 // ---------------------------------------------------------------------------
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'}: ${checks - failures}/${checks} checks passed`)
-for (const file of [utilsOut, labelsOut, loaderOut]) {
+for (const file of [utilsOut, labelsOut, loaderOut, lineTargetOut]) {
   try {
     fs.unlinkSync(file)
   } catch {

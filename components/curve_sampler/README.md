@@ -1,4 +1,4 @@
-# WiFi Dap - curve page device-local sampler (Phase 0/1/2/2.5, protocol v2)
+# WiFi Dap - curve page device-local sampler (Phase 0/1/2/2.5 + watchpoint/condition trigger, protocol v2)
 
 Firmware half of `docs/curve-local-sampler.md`: the Web curve page sends its
 `AddressExpr` series configuration over HTTP, this component samples the STM32
@@ -18,6 +18,7 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 | POST | `/api/curve/stop` | idempotent, optional body |
 | GET | `/api/curve/status` | sampler status JSON |
 | GET | `/api/curve/frames?since=&max=` | binary CVF2, `application/octet-stream` |
+| GET | `/ws/curve` | WebSocket push subscription (CVF2 batches, P1.11) |
 
 `POST /api/curve/start` body (schema identical to the Web `AddressExpr`):
 
@@ -49,16 +50,45 @@ Protocol v2 multi-group / loclist variants (see "Protocol v2" below):
    {"id":1,"series":[...]}]}
 ```
 
+P1.8 conditional trigger can be combined with any trigger mode:
+
+```json
+{"interval_us":20000,"halt":true,
+ "trigger_condition":{"address":536870912,"size":4,"op":"gt","value":100,
+                      "signed":false,"mode":"once","stop_after":true},
+ "series":[{"id":0,"size":4,"expr":{"kind":"addr","address":536870916}}]}
+```
+
+P1.8/P1.9 DWT data watchpoint trigger (core halts itself on a variable write or
+read+write):
+
+```json
+{"trigger":"watchpoint","watch_address":536870912,"watch_size":4,
+ "watch_access":"write","interval_us":20000,
+ "series":[{"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}}]}
+```
+
 Limits enforced by the parser (`src/curve_json.c`): `trigger` is `periodic`
-(default) or `breakpoint`; `interval_us` is 5000..200000 for periodic and the
-throttle floor 5000..1000000 for breakpoint (default 20000); `groups` 1..8
+(default), `breakpoint` (FPB) or `watchpoint` (DWT); `interval_us` is
+5000..200000 for periodic and the throttle floor 5000..1000000 for
+breakpoint/watchpoint (default 20000); `groups` 1..8
 (legacy root `series` = one group), 1..32 series per group, 256 series total,
 `size` 1..8, per-group `sum(size)` <= 256, expression depth <= 8, `variants`
 1..16 per series; expression kinds
 `addr`/`reg`/`cfa`/`add`/`deref`.  `halt=false` rejects `reg`/`cfa`
 expressions in periodic mode (no register can be read while the core runs);
 breakpoint mode ignores `halt` because the FPB hit already halted the core.
-`breakpoint_address` must be a Thumb instruction address in target flash
+`want_pc` (optional bool, default true) controls the CVF2 PC field; a request
+may disable it.  Optional `trigger_condition` (P1.8, works on top of every
+trigger mode): `address` (u32, required, inside an allowed target memory
+window), `size` (1/2/4, default 4), `op` (`eq`/`ne`/`lt`/`le`/`gt`/`ge`, also
+`==`/`!=`/`<`/`<=`/`>`/`>=`), `value` (int32, required), `signed` (bool, default
+false), `mode` (`once` default or `continuous`) and `stop_after` (bool, default
+false).  Invalid objects/fields return HTTP 400.  For `trigger=watchpoint`: `watch_address` (required, must be
+naturally aligned to the size and inside an allowed target memory window),
+`watch_size` (1/2/4, default 4) and `watch_access` (`"write"` default or
+`"readwrite"`) select the DWT comparator; `halt` is ignored because the DWT hit
+already halted the core.  `breakpoint_address` must be a Thumb instruction address in target flash
 (0x08000000..0x08FFFFFF, bit0 ignored); anything else returns HTTP 400
 `{"ok":false,"err":"bad breakpoint address"}`.
 
@@ -69,18 +99,36 @@ version=2, flags bit0=gap, count u16, first_seq u32, frame_bytes u16 = max group
 payload, reserved) and variable-length frames (`seq u32`, `timestamp_us u64`,
 `group u8`, `payload_len u16`, payload bytes).  CVF1 is no longer produced.
 
+**PC extension (CVF2 flags bit1 = PC_PRESENT)**: when the session can read r15
+(periodic `halt=true`, or breakpoint mode) every frame carries the current PC
+after `payload_len`: frame metadata becomes 19 B (`... payload_len u16, pc u32`,
+PC with Thumb bit0 cleared).  No-halt periodic sessions cannot read DCRSR, so
+they leave bit1 clear and keep the 15 B metadata.  The batch header size and
+layout are unchanged; decoders **must** drive the frame layout from
+`flags.bit1`.  `want_pc:false` in the start request disables the PC field even
+in halt/breakpoint/watchpoint mode (default `true`).
+
+`flags.bit2 = TRIGGERED` marks a batch that contains at least one trigger-event
+frame (DWT watchpoint trigger); the exact sequence number is
+`status.trigger_seq`.  `flags.bit3 = CONDITION` marks a batch that contains at
+least one frame whose `trigger_condition` matched; the exact seq is
+`status.condition_trigger_seq`.  The wire format has no per-frame marker bit, so
+batch flags are the compatible minimum (watchpoint-mode frames are all trigger
+frames; condition frames are all frames that matched, not every frame).  `/api/curve/status` reports
+`pc_available` and the last captured `last_pc`.
+
 Ring: hard-bounded by an **8 KiB heap budget**; the capacity is
-`clamp(8192 / (15 + frame_bytes), 16, 512)` frames, so a large payload buys
-fewer slots instead of a larger allocation:
+`clamp(8192 / (stride), 16, 512)` frames with
+`stride = (PC?19:15) + frame_bytes`, so a large payload buys fewer slots instead
+of a larger allocation:
 16 B -> 264 frames (~8.2 KiB), 64 B -> 103, 128 B -> 57, 256 B (one full group)
--> 30 frames (~8.1 KiB).  The 16-frame floor is only a math guard (never
+-> 30 frames (~8.1 KiB); with the PC field: 234 / 98 / 55 / 29 frames.  The 16-frame floor is only a math guard (never
 reached within the 256 B payload cap); if `malloc` still fails the engine halves
 the count down to 8 frames.  This guarantees `start` for 32x8B / 64x8B / 256+
 series payloads without the old ~34 KiB worst case.  `ring_frames` in
 `/api/curve/status` reports the actual capacity (never a nominal value);
-history at 50 Hz is ~5.3 s / 2.1 s / 1.1 s / 0.6 s for the sizes above.  The 128-frame floor keeps the worst-case allocation bounded while still
-covering >2.5 s of history at 50 Hz (`ring_frames` in status reports the
-actual capacity).  `overwritten` counts **frames that were
+history at 50 Hz is ~5.3 s / 2.1 s / 1.1 s / 0.6 s for the sizes above.
+`overwritten` counts **frames that were
 evicted before any `frames?since=...` response delivered them** (a served
 cursor advances on every non-204 batch, including `since=0`); a client that
 keeps polling at the sampling rate therefore stays at `overwritten=0` even
@@ -93,7 +141,13 @@ and `served_seq` (highest seq handed to a client in this session), plus the
 Phase 2 fields `trigger` (`"periodic"`/`"breakpoint"`), `breakpoint_address`,
 `hits`, `sampled`, `throttled`, the Phase 2.5 field `out_of_scope` (number of
 PC-gated/variant series values skipped because the halted core's PC did not
-match), and the protocol v2 fields `group_count`/`current_group`.  The start
+match), the protocol v2 fields `group_count`/`current_group`, the CVF2 PC
+fields `pc_available` (bool) / `last_pc` (last captured PC, Thumb bit0 cleared),
+the DWT watchpoint fields `watchpoint_armed`, `watchpoint_address`,
+`watchpoint_hits`, `trigger_seq` (seq of the last trigger-event frame), and the
+condition fields `condition_armed` (still evaluating), `condition_met`
+(latched), `condition_hits` and `condition_trigger_seq` (seq of the last
+condition-match frame).  The start
 response adds `group_count`, `series_count` (total) and `sample_bytes` (max
 group payload).
 
@@ -202,6 +256,11 @@ function PC range:
   (else HTTP 400 "variants require halt=true"); breakpoint mode is fine because
   the FPB hit already halted the core.  A plain `expr` + single `pc_low/pc_high`
   gate keeps working as before; a series needs `expr` or `variants`.
+* **CVF2 PC**: batch `flags.bit1` = PC_PRESENT; when set, every frame has a
+  `pc u32` (Thumb bit0 cleared) after `payload_len` (19 B metadata vs 15 B).
+  periodic `halt=true` reads r15 once per tick (same DCRSR read used by the PC
+  gate/variants), breakpoint reuses the halted core's PC at the FPB hit; no-halt
+  cannot read DCRSR and leaves the flag clear.  `want_pc:false` opts out.
 * **CVF2**: per-frame `group`/`payload_len` allow different group payload sizes;
   the ring slots are `max(group sample_bytes)`.  `served_seq`/`overwritten`/`gap`
   semantics are unchanged (one ring for all groups).
@@ -224,6 +283,139 @@ function PC range:
   series <=256, variants/series 1..16, total variants <=256, expression nodes
   <=768 (each node 12 B).
 
+## P1.8: conditional trigger `trigger_condition`
+
+`trigger_condition` is an optional, trigger-mode-independent condition
+evaluated **after** every sampled tick:
+
+1. The sampler reads `address`/`size` (1/2/4 bytes, little-endian) through the
+   same local SWD/AP path used for series (works while the core is halted *or*
+   running, so it can be combined with periodic no-halt too).
+2. The raw value is zero-extended (`signed=false`, default) or sign-extended
+   (`signed=true`) and compared with the int32 `value` using `op`.
+3. A match marks the just-recorded frame: CVF2 batch `flags.bit3 =
+   CONDITION_TRIGGERED` (exact seq in `status.condition_trigger_seq`), increments
+   `status.condition_hits` and latches `status.condition_met`.
+   - `mode:"once"` (default): only the first match is evaluated/marked
+     (`condition_armed` becomes false, `condition_met` stays true);
+   - `mode:"continuous"`: every matching tick is marked/counted.
+   - `stop_after:true`: after a match the session stops gracefully (target
+     resumed, DAP released, `running=false`, status message
+     `"stopped: trigger_condition reached"`).
+4. A condition read failure counts as a failed tick (same 5-consecutive-error
+   recovery policy as series reads) - the frame is still recorded with its
+   previous invalid flag and no condition mark.
+5. Pre/post trigger: the ring keeps the most recent frames; the Web client uses
+   `condition_trigger_seq` to pick the frames around the match (the frames
+   before it are the pre-trigger window, later ones post-trigger).
+
+Limits/notes:
+
+* `value` is an int32 (`-2147483648..2147483647`); `size` is 1/2/4 (no 8-byte
+  compare yet).  Address must be inside DTCM/AXI/flash like other target reads.
+* The condition is sampled after the series snapshot, so it reflects a value
+  read slightly later in the same tick (typically immediately after); it does
+  not change the trigger mode itself (periodic/breakpoint/watchpoint still
+  decide when a tick is sampled).
+* `stop_after` stops the sampling session (`running=false`) but leaves the
+  frames in the ring; clients can still fetch them via HTTP/WS until the next
+  start.
+
+## P1.8/P1.9: DWT data watchpoint trigger
+
+`trigger=watchpoint` turns the session into a data-access-driven sampler using
+Cortex-M7 DWT comparator 0:
+
+1. Bring-up + DAP hand-off are the same as the other trigger modes; the target
+   is first resumed if it was halted.
+2. The sampler verifies DWT availability (`DWT_CTRL.NUMCOMP > 0`), requires
+   `DWT_FUNCTION0 == 0` (free comparator) and saves `DEMCR`, `DWT_COMP0`,
+   `DWT_MASK0`, `DWT_FUNCTION0`.  It then sets `DEMCR.TRCENA` and programs
+   `DWT_COMP0 = watch_address`, `DWT_MASK0 = log2(watch_size)`,
+   `DWT_FUNCTION0 = 6` (write) or `7` (read+write).  Comparator 1..n and the FPB
+   are not touched.
+3. The worker polls `DHCSR.S_HALT` every ~1 ms on the local SWD link (esp_timer
+   one-shot + task notification; httpd is never involved).  On halt it verifies
+   `DWT_FUNCTION0.MATCHED` (bit24) so unrelated halts are not recorded as
+   watchpoint events.
+4. On a real hit the frame is sampled exactly like the breakpoint path (PC
+   capture, PC gate/variants, group rotation, CVF2 record with the trigger
+   marker), then the comparator is disabled (`DWT_FUNCTION0 = 0`), the core is
+   resumed (verified via `DHCSR.S_HALT` clear), the `interval_us` throttle is
+   waited and the comparator is re-armed at the top of the loop.
+5. `stop`/error restores `DWT_FUNCTION0/COMP0/MASK0` and `DEMCR`, makes sure the
+   core runs and releases the DAP.  `watchpoint_hits` counts triggers and
+   `trigger_seq` is the CVF2 seq of the last triggered frame, so the Web client
+   can fetch the pre/post-trigger window from the ring (the ring always keeps
+   the most recent frames).
+
+Watchpoint limitations / risks:
+
+* Only RAM-ish target memory windows are accepted (DTCM/AXI SRAM/flash filter,
+  same as sampling reads), and the address must be naturally aligned to
+  `watch_size`.  Flash watchpoints would never match writes.
+* `DEMCR.TRCENA` is shared with ITM/trace: the original `DEMCR` is restored on
+  stop, but another debugger owning DWT/ITM at the same time is a resource
+  conflict (comparator 0 busy is rejected with a clear start error).
+* DWT data watchpoints halt the core on *every* matching access until the
+  comparator is disarmed; the throttle (`interval_us`, 5..1000 ms) controls how
+  often the target is allowed to stop again.
+* A sticky/unexpected halt that is not our comparator is resumed and counted;
+  5 consecutive unexpected halts / SWD errors stop the session and restore DWT.
+* Conditional (`trigger_condition`) evaluation is implemented on top of every
+  trigger mode (see "P1.8: conditional trigger" above); the DWT address/access
+  match is still what makes a watchpoint tick happen, the condition is an
+  additional per-tick address comparison.
+* `watch_access:"read"` is not exposed (contract only lists write/readwrite);
+  the DWT read-only encoding 5 is unused.
+
+## P1.11: WebSocket CVF2 frame push (`/ws/curve`)
+
+Optional low-latency replacement for HTTP polling: after
+`POST /api/curve/start` the browser opens `GET /ws/curve` (WebSocket, same
+origin + `web_host_guard` policy) and subscribes; the sampler pushes the same
+CVF2 batches that `GET /api/curve/frames` would return.  HTTP polling remains
+fully functional (it is not disabled by a WS subscription).
+
+- **Client -> server (text JSON, one message per frame, no fragmentation):**
+  - `{"cmd":"subscribe"}` - start pushing from the oldest retained ring frame
+    (like HTTP `since=0`); reply
+    `{"ok":true,"cmd":"subscribe","interval_ms":20,"max_batch":32,"format":"CVF2"}`.
+  - `{"cmd":"unsubscribe"}` - stop pushing, keep the socket open;
+    reply `{"ok":true,"cmd":"unsubscribe"}`.
+  - `{"cmd":"ack","seq":N}` - optional flow-control ack (monotonic, clamped to
+    the last pushed seq); no reply.  The device currently pushes on a fixed
+    20 ms cadence and does not retransmit; ack is informational/for Web display.
+  - `{"cmd":"ping"}` - reply `{"ok":true,"cmd":"pong"}` (WS PING control frames
+    are also answered with PONG automatically).
+- **Server -> client (binary):** one CVF2 batch per frame, exactly the format of
+  `GET /api/curve/frames` (16 B `CVF2` header with `flags` bit0 gap / bit1
+  PC_PRESENT / bit2 TRIGGERED, then variable-length frames).  Decode it with the
+  same decoder as the HTTP path; there is no HTTP status line.
+- **Errors (text JSON):** `{"ok":false,"err":"bad json"}`,
+  `{"ok":false,"err":"cmd missing"}`, `{"ok":false,"err":"unknown cmd"}`,
+  `{"ok":false,"err":"not connected"}`.  A client that sends oversized/binary/
+  fragmented messages, or whose socket send fails, is disconnected.
+- **Backpressure:** at most `CURVE_WS_PUSH_INTERVAL_MS` (20 ms) between batches
+  per client and at most `CURVE_WS_MAX_BATCH_FRAMES` (32) frames per batch; if
+  heap allocation or the socket send fails the batch is skipped (counted in the
+  per-client `dropped_batches`) and a client with send errors is detached.  The
+  push runs on its own FreeRTOS task, so a slow WebSocket client never blocks
+  the sampler worker or the httpd task.
+- **Limits:** `CURVE_WS_MAX_CLIENTS = 4` concurrent sockets; one subscription
+  table entry per socket; no WebSocket fragmentation support for client
+  messages (<= 256 B JSON commands).
+- **Relationship to HTTP polling:** both paths read the same ring and advance
+  the same `served`/`overwritten` accounting (single-consumer assumption), so a
+  page should use either WS push or HTTP polling for a session, not both
+  simultaneously (otherwise `overwritten` may count frames delivered to only
+  one of the consumers).
+- **Suggested Web flow:** `POST /api/curve/start` -> open `ws(s)://<host>/ws/curve`
+  -> send `{"cmd":"subscribe"}` -> on each binary message decode CVF2 and feed
+  the chart (`flags.bit2` marks trigger batches, `status.trigger_seq` the exact
+  trigger frame) -> `POST /api/curve/stop` (or close) on page unload; fall back
+  to HTTP polling if the WS cannot connect.  `status` remains on HTTP.
+
 ## Implementation notes
 
 * `src/curve_http.c` - registers **two independent URI modules** through
@@ -238,6 +430,10 @@ function PC range:
   tested together with the ring/config code).
 * `src/curve_cvf2.c` - pure-C CVF2 batch-header / frame-metadata writer (host
   tested byte-for-byte).
+* `src/curve_ws_core.c` - pure-C WebSocket subscription/cursor/backpressure
+  state (host tested: attach/subscribe/plan/ack/drop/table limits).
+* `src/curve_ws.c` - `/ws/curve` IDF glue: WS URI handler, JSON command
+  parsing, dedicated push task (`httpd_ws_send_frame_async` with a send lock).
 * `src/curve_ring.c` - pure-C ring bookkeeping (capacity clamp, write
   slot/seq, overwritten accounting against the served cursor, read planning,
   gap flag).  No RTOS/ESP dependencies, exercised by the host regression test.
@@ -294,13 +490,25 @@ function PC range:
   reading potentially stale stack data.  Use periodic halt or breakpoint mode
   for stack-frame variables.
 * Protocol v2 emits CVF2 only; a Web client must decode v1 and v2 if it also
-  talks to older firmware.
+  talks to older firmware.  The CVF2 frame layout depends on `flags.bit1`
+  (PC_PRESENT): old decoders that ignore bit1 will misread frames from
+  halt/breakpoint sessions (PC bytes shift the payload), so any client must
+  read the flag before decoding.
 * The static config is a single instance: only one sampler session at a time
   (as before), and a new start request while running returns 409 busy before
   the request body is parsed.
 * The ring is intentionally small (8 KiB budget): at 256 B/frame only 30 frames
   (~0.6 s at 50 Hz) are retained.  The Web UI polls every 30-50 ms, so this is
   enough; a stalled browser will see `overwritten` grow sooner than before.
+* `trigger_condition` compares an int32 value only (no 64-bit compare yet) and
+  is evaluated after the series snapshot; the CVF2 bit3 marker is per batch
+  with the exact seq in `status.condition_trigger_seq`.
+* WebSocket push and HTTP polling share the single ring/served cursor; use one
+  delivery path per session.  WS client commands must be single unfragmented
+  text frames <= 256 B; the endpoint is limited to 4 concurrent sockets.
+* DWT watchpoint triggers sample the halted frame *after* the watched access;
+  the pre-trigger frames are whatever the ring already holds (poll promptly to
+  keep the window useful).  Conditional expressions are not implemented yet.
 * Group weights are a backend-only scheduling feature for now; the Web UI does
   not send `weight` and always gets equal round-robin.  A weight only changes
   how often a group is sampled, not its refresh timestamp cadence per group.

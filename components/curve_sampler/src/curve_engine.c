@@ -42,6 +42,7 @@
 #include "wt_target_flash.h"
 
 #include "curve_priv.h"
+#include "curve_ws.h"
 
 /* ------------------------------------------------------------------------- */
 /* engine state                                                              */
@@ -80,6 +81,17 @@ static struct {
     volatile bool stop_req;
     curve_worker_state_t worker_state;
     bool running;
+    bool capture_pc;             /* session can read r15 -> CVF2 PC_PRESENT */
+    bool ring_with_pc;           /* ring layout includes the pc array */
+    uint32_t last_pc;            /* last captured PC (Thumb bit0 cleared) */
+    /* P1.8/P1.9 DWT watchpoint state (worker task only) */
+    bool dwt_active;
+    bool watch_armed;
+    uint32_t dwt_saved_demcr;
+    uint32_t dwt_saved_comp;
+    uint32_t dwt_saved_mask;
+    uint32_t dwt_saved_function;
+    uint32_t watch_compare;
     uint8_t current_group;       /* next group to sample (status field) */
     uint8_t schedule_pos;        /* weighted round-robin position */
     bool dap_held;               /* worker task only */
@@ -100,6 +112,7 @@ static struct {
     uint8_t *ring_payload;
     uint8_t *ring_group;         /* CVF2 per-frame group index */
     uint16_t *ring_len;          /* CVF2 per-frame payload_len */
+    uint32_t *ring_pc;           /* CVF2 per-frame PC (when capture_pc) */
     curve_ring_t ring;           /* seq/count/served/overwritten bookkeeping */
 
     /* Phase 2: FPB breakpoint state (worker task only) */
@@ -118,6 +131,13 @@ static struct {
     uint32_t stat_hits;        /* FPB breakpoint hits */
     uint32_t stat_sampled;     /* frames written for breakpoint hits */
     uint32_t stat_throttled;   /* hits dropped by throttle (reserved: always 0) */
+    uint32_t stat_watch_hits;  /* DWT watchpoint triggers observed */
+    uint32_t stat_trigger_seq; /* seq of the last trigger-event frame */
+    /* P1.8 trigger_condition state (worker task only) */
+    bool cond_armed;
+    bool cond_met;
+    uint32_t cond_hits;
+    uint32_t cond_trigger_seq;
 
     curve_selftest_t selftest;
 } s_engine;
@@ -275,12 +295,13 @@ static esp_err_t curve_bringup(void)
 /* ring buffer                                                               */
 /* ------------------------------------------------------------------------- */
 
-static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
+static esp_err_t engine_ring_prepare(uint16_t frame_bytes, bool with_pc)
 {
     size_t seq_bytes;
     size_t ts_bytes;
     size_t group_bytes;
     size_t len_bytes;
+    size_t pc_bytes;
     size_t payload_bytes;
     size_t total_bytes;
     uint32_t capacity;
@@ -291,12 +312,13 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
     if (frame_bytes == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
-    capacity = curve_ring_capacity_for(frame_bytes);
+    capacity = curve_ring_capacity_for(frame_bytes, with_pc);
     if (capacity == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_engine.ring_block != NULL && s_engine.ring_frame_bytes == frame_bytes &&
-        s_engine.ring_capacity == capacity) {
+        s_engine.ring_capacity == capacity && s_engine.ring_with_pc == with_pc) {
+        s_engine.capture_pc = with_pc;
         ESP_LOGI(CURVE_TAG, "reusing ring (%u frames x %u B)",
                  (unsigned)capacity, (unsigned)frame_bytes);
     } else {
@@ -310,9 +332,11 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
         s_engine.ring_ts = NULL;
         s_engine.ring_group = NULL;
         s_engine.ring_len = NULL;
+        s_engine.ring_pc = NULL;
         s_engine.ring_payload = NULL;
         s_engine.ring_frame_bytes = 0U;
         s_engine.ring_capacity = 0U;
+        s_engine.ring_with_pc = false;
         block = NULL;
         attempt_capacity = capacity;
         while (attempt_capacity >= 8U) {
@@ -320,9 +344,10 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
             ts_bytes = sizeof(uint64_t) * (size_t)attempt_capacity;
             group_bytes = sizeof(uint8_t) * (size_t)attempt_capacity;
             len_bytes = sizeof(uint16_t) * (size_t)attempt_capacity;
+            pc_bytes = with_pc ? sizeof(uint32_t) * (size_t)attempt_capacity : 0U;
             payload_bytes = (size_t)frame_bytes * (size_t)attempt_capacity;
             total_bytes = seq_bytes + ts_bytes + group_bytes + len_bytes +
-                          payload_bytes;
+                          pc_bytes + payload_bytes;
             block = (uint8_t *)malloc(total_bytes);
             if (block != NULL) {
                 capacity = attempt_capacity;
@@ -344,12 +369,17 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
         offset += group_bytes;
         s_engine.ring_len = (uint16_t *)(block + offset);
         offset += len_bytes;
+        s_engine.ring_pc = with_pc ? (uint32_t *)(block + offset) : NULL;
+        offset += pc_bytes;
         s_engine.ring_payload = block + offset;
         s_engine.ring_block = block;
         s_engine.ring_frame_bytes = frame_bytes;
         s_engine.ring_capacity = capacity;
-        ESP_LOGI(CURVE_TAG, "ring: %u frames x %u B CVF2 (%u bytes heap)",
-                 (unsigned)capacity, (unsigned)frame_bytes, (unsigned)total_bytes);
+        s_engine.ring_with_pc = with_pc;
+        s_engine.capture_pc = with_pc;
+        ESP_LOGI(CURVE_TAG, "ring: %u frames x %u B CVF2%s (%u bytes heap)",
+                 (unsigned)capacity, (unsigned)frame_bytes,
+                 with_pc ? " + PC" : "", (unsigned)total_bytes);
     }
 
     curve_ring_reset(&s_engine.ring, s_engine.ring_capacity);
@@ -362,18 +392,30 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
     s_engine.stat_hits = 0U;
     s_engine.stat_sampled = 0U;
     s_engine.stat_throttled = 0U;
+    s_engine.last_pc = 0U;
     s_engine.current_group = 0U;
+    s_engine.watch_armed = false;
+    s_engine.dwt_active = false;
+    s_engine.stat_watch_hits = 0U;
+    s_engine.stat_trigger_seq = 0U;
+    s_engine.cond_armed = false;
+    s_engine.cond_met = false;
+    s_engine.cond_hits = 0U;
+    s_engine.cond_trigger_seq = 0U;
     return ESP_OK;
 }
 
-static void engine_record_frame(const uint8_t *payload, uint16_t payload_len,
-                                uint8_t group, uint64_t timestamp_us,
-                                uint32_t invalid, uint32_t out_of_scope,
-                                bool tick_ok, uint32_t tick_us,
-                                esp_err_t tick_err)
+/** Append one frame to the ring; returns the frame seq (0 when not written). */
+static uint32_t engine_record_frame(const uint8_t *payload, uint16_t payload_len,
+                                    uint8_t group, uint32_t pc, bool triggered,
+                                    bool condition, uint64_t timestamp_us,
+                                    uint32_t invalid, uint32_t out_of_scope,
+                                    bool tick_ok, uint32_t tick_us,
+                                    esp_err_t tick_err)
 {
     uint32_t slot = 0U;
     uint32_t seq = 0U;
+    uint32_t written_seq = 0U;
 
     engine_lock();
     if (s_engine.ring_block != NULL && s_engine.ring_payload != NULL &&
@@ -384,12 +426,21 @@ static void engine_record_frame(const uint8_t *payload, uint16_t payload_len,
         if (seq != 0U) {
             s_engine.ring_seq[slot] = seq;
             s_engine.ring_ts[slot] = timestamp_us;
-            s_engine.ring_group[slot] = group;
+            s_engine.ring_group[slot] =
+                curve_ring_group_encode(group, triggered, condition);
             s_engine.ring_len[slot] = payload_len;
+            if (s_engine.capture_pc && s_engine.ring_pc != NULL) {
+                s_engine.ring_pc[slot] = pc;
+                s_engine.last_pc = pc;
+            }
             memcpy(s_engine.ring_payload +
                        (size_t)slot * s_engine.ring_frame_bytes,
                    payload, payload_len);
             curve_ring_commit_write(&s_engine.ring);
+            written_seq = seq;
+            if (triggered) {
+                s_engine.stat_trigger_seq = seq;
+            }
         }
         s_engine.stat_invalid += invalid;
         s_engine.stat_out_of_scope += out_of_scope;
@@ -403,6 +454,61 @@ static void engine_record_frame(const uint8_t *payload, uint16_t payload_len,
         }
     }
     engine_unlock();
+    if (written_seq != 0U) {
+        /* Wake the WebSocket push task (P1.11); it throttles per client. */
+        curve_ws_notify_frame();
+    }
+    return written_seq;
+}
+
+/* ------------------------------------------------------------------------- */
+/* P1.8 conditional trigger: read + compare one address after each sample     */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief Evaluate the optional trigger_condition after a tick was sampled.
+ *
+ * @param match_out true when the configured comparison matched this tick
+ * @param stop_out  true when `stop_after` requests ending the session now
+ * @return ESP_OK or a read error (the caller treats it as a failed tick)
+ */
+static esp_err_t curve_condition_evaluate(bool *match_out, bool *stop_out)
+{
+    const curve_config_t *cfg = s_engine.cfg;
+    uint8_t bytes[CURVE_COND_SIZE_MAX] = {0U, 0U, 0U, 0U};
+    uint32_t raw = 0U;
+    bool match;
+    esp_err_t err;
+
+    *match_out = false;
+    *stop_out = false;
+    if (cfg == NULL || !cfg->cond_enabled || !s_engine.cond_armed) {
+        return ESP_OK;
+    }
+    err = tf_swd_read_mem(cfg->cond_address, bytes, cfg->cond_size);
+    if (err != ESP_OK) {
+        return err;
+    }
+    for (uint8_t i = 0U; i < cfg->cond_size; i++) {
+        raw |= (uint32_t)bytes[i] << (8U * i);
+    }
+    match = curve_condition_match(raw, cfg->cond_size, cfg->cond_signed,
+                                  cfg->cond_op, cfg->cond_value);
+    if (match) {
+        engine_lock();
+        s_engine.cond_hits++;
+        s_engine.cond_met = true;
+        if (cfg->cond_mode == (uint8_t)CURVE_COND_MODE_ONCE) {
+            s_engine.cond_armed = false; /* latch: only the first match counts */
+        }
+        engine_unlock();
+        *stop_out = cfg->cond_stop_after;
+        ESP_LOGI(CURVE_TAG, "condition met (raw=0x%08X op=%s value=%d)",
+                 (unsigned)raw, curve_cond_op_name(cfg->cond_op),
+                 (int)cfg->cond_value);
+    }
+    *match_out = match;
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -670,9 +776,10 @@ static void curve_periodic_loop(void)
             }
         }
 
-        /* One PC read per tick when the current group needs it.  DCRSR is only
+        /* One PC read per tick when the group needs it for PC gating/variants
+         * or when CVF2 frames carry the PC (CVF2 flags bit1).  DCRSR is only
          * readable while the core is halted (no-halt mode keeps pc_state=0). */
-        if (group->pc_needed && halted) {
+        if ((group->pc_needed || s_engine.capture_pc) && halted) {
             esp_err_t err = tf_swd_read_reg(15U, &pc_value);
             if (err == ESP_OK) {
                 pc_state = 1U;
@@ -700,22 +807,45 @@ static void curve_periodic_loop(void)
             }
         }
 
-        if (halted) {
-            esp_err_t err = curve_resume_core();
+        /* P1.8: optional trigger_condition read/compare after the sample. */
+        {
+            bool cond_match = false;
+            bool cond_stop = false;
+            esp_err_t err = curve_condition_evaluate(&cond_match, &cond_stop);
+
             if (err != ESP_OK) {
                 tick_ok = false;
-                tick_err = err;
-            } else {
-                halted = false;
+                if (tick_err == ESP_OK) {
+                    tick_err = err;
+                }
+                (void)tf_swd_recover_bus();
             }
-        }
-
-        {
-            int64_t t_end = esp_timer_get_time();
-
-            engine_record_frame(payload, payload_len, group_index,
-                                (uint64_t)t_start, invalid, out_of_scope,
-                                tick_ok, (uint32_t)(t_end - t_start), tick_err);
+            if (halted) {
+                esp_err_t rerr = curve_resume_core();
+                if (rerr != ESP_OK) {
+                    tick_ok = false;
+                    tick_err = rerr;
+                } else {
+                    halted = false;
+                }
+            }
+            {
+                int64_t t_end = esp_timer_get_time();
+                uint32_t seq = engine_record_frame(
+                    payload, payload_len, group_index,
+                    (pc_state == 1U) ? (pc_value & ~0x01U) : 0U, false,
+                    cond_match, (uint64_t)t_start, invalid, out_of_scope,
+                    tick_ok, (uint32_t)(t_end - t_start), tick_err);
+                if (cond_match && seq != 0U) {
+                    engine_lock();
+                    s_engine.cond_trigger_seq = seq;
+                    engine_unlock();
+                }
+            }
+            if (cond_stop) {
+                engine_set_message("stopped: trigger_condition reached");
+                break;
+            }
         }
         engine_lock();
         s_engine.schedule_pos =
@@ -877,6 +1007,7 @@ static void curve_breakpoint_loop(void)
 
     while (!s_engine.stop_req) {
         uint32_t dhcsr = 0U;
+        bool cond_stop_tick = false;
 
         if (engine_target_flash_busy()) {
             engine_set_message("stopped: target flash session is active");
@@ -955,9 +1086,10 @@ static void curve_breakpoint_loop(void)
             s_engine.stat_hits++;
             engine_unlock();
 
-            /* One PC read per hit when the current group needs it (the core is
-             * halted by the FPB hit, so DCRSR works like periodic halt). */
-            if (group->pc_needed) {
+            /* One PC read per hit when the group needs it for PC gating/
+             * variants or when CVF2 frames carry the PC (core halted by the FPB
+             * hit, so DCRSR works exactly like the periodic halt path). */
+            if (group->pc_needed || s_engine.capture_pc) {
                 esp_err_t perr = tf_swd_read_reg(15U, &pc_value);
 
                 if (perr == ESP_OK) {
@@ -973,9 +1105,31 @@ static void curve_breakpoint_loop(void)
                                  payload, &payload_len, &invalid, &out_of_scope,
                                  &collect_ok, &collect_err);
             sample_us = (uint32_t)(esp_timer_get_time() - t_hit);
-            engine_record_frame(payload, payload_len, group_index,
-                                (uint64_t)t_hit, invalid, out_of_scope,
-                                collect_ok, sample_us, collect_err);
+            {
+                bool cond_match = false;
+                esp_err_t c_err =
+                    curve_condition_evaluate(&cond_match, &cond_stop_tick);
+
+                if (c_err != ESP_OK) {
+                    collect_ok = false;
+                    if (collect_err == ESP_OK) {
+                        collect_err = c_err;
+                    }
+                    (void)tf_swd_recover_bus();
+                }
+                {
+                    uint32_t seq = engine_record_frame(
+                        payload, payload_len, group_index,
+                        (pc_state == 1U) ? (pc_value & ~0x01U) : 0U, false,
+                        cond_match, (uint64_t)t_hit, invalid, out_of_scope,
+                        collect_ok, sample_us, collect_err);
+                    if (cond_match && seq != 0U) {
+                        engine_lock();
+                        s_engine.cond_trigger_seq = seq;
+                        engine_unlock();
+                    }
+                }
+            }
             engine_lock();
             s_engine.stat_sampled++;
             s_engine.schedule_pos =
@@ -1018,6 +1172,10 @@ static void curve_breakpoint_loop(void)
                                (unsigned)consecutive_errors);
             break;
         }
+        if (cond_stop_tick) {
+            engine_set_message("stopped: trigger_condition reached");
+            break;
+        }
 
         /* Throttle: minimum time between two sampled hits.  The comparator is
          * re-armed at the top of the next loop iteration. */
@@ -1031,6 +1189,420 @@ out:
     if (fpb_active) {
         curve_fpb_restore();
         fpb_active = false;
+    }
+    if (core_halted) {
+        curve_release_core();
+        core_halted = false;
+    }
+    (void)esp_timer_stop(s_engine.tick_timer);
+    if (s_engine.stop_req) {
+        engine_set_message("stopped");
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* P1.8/P1.9: DWT data watchpoint trigger                                    */
+/* ------------------------------------------------------------------------- */
+
+/** DWT_MASK value for a watch size (0=1B, 1=2B, 2=4B). */
+static uint32_t curve_dwt_mask_for(uint8_t size)
+{
+    uint32_t mask = 0U;
+    uint32_t temp = size;
+
+    while (temp > 1U) {
+        temp >>= 1U;
+        mask++;
+    }
+    return mask;
+}
+
+static uint32_t curve_dwt_function_for(uint8_t access)
+{
+    return (access == (uint8_t)CURVE_WATCH_ACCESS_RW) ? CURVE_DWT_FUNC_ACCESS
+                                                      : CURVE_DWT_FUNC_WRITE;
+}
+
+/** Write the comparator address/mask/function (DEMCR.TRCENA already set). */
+static esp_err_t curve_dwt_arm(void)
+{
+    const curve_config_t *cfg = s_engine.cfg;
+    esp_err_t err;
+
+    if (cfg == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = tf_swd_write_u32(CURVE_DWT_COMP0, cfg->watch_address);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_swd_write_u32(CURVE_DWT_MASK0, curve_dwt_mask_for(cfg->watch_size));
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_swd_write_u32(CURVE_DWT_FUNCTION0,
+                           curve_dwt_function_for(cfg->watch_access));
+    if (err != ESP_OK) {
+        return err;
+    }
+    s_engine.watch_armed = true;
+    return ESP_OK;
+}
+
+/** Disable comparator 0 (DWT_FUNCTION=0 clears MATCHED as well). */
+static esp_err_t curve_dwt_disarm(void)
+{
+    s_engine.watch_armed = false;
+    return tf_swd_write_u32(CURVE_DWT_FUNCTION0, 0U);
+}
+
+/**
+ * @brief Save the DWT/DEMCR state and arm comparator 0 for the session.
+ *
+ * Requires comparator 0 to be free (DWT_FUNCTION0 == 0); a comparator left
+ * active by another debugger/RTOS is reported as busy instead of silently
+ * overwritten.  Comparator 1..n are never touched.
+ */
+static esp_err_t curve_dwt_begin(void)
+{
+    const curve_config_t *cfg = s_engine.cfg;
+    esp_err_t err;
+    uint32_t ctrl = 0U;
+    uint32_t function0 = 0U;
+    uint32_t comp0 = 0U;
+    uint32_t mask0 = 0U;
+    uint32_t demcr = 0U;
+
+    if (cfg == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = tf_swd_read_u32(CURVE_DWT_CTRL, &ctrl);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (ctrl == 0U || ctrl == 0xFFFFFFFFU || CURVE_DWT_NUM_COMP(ctrl) == 0U) {
+        ESP_LOGE(CURVE_TAG, "watchpoint: no DWT comparators (DWT_CTRL=0x%08X)",
+                 (unsigned)ctrl);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    err = tf_swd_read_u32(CURVE_DWT_FUNCTION0, &function0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if ((function0 & 0x0FU) != 0U) {
+        ESP_LOGE(CURVE_TAG, "watchpoint: DWT comparator 0 busy (FUNCTION0=0x%08X)",
+                 (unsigned)function0);
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = tf_swd_read_u32(CURVE_DWT_COMP0, &comp0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_swd_read_u32(CURVE_DWT_MASK0, &mask0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_swd_read_u32(CURVE_DEMCR, &demcr);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    s_engine.dwt_saved_function = function0;
+    s_engine.dwt_saved_comp = comp0;
+    s_engine.dwt_saved_mask = mask0;
+    s_engine.dwt_saved_demcr = demcr;
+    s_engine.dwt_active = true;
+
+    /* DWT must be enabled through DEMCR.TRCENA (shared with ITM/trace). */
+    err = tf_swd_write_u32(CURVE_DEMCR, demcr | CURVE_DEMCR_TRCENA);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = curve_dwt_arm();
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGI(CURVE_TAG,
+             "DWT watchpoint armed: addr=0x%08X size=%u access=%s "
+             "(DEMCR 0x%08X->0x%08X, FUNC0 0x%08X->%u)",
+             (unsigned)cfg->watch_address, (unsigned)cfg->watch_size,
+             curve_watch_access_name(cfg->watch_access), (unsigned)demcr,
+             (unsigned)(demcr | CURVE_DEMCR_TRCENA), (unsigned)function0,
+             (unsigned)curve_dwt_function_for(cfg->watch_access));
+    return ESP_OK;
+}
+
+/** Restore DEMCR/COMP0/MASK0/FUNCTION0 captured by curve_dwt_begin(). */
+static void curve_dwt_restore(void)
+{
+    if (!s_engine.dwt_active) {
+        return;
+    }
+    (void)tf_swd_write_u32(CURVE_DWT_FUNCTION0, 0U);
+    (void)tf_swd_write_u32(CURVE_DWT_COMP0, s_engine.dwt_saved_comp);
+    (void)tf_swd_write_u32(CURVE_DWT_MASK0, s_engine.dwt_saved_mask);
+    (void)tf_swd_write_u32(CURVE_DWT_FUNCTION0, s_engine.dwt_saved_function);
+    (void)tf_swd_write_u32(CURVE_DEMCR, s_engine.dwt_saved_demcr);
+    s_engine.dwt_active = false;
+    s_engine.watch_armed = false;
+    ESP_LOGI(CURVE_TAG, "DWT restored (DEMCR=0x%08X FUNC0=0x%08X)",
+             (unsigned)s_engine.dwt_saved_demcr,
+             (unsigned)s_engine.dwt_saved_function);
+}
+
+/**
+ * Watchpoint trigger loop (P1.8/P1.9): DWT comparator 0 halts the core on the
+ * watched data access; the sampler reads the halted frame, disarms the
+ * comparator, resumes, throttles interval_us and re-arms.  Every recorded
+ * frame is a trigger event (CVF2 flags bit2 + status.trigger_seq).
+ */
+static void curve_watchpoint_loop(void)
+{
+    uint8_t payload[CURVE_MAX_SAMPLE_BYTES];
+    const curve_config_t *cfg = s_engine.cfg;
+    uint32_t consecutive_errors = 0U;
+    bool core_halted = false;
+    bool dwt_active = false;
+    bool armed = false;
+    esp_err_t err;
+
+    if (cfg == NULL) {
+        engine_set_message("watchpoint: no configuration");
+        return;
+    }
+    (void)esp_timer_stop(s_engine.tick_timer);
+
+    err = curve_ensure_core_running();
+    if (err != ESP_OK) {
+        engine_set_message("watchpoint: target does not run: %s",
+                           esp_err_to_name(err));
+        goto out;
+    }
+    err = curve_dwt_begin();
+    if (err != ESP_OK) {
+        engine_set_message("watchpoint: DWT setup failed: %s",
+                           esp_err_to_name(err));
+        goto out;
+    }
+    dwt_active = true;
+    armed = true;
+
+    while (!s_engine.stop_req) {
+        uint32_t dhcsr = 0U;
+        bool cond_stop_tick = false;
+
+        if (engine_target_flash_busy()) {
+            engine_set_message("stopped: target flash session is active");
+            break;
+        }
+        if (!armed) {
+            err = curve_dwt_arm();
+            if (err != ESP_OK) {
+                consecutive_errors++;
+                (void)tf_swd_recover_bus();
+                ESP_LOGW(CURVE_TAG, "watchpoint re-arm failed (%s), consecutive=%u",
+                         esp_err_to_name(err), (unsigned)consecutive_errors);
+                if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+                    engine_set_message("stopped: %u consecutive SWD errors",
+                                       (unsigned)consecutive_errors);
+                    break;
+                }
+                if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                    break;
+                }
+                continue;
+            }
+            armed = true;
+        }
+        err = tf_swd_read_u32(CURVE_REG_DHCSR, &dhcsr);
+        if (err != ESP_OK) {
+            consecutive_errors++;
+            (void)tf_swd_recover_bus();
+            ESP_LOGW(CURVE_TAG, "watchpoint poll failed (%s), consecutive=%u",
+                     esp_err_to_name(err), (unsigned)consecutive_errors);
+            if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+                engine_set_message("stopped: %u consecutive SWD errors",
+                                   (unsigned)consecutive_errors);
+                break;
+            }
+            if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                break;
+            }
+            continue;
+        }
+        if ((dhcsr & CURVE_DHCSR_S_HALT) == 0U) {
+            if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                break;
+            }
+            continue;
+        }
+
+        /* Core halted: confirm it was our DWT comparator (MATCHED bit). */
+        {
+            uint32_t function0 = 0U;
+
+            err = tf_swd_read_u32(CURVE_DWT_FUNCTION0, &function0);
+            if (err != ESP_OK) {
+                consecutive_errors++;
+                (void)tf_swd_recover_bus();
+                if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+                    engine_set_message("stopped: %u consecutive SWD errors",
+                                       (unsigned)consecutive_errors);
+                    break;
+                }
+                if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                    break;
+                }
+                continue;
+            }
+            if ((function0 & CURVE_DWT_FUNCTION_MATCHED) == 0U) {
+                /* Unexpected halt (not our watchpoint): resume and count it; a
+                 * sticky target halt stops the session instead of spinning. */
+                consecutive_errors++;
+                ESP_LOGW(CURVE_TAG,
+                         "watchpoint: unexpected halt (FUNCTION0=0x%08X), "
+                         "consecutive=%u",
+                         (unsigned)function0, (unsigned)consecutive_errors);
+                err = curve_resume_core();
+                if (err == ESP_OK) {
+                    core_halted = false;
+                    (void)curve_wait_core_running();
+                }
+                if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+                    engine_set_message("stopped: unexpected halt while armed");
+                    break;
+                }
+                if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        /* Watchpoint hit: the core is halted.  Timestamp at hit detection. */
+        core_halted = true;
+        {
+            int64_t t_hit = esp_timer_get_time();
+            bool collect_ok = true;
+            esp_err_t collect_err = ESP_OK;
+            uint32_t invalid = 0U;
+            uint32_t out_of_scope = 0U;
+            uint16_t payload_len = 0U;
+            uint32_t sample_us;
+            uint8_t pc_state = 0U;
+            uint32_t pc_value = 0U;
+            uint8_t group_index;
+            const curve_group_t *group;
+            uint32_t seq;
+
+            if (cfg->schedule_len > 0U) {
+                group_index = cfg->schedule[s_engine.schedule_pos];
+            } else {
+                group_index = s_engine.current_group;
+            }
+            if (group_index >= cfg->group_count) {
+                group_index = 0U;
+            }
+            group = &cfg->groups[group_index];
+
+            engine_lock();
+            s_engine.stat_watch_hits++;
+            engine_unlock();
+
+            if (group->pc_needed || s_engine.capture_pc) {
+                esp_err_t perr = tf_swd_read_reg(15U, &pc_value);
+
+                if (perr == ESP_OK) {
+                    pc_state = 1U;
+                } else {
+                    pc_state = 2U;
+                    collect_ok = false;
+                    collect_err = perr;
+                }
+            }
+
+            curve_collect_sample(cfg, group_index, true, pc_state, pc_value,
+                                 payload, &payload_len, &invalid, &out_of_scope,
+                                 &collect_ok, &collect_err);
+            sample_us = (uint32_t)(esp_timer_get_time() - t_hit);
+            {
+                bool cond_match = false;
+                esp_err_t c_err =
+                    curve_condition_evaluate(&cond_match, &cond_stop_tick);
+
+                if (c_err != ESP_OK) {
+                    collect_ok = false;
+                    if (collect_err == ESP_OK) {
+                        collect_err = c_err;
+                    }
+                    (void)tf_swd_recover_bus();
+                }
+                seq = engine_record_frame(payload, payload_len, group_index,
+                                          (pc_state == 1U) ? (pc_value & ~0x01U) : 0U,
+                                          true, cond_match, (uint64_t)t_hit,
+                                          invalid, out_of_scope, collect_ok,
+                                          sample_us, collect_err);
+                if (cond_match && seq != 0U) {
+                    engine_lock();
+                    s_engine.cond_trigger_seq = seq;
+                    engine_unlock();
+                }
+            }
+            engine_lock();
+            s_engine.stat_sampled++;
+            s_engine.current_group =
+                (cfg->schedule_len > 0U) ? cfg->schedule[s_engine.schedule_pos]
+                                         : 0U;
+            engine_unlock();
+            if (!collect_ok) {
+                ESP_LOGW(CURVE_TAG, "watchpoint sample failed (%s)",
+                         esp_err_to_name(collect_err));
+            }
+            ESP_LOGD(CURVE_TAG, "watchpoint trigger seq=%u pc=0x%08X",
+                     (unsigned)seq, (unsigned)pc_value);
+        }
+
+        /* Disarm before resuming so the resumed core cannot retrigger, then
+         * throttle; the loop top re-arms the comparator. */
+        armed = false;
+        err = curve_dwt_disarm();
+        if (err != ESP_OK) {
+            consecutive_errors++;
+            (void)tf_swd_recover_bus();
+            ESP_LOGW(CURVE_TAG, "watchpoint disarm failed (%s), consecutive=%u",
+                     esp_err_to_name(err), (unsigned)consecutive_errors);
+        }
+        err = curve_resume_core();
+        if (err == ESP_OK) {
+            core_halted = false;
+            err = curve_wait_core_running();
+        }
+        if (err != ESP_OK) {
+            consecutive_errors++;
+            (void)tf_swd_recover_bus();
+            ESP_LOGW(CURVE_TAG, "watchpoint resume failed (%s), consecutive=%u",
+                     esp_err_to_name(err), (unsigned)consecutive_errors);
+        } else {
+            consecutive_errors = 0U;
+        }
+        if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+            engine_set_message("stopped: %u consecutive SWD errors",
+                               (unsigned)consecutive_errors);
+            break;
+        }
+        if (cond_stop_tick) {
+            engine_set_message("stopped: trigger_condition reached");
+            break;
+        }
+        if (!curve_sleep_us(cfg->interval_us)) {
+            break;
+        }
+    }
+
+out:
+    if (dwt_active) {
+        curve_dwt_restore();
+        dwt_active = false;
     }
     if (core_halted) {
         curve_release_core();
@@ -1269,6 +1841,13 @@ static void curve_worker_start_cmd(void)
                            (unsigned)cfg->breakpoint_address,
                            (unsigned)cfg->group_count,
                            (unsigned)cfg->interval_us);
+        } else if (cfg != NULL &&
+                   cfg->trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
+            (void)snprintf(s_engine.message, sizeof(s_engine.message),
+                           "watchpoint @0x%08X/%u %s",
+                           (unsigned)cfg->watch_address,
+                           (unsigned)cfg->watch_size,
+                           curve_watch_access_name(cfg->watch_access));
         } else if (cfg != NULL) {
             (void)snprintf(s_engine.message, sizeof(s_engine.message),
                            "sampling %u group(s) @%u us",
@@ -1288,6 +1867,9 @@ static void curve_worker_start_cmd(void)
     if (s_engine.cfg != NULL &&
         s_engine.cfg->trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
         curve_breakpoint_loop();
+    } else if (s_engine.cfg != NULL &&
+               s_engine.cfg->trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
+        curve_watchpoint_loop();
     } else {
         curve_periodic_loop();
     }
@@ -1380,6 +1962,23 @@ esp_err_t curve_engine_init(void)
     return ESP_OK;
 }
 
+bool curve_engine_ring_seqs(uint32_t *oldest_seq, uint32_t *latest_seq)
+{
+    bool have = false;
+
+    if (oldest_seq == NULL || latest_seq == NULL || !s_inited) {
+        return false;
+    }
+    engine_lock();
+    if (s_engine.ring_block != NULL && s_engine.ring.count > 0U) {
+        *oldest_seq = s_engine.ring.next_seq - s_engine.ring.count;
+        *latest_seq = s_engine.ring.next_seq - 1U;
+        have = true;
+    }
+    engine_unlock();
+    return have;
+}
+
 bool curve_engine_is_idle(void)
 {
     bool idle;
@@ -1425,7 +2024,15 @@ esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_le
         }
         return ESP_ERR_INVALID_STATE;
     }
-    rc = engine_ring_prepare(cfg->sample_bytes);
+    {
+        /* Any trigger mode that samples a halted core can read r15; only the
+         * periodic no-halt fast path cannot. */
+        bool capture_pc = cfg->want_pc &&
+                          (cfg->trigger != (uint8_t)CURVE_TRIGGER_PERIODIC ||
+                           cfg->halt);
+
+        rc = engine_ring_prepare(cfg->sample_bytes, capture_pc);
+    }
     if (rc != ESP_OK) {
         engine_unlock();
         if (err != NULL) {
@@ -1434,6 +2041,10 @@ esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_le
         return rc;
     }
     s_engine.cfg = cfg; /* HTTP-owned static config; valid while running */
+    s_engine.cond_armed = cfg->cond_enabled;
+    s_engine.cond_met = false;
+    s_engine.cond_hits = 0U;
+    s_engine.cond_trigger_seq = 0U;
     s_engine.schedule_pos = 0U;
     s_engine.current_group = (cfg->schedule_len > 0U) ? cfg->schedule[0] : 0U;
     s_engine.message[0] = '\0';
@@ -1629,6 +2240,20 @@ void curve_engine_status(curve_status_t *out)
     out->served_seq = s_engine.ring.served_seq;
     out->invalid = s_engine.stat_invalid;
     out->out_of_scope = s_engine.stat_out_of_scope;
+    out->pc_available = s_engine.capture_pc;
+    out->last_pc = s_engine.last_pc;
+    out->watchpoint_armed = s_engine.watch_armed;
+    out->watchpoint_hits = s_engine.stat_watch_hits;
+    out->trigger_seq = s_engine.stat_trigger_seq;
+    out->condition_armed = s_engine.cfg != NULL && s_engine.cfg->cond_enabled &&
+                           s_engine.cond_armed;
+    out->condition_met = s_engine.cond_met;
+    out->condition_hits = s_engine.cond_hits;
+    out->condition_trigger_seq = s_engine.cond_trigger_seq;
+    if (s_engine.cfg != NULL &&
+        s_engine.cfg->trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
+        out->watchpoint_address = s_engine.cfg->watch_address;
+    }
     out->errors = s_engine.stat_errors;
     out->consecutive_errors = s_engine.stat_consecutive;
     out->link_hz = s_engine.link_hz;
@@ -1656,7 +2281,11 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
     size_t frame_bytes;
     size_t len;
     size_t offset;
+    size_t meta_bytes;
     bool gap = false;
+    bool pc_present = false;
+    bool any_triggered = false;
+    bool any_condition = false;
 
     if (out_buf == NULL || out_len == NULL || no_data == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -1686,6 +2315,8 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
         return ESP_OK; /* 204: no frame newer than `since`, served cursor unchanged */
     }
     frame_bytes = s_engine.ring_frame_bytes;
+    pc_present = s_engine.capture_pc && s_engine.ring_pc != NULL;
+    meta_bytes = pc_present ? CURVE_FRAME_META_BYTES_PC : CURVE_FRAME_META_BYTES;
 
     /* CVF2 frames are variable length (payload_len per group): compute the exact
      * response size first, then pack header + frames in one buffer. */
@@ -1694,7 +2325,7 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
         uint32_t seq = first_seq + i;
         uint32_t slot = (seq - 1U) % s_engine.ring.capacity;
 
-        len += CURVE_FRAME_META_BYTES + s_engine.ring_len[slot];
+        len += meta_bytes + s_engine.ring_len[slot];
     }
     buf = (uint8_t *)malloc(len);
     if (buf == NULL) {
@@ -1702,24 +2333,34 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
         return ESP_ERR_NO_MEM;
     }
 
-    (void)curve_cvf2_write_header(buf, (uint16_t)count, first_seq,
-                                  (uint16_t)frame_bytes, gap);
     offset = CURVE_FRAME_HEADER_BYTES;
     for (uint32_t i = 0U; i < count; i++) {
         uint32_t seq = first_seq + i;
         uint32_t slot = (seq - 1U) % s_engine.ring.capacity;
         uint16_t payload_len = s_engine.ring_len[slot];
 
+        uint8_t group_encoded = s_engine.ring_group[slot];
+
+        any_triggered = any_triggered ||
+                        curve_ring_group_triggered(group_encoded);
+        any_condition = any_condition ||
+                        curve_ring_group_condition(group_encoded);
         offset += curve_cvf2_write_frame_meta(buf + offset,
                                               s_engine.ring_seq[slot],
                                               s_engine.ring_ts[slot],
-                                              s_engine.ring_group[slot],
-                                              payload_len);
+                                              curve_ring_group_index(group_encoded),
+                                              payload_len,
+                                              pc_present ? s_engine.ring_pc[slot]
+                                                         : 0U,
+                                              pc_present);
         memcpy(buf + offset,
                s_engine.ring_payload + (size_t)slot * frame_bytes,
                payload_len);
         offset += payload_len;
     }
+    (void)curve_cvf2_write_header(buf, (uint16_t)count, first_seq,
+                                  (uint16_t)frame_bytes, gap, pc_present,
+                                  any_triggered, any_condition);
     /* The batch was handed to the client: everything up to the last seq of
      * this response counts as served, so only frames evicted before a client
      * received them are counted in `overwritten` from now on. */

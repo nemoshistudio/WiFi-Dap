@@ -28,6 +28,11 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     "\"breakpoint_address\":%u,\"hits\":%u,\"sampled\":%u,"
                     "\"throttled\":%u,\"interval_us\":%u,\"frames\":%u,"
                     "\"overwritten\":%u,\"invalid\":%u,\"out_of_scope\":%u,"
+                    "\"pc_available\":%s,\"last_pc\":%u,"
+                    "\"watchpoint_armed\":%s,\"watchpoint_address\":%u,"
+                    "\"watchpoint_hits\":%u,\"trigger_seq\":%u,"
+                    "\"condition_armed\":%s,\"condition_met\":%s,"
+                    "\"condition_hits\":%u,\"condition_trigger_seq\":%u,"
                     "\"error\":%u,"
                     "\"sample_bytes\":%u,\"series_count\":%u,\"halt\":%s,"
                     "\"link_hz\":%u,\"consecutive_errors\":%u,"
@@ -41,7 +46,18 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     (unsigned)status->sampled, (unsigned)status->throttled,
                     (unsigned)status->interval_us, (unsigned)status->frames,
                     (unsigned)status->overwritten, (unsigned)status->invalid,
-                    (unsigned)status->out_of_scope, (unsigned)status->errors,
+                    (unsigned)status->out_of_scope,
+                    status->pc_available ? "true" : "false",
+                    (unsigned)status->last_pc,
+                    status->watchpoint_armed ? "true" : "false",
+                    (unsigned)status->watchpoint_address,
+                    (unsigned)status->watchpoint_hits,
+                    (unsigned)status->trigger_seq,
+                    status->condition_armed ? "true" : "false",
+                    status->condition_met ? "true" : "false",
+                    (unsigned)status->condition_hits,
+                    (unsigned)status->condition_trigger_seq,
+                    (unsigned)status->errors,
                     (unsigned)status->sample_bytes,
                     (unsigned)status->series_count,
                     status->halt ? "true" : "false", (unsigned)status->link_hz,

@@ -6,10 +6,19 @@
  * Pure C so the exact binary layout is covered by the host regression test.
  *
  * Batch header (16 B, little-endian):
- *   magic 4B "CVF2" | version u8 = 2 | flags u8 (bit0=gap) | count u16
- *   first_seq u32 | frame_bytes u16 (max payload across groups) | reserved u16
- * Frame (15 B metadata + payload):
- *   seq u32 | timestamp_us u64 | group u8 | payload_len u16 | payload bytes
+ *   magic 4B "CVF2" | version u8 = 2 | flags u8 (bit0=gap, bit1=PC_PRESENT)
+ *   count u16 | first_seq u32 | frame_bytes u16 (max payload across groups)
+ *   | reserved u16
+ *   flags bit2 = TRIGGERED: the batch contains at least one trigger-event
+ *   frame (DWT watchpoint trigger); per-frame granularity is not in the wire
+ *   format, status.trigger_seq identifies the exact sequence number.
+ *   flags bit3 = CONDITION: the batch contains at least one frame whose
+ *   trigger_condition matched; status.condition_trigger_seq is the exact seq.
+ * Frame metadata (15 B, or 19 B when flags.bit1 says PC_PRESENT):
+ *   seq u32 | timestamp_us u64 | group u8 | payload_len u16 [| pc u32]
+ *   | payload bytes (payload_len)
+ * The PC is the halted core's r15 with the Thumb bit0 cleared; no-halt
+ * sessions cannot read DCRSR and therefore leave PC_PRESENT clear.
  */
 #include <stdbool.h>
 #include <stddef.h>
@@ -41,7 +50,8 @@ static size_t put_u64(uint8_t *p, uint64_t v)
 }
 
 size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
-                               uint16_t frame_bytes, bool gap)
+                               uint16_t frame_bytes, bool gap, bool pc_present,
+                               bool triggered, bool condition)
 {
     size_t offset = 0U;
 
@@ -53,7 +63,10 @@ size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
     buf[offset++] = 'F';
     buf[offset++] = '2';
     buf[offset++] = (uint8_t)CURVE_CVF2_VERSION;
-    buf[offset++] = gap ? (uint8_t)CURVE_CVF2_FLAG_GAP : 0U;
+    buf[offset++] = (gap ? (uint8_t)CURVE_CVF2_FLAG_GAP : 0U) |
+                    (pc_present ? (uint8_t)CURVE_CVF2_FLAG_PC_PRESENT : 0U) |
+                    (triggered ? (uint8_t)CURVE_CVF2_FLAG_TRIGGERED : 0U) |
+                    (condition ? (uint8_t)CURVE_CVF2_FLAG_CONDITION : 0U);
     offset += put_u16(buf + offset, count);
     offset += put_u32(buf + offset, first_seq);
     offset += put_u16(buf + offset, frame_bytes);
@@ -63,7 +76,8 @@ size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
 
 size_t curve_cvf2_write_frame_meta(uint8_t *buf, uint32_t seq,
                                    uint64_t timestamp_us, uint8_t group,
-                                   uint16_t payload_len)
+                                   uint16_t payload_len, uint32_t pc,
+                                   bool pc_present)
 {
     size_t offset = 0U;
 
@@ -74,5 +88,8 @@ size_t curve_cvf2_write_frame_meta(uint8_t *buf, uint32_t seq,
     offset += put_u64(buf + offset, timestamp_us);
     buf[offset++] = group;
     offset += put_u16(buf + offset, payload_len);
-    return offset; /* CURVE_FRAME_META_BYTES */
+    if (pc_present) {
+        offset += put_u32(buf + offset, pc);
+    }
+    return offset; /* 15 B, or 19 B with PC */
 }

@@ -22,6 +22,8 @@ set(srcs
     "src/curve_ring.c"
     "src/curve_status.c"
     "src/curve_cvf2.c"
+    "src/curve_ws.c"
+    "src/curve_ws_core.c"
     "src/curve_http.c"
 )
 

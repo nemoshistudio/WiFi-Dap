@@ -26,7 +26,7 @@
 
 #include "curve_priv.h"
 
-uint32_t curve_ring_capacity_for(uint32_t frame_bytes)
+uint32_t curve_ring_capacity_for(uint32_t frame_bytes, bool with_pc)
 {
     uint32_t stride;
     uint32_t capacity;
@@ -34,7 +34,8 @@ uint32_t curve_ring_capacity_for(uint32_t frame_bytes)
     if (frame_bytes == 0U || frame_bytes > CURVE_MAX_SAMPLE_BYTES) {
         return 0U;
     }
-    stride = CURVE_FRAME_META_BYTES + frame_bytes;
+    stride = (with_pc ? CURVE_FRAME_META_BYTES_PC : CURVE_FRAME_META_BYTES) +
+             frame_bytes;
     /* Budget first: large payloads get fewer slots instead of a larger heap
      * allocation.  The 16-frame floor is only a sanity guard (at 256 B/frame
      * the 8 KiB budget still allows 30 frames). */

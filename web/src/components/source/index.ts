@@ -26,6 +26,13 @@ export {
     resolveSourceBrowserLabels,
     type SourceBrowserLabels,
 } from './labels'
+export {
+    resolveFileLineTarget,
+    type ResolvedSourceFileLine,
+    type SourceActiveFileLine,
+    type SourceFileLineCandidate,
+    type SourceFileLineMatch,
+} from './lineTarget'
 
 // 纯函数/类型统一从 utils 出口再导出，父组件集成时只需从一个路径 import。
 export {
