@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 404
+const EXPECTED_TOTAL = 423
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 256
+const EXPECTED_ADDED = 275
 
 const errors = []
 const warnings = []
@@ -155,6 +155,11 @@ const ADDED_KEYS = [
         // 调试采样模式（暂停读帧/寄存器/指针）
         'samplingMode', 'samplingModeLive', 'samplingModeDebug', 'debugInterval', 'debugModeHint',
         'debugSamplable', 'pointerSamplable', 'haltSamplableHint', 'pointerExpandedHint', 'debugSampleFailed', 'haltSeriesRemoved',
+        // 设备本地采样（ESP32 闭环，Phase 1）
+        'samplingSource', 'samplingSourceWeb', 'samplingSourceLocal', 'localInterval', 'localModeHint',
+        'localRegisterUnsupported', 'localRegisterShort', 'localStartFailed', 'localStopFailed', 'localPollFailed',
+        'localFrames', 'localInvalid', 'localOverwritten', 'localStatus', 'localRunning', 'localStopped',
+        'localSeriesRemoved', 'localSeriesLocked', 'localSeriesLimit',
     ]),
     ...keys('page', ['debugCurve']),
 ]

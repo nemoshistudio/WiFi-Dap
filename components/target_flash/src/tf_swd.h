@@ -54,6 +54,21 @@ esp_err_t tf_swd_sysreset(bool run);
 esp_err_t tf_swd_read_pc(uint32_t *pc);
 
 /**
+ * @brief Read one Cortex-M core register through DCRSR/DCRDR (read direction,
+ *        REGWnR=0), waiting for DHCSR.S_REGRDY before reading DCRDR.
+ *
+ * The core must already be halted (DCRSR is only accepted in debug/halt state;
+ * the caller owns the halt, e.g. the curve sampler's per-tick halt). Unlike
+ * tf_swd_read_pc() this does not halt/resume the core itself.
+ *
+ * @param reg   0..15 = R0..R15 (13 = SP, 14 = LR, 15 = PC).
+ * @param[out] value register value.
+ * @return ESP_OK / ESP_ERR_INVALID_ARG (reg > 15 or value NULL) / ESP_FAIL /
+ *         ESP_ERR_TIMEOUT when S_REGRDY never asserts.
+ */
+esp_err_t tf_swd_read_reg(uint8_t reg, uint32_t *value);
+
+/**
  * @brief Bring-up diagnostic: run the link sequence step by step and append a
  *        human-readable report to `out` (used by the Kconfig-gated /tf?cmd=diag
  *        endpoint; not used in the production flash path).

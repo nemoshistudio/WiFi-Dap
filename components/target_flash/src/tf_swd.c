@@ -351,6 +351,33 @@ esp_err_t tf_swd_read_pc(uint32_t *pc)
     return ESP_ERR_TIMEOUT;
 }
 
+esp_err_t tf_swd_read_reg(uint8_t reg, uint32_t *value)
+{
+    uint32_t dhcsr = 0U;
+    uint64_t deadline;
+
+    if (value == NULL || reg > 15U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* DCRSR: REGWnR=0 (read direction), REGSEL=reg. */
+    if (tf_swd_write_u32(TF_REG_DCRSR, (uint32_t)reg) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    deadline = tf_now_ms() + 200U;
+    do {
+        if (tf_swd_read_u32(TF_REG_DHCSR, &dhcsr) != ESP_OK) {
+            return ESP_FAIL;
+        }
+        if ((dhcsr & TF_DHCSR_S_REGRDY) != 0U) {
+            return tf_swd_read_u32(TF_REG_DCRDR, value);
+        }
+    } while (tf_now_ms() < deadline);
+
+    ESP_LOGE(TF_TAG, "core register r%u read timeout (DHCSR=0x%08X)",
+             (unsigned)reg, (unsigned)dhcsr);
+    return ESP_ERR_TIMEOUT;
+}
+
 esp_err_t tf_swd_link_init(uint32_t clock_hz, uint32_t *dpidr)
 {
     static const uint8_t line_reset[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};

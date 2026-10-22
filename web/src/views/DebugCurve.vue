@@ -19,7 +19,7 @@
         show-icon
     />
     <el-alert
-        v-if="haltedSuspected"
+        v-if="haltedSuspected && !isLocalSource"
         class="mb-3"
         type="warning"
         :title="translate('curve.targetHalted')"
@@ -39,61 +39,100 @@
     <section class="curve-card">
       <div class="flex flex-wrap items-center gap-2">
         <el-tag :type="statusTagType" effect="dark">{{ statusText }}</el-tag>
-        <span class="font-mono text-xs opacity-70">{{ endpointText }}</span>
-        <span v-if="targetInfo" class="font-mono text-xs opacity-70">
-          IDCODE {{ formatHex32(targetInfo.idcode) }} · AP IDR {{ formatHex32(targetInfo.apIdr) }}
-        </span>
+        <template v-if="!isLocalSource">
+          <span class="font-mono text-xs opacity-70">{{ endpointText }}</span>
+          <span v-if="targetInfo" class="font-mono text-xs opacity-70">
+            IDCODE {{ formatHex32(targetInfo.idcode) }} · AP IDR {{ formatHex32(targetInfo.apIdr) }}
+          </span>
+        </template>
         <span class="flex-1"></span>
 
-        <el-button v-if="!connected" type="primary" :loading="connecting" @click="onConnect">
-          {{ translate('curve.connect') }}
-        </el-button>
-        <template v-else>
+        <template v-if="isLocalSource">
           <el-button v-if="!sampling" type="primary" :disabled="seriesList.length === 0" @click="startSampling">
             {{ translate('curve.start') }}
           </el-button>
           <el-button v-else type="warning" @click="stopSampling">
             {{ translate('curve.stop') }}
           </el-button>
-          <el-button :loading="resetting" @click="onResetTarget">{{ translate('curve.resetTarget') }}</el-button>
-          <el-button @click="onDisconnect">{{ translate('curve.disconnect') }}</el-button>
         </template>
-        <el-button v-if="haltedSuspected" type="warning" :loading="resuming" @click="onResumeTarget">
-          {{ translate('curve.resumeTarget') }}
-        </el-button>
+        <template v-else>
+          <el-button v-if="!connected" type="primary" :loading="connecting" @click="onConnect">
+            {{ translate('curve.connect') }}
+          </el-button>
+          <template v-else>
+            <el-button v-if="!sampling" type="primary" :disabled="seriesList.length === 0" @click="startSampling">
+              {{ translate('curve.start') }}
+            </el-button>
+            <el-button v-else type="warning" @click="stopSampling">
+              {{ translate('curve.stop') }}
+            </el-button>
+            <el-button :loading="resetting" @click="onResetTarget">{{ translate('curve.resetTarget') }}</el-button>
+            <el-button @click="onDisconnect">{{ translate('curve.disconnect') }}</el-button>
+          </template>
+          <el-button v-if="haltedSuspected" type="warning" :loading="resuming" @click="onResumeTarget">
+            {{ translate('curve.resumeTarget') }}
+          </el-button>
+        </template>
         <el-button :disabled="sampleCount === 0" @click="clearData">{{ translate('curve.clear') }}</el-button>
       </div>
 
       <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
         <label class="flex items-center gap-2">
-          <span class="whitespace-nowrap">{{ translate('curve.samplingMode') }}</span>
-          <el-select v-model="samplingMode" size="small" style="width: 12rem" :disabled="sampling" @change="onSamplingModeChange">
-            <el-option value="live" :label="translate('curve.samplingModeLive')"/>
-            <el-option value="debug" :label="translate('curve.samplingModeDebug')"/>
-          </el-select>
-        </label>
-        <label v-if="!isDebugMode" class="flex items-center gap-2">
-          <span class="whitespace-nowrap">{{ translate('curve.sampleRate') }}</span>
-          <el-select v-model="sampleRate" size="small" style="width: 8rem" :disabled="sampling">
+          <span class="whitespace-nowrap">{{ translate('curve.samplingSource') }}</span>
+          <el-select v-model="samplingSource" size="small" style="width: 13rem" :disabled="sampling" @change="onSamplingSourceChange">
             <el-option
-                v-for="rate in SAMPLE_RATES"
-                :key="rate"
-                :value="rate"
-                :label="rate === 0 ? translate('curve.sampleRateAuto') : rate + ' Hz'"
+                v-for="source in SAMPLING_SOURCES"
+                :key="source"
+                :value="source"
+                :label="source === 'local' ? translate('curve.samplingSourceLocal') : translate('curve.samplingSourceWeb')"
             />
           </el-select>
         </label>
-        <label v-else class="flex items-center gap-2">
-          <span class="whitespace-nowrap">{{ translate('curve.debugInterval') }}</span>
-          <el-select v-model="debugIntervalMs" size="small" style="width: 7rem" :disabled="sampling">
-            <el-option v-for="interval in DEBUG_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
-          </el-select>
-        </label>
-        <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
-        <span v-if="!isDebugMode && sampleRate === 0">{{ translate('curve.autoRate') }}: <b>{{ autoRateDisplay }} Hz</b></span>
-        <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
-        <span>{{ translate('curve.failedCount') }}: <b>{{ failedCount }}</b></span>
-        <span>{{ translate('curve.droppedCount') }}: <b>{{ droppedCount }}</b></span>
+        <template v-if="isLocalSource">
+          <label class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.localInterval') }}</span>
+            <el-select v-model="localIntervalMs" size="small" style="width: 6rem" :disabled="sampling">
+              <el-option v-for="interval in LOCAL_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
+            </el-select>
+          </label>
+          <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
+          <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
+          <span>{{ translate('curve.localStatus') }}: <b>{{ (sampling && localStatusInfo?.running !== false) ? translate('curve.localRunning') : translate('curve.localStopped') }}</b></span>
+          <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
+          <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
+          <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
+        </template>
+        <template v-else>
+          <label class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.samplingMode') }}</span>
+            <el-select v-model="samplingMode" size="small" style="width: 12rem" :disabled="sampling" @change="onSamplingModeChange">
+              <el-option value="live" :label="translate('curve.samplingModeLive')"/>
+              <el-option value="debug" :label="translate('curve.samplingModeDebug')"/>
+            </el-select>
+          </label>
+          <label v-if="!isDebugMode" class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.sampleRate') }}</span>
+            <el-select v-model="sampleRate" size="small" style="width: 8rem" :disabled="sampling">
+              <el-option
+                  v-for="rate in SAMPLE_RATES"
+                  :key="rate"
+                  :value="rate"
+                  :label="rate === 0 ? translate('curve.sampleRateAuto') : rate + ' Hz'"
+              />
+            </el-select>
+          </label>
+          <label v-else class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.debugInterval') }}</span>
+            <el-select v-model="debugIntervalMs" size="small" style="width: 7rem" :disabled="sampling">
+              <el-option v-for="interval in DEBUG_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
+            </el-select>
+          </label>
+          <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
+          <span v-if="!isDebugMode && sampleRate === 0">{{ translate('curve.autoRate') }}: <b>{{ autoRateDisplay }} Hz</b></span>
+          <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
+          <span>{{ translate('curve.failedCount') }}: <b>{{ failedCount }}</b></span>
+          <span>{{ translate('curve.droppedCount') }}: <b>{{ droppedCount }}</b></span>
+        </template>
         <label class="flex items-center gap-2">
           <span class="whitespace-nowrap">{{ translate('curve.format') }}</span>
           <el-select v-model="globalFormat" size="small" style="width: 6rem" @change="applyGlobalFormat">
@@ -102,7 +141,7 @@
         </label>
       </div>
       <div class="mt-1 text-xs opacity-70">
-        {{ isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint') }}
+        {{ isLocalSource ? translate('curve.localModeHint') : (isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint')) }}
       </div>
     </section>
 
@@ -110,7 +149,7 @@
     <section class="curve-card">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <h2 class="text-lg font-bold">{{ translate('curve.elfUpload') }}</h2>
-        <el-button :loading="elfParsing" @click="openElfDialog">{{ translate('curve.elfUpload') }}</el-button>
+        <el-button :loading="elfParsing" :disabled="isLocalSource && sampling" @click="openElfDialog">{{ translate('curve.elfUpload') }}</el-button>
         <input ref="elfInputRef" type="file" accept=".elf,.out" class="hidden" @change="onElfSelected"/>
       </div>
       <p class="mt-1 text-xs opacity-70">{{ translate('curve.elfHint') }}</p>
@@ -192,6 +231,7 @@
                   <el-checkbox
                       v-if="nodeSelectable(row.node)"
                       :model-value="isRowSelected(row)"
+                      :disabled="isLocalSource && sampling"
                       @change="toggleRow(row)"
                   />
                 </span>
@@ -210,7 +250,10 @@
                   <span class="truncate">{{ row.node.name }}</span>
                 </span>
                 <span class="var-type truncate" :title="row.node.typeName">{{ row.node.typeName || translate('curve.unknownType') }}</span>
-                <span v-if="row.node.sampleable" class="var-addr font-mono">
+                <span v-if="isLocalSource && isLocalRegisterValue(row.node)" class="var-addr unsampleable-text" :title="translate('curve.localRegisterUnsupported')">
+                  {{ translate('curve.localRegisterShort') }}
+                </span>
+                <span v-else-if="row.node.sampleable" class="var-addr font-mono">
                   <template v-if="row.node.sample && row.node.sample.address">{{ formatHex32(row.node.sample.address) }}</template>
                   <span v-else class="mode-badge" :title="nodeLocationText(row.node)">
                     {{ row.node.liveSamplable ? translate('curve.pointerSamplable') : translate('curve.debugSamplable') }}
@@ -323,6 +366,15 @@ import {
   type VariableNode,
 } from '@/utils/elfSymbols'
 import {addressExprIsLive, addressExprRegisters, addressExprText} from '@/utils/dwarfLocation'
+import {
+  CURVE_LOCAL_MAX_SERIES,
+  CurveLocalError,
+  getLocalCurveFrames,
+  getLocalCurveStatus,
+  startLocalCurve,
+  stopLocalCurve,
+  type LocalCurveStatus,
+} from '@/api/curveLocal'
 
 const FORMATS: DisplayFormat[] = ['auto', 'u32', 'i32', 'f32']
 /**
@@ -336,6 +388,15 @@ const SAMPLE_RATE_AUTO = 0
 /** 调试采样模式：暂停目标读寄存器/栈帧/指针，采样间隔可选（低采样率）。 */
 const DEBUG_INTERVALS = [20, 50, 100, 200]
 const DEFAULT_DEBUG_INTERVAL_MS = 50
+/** 采样来源：Web DAP（WiFi 往返）或设备本地（ESP32 SWD 闭环，Phase 1）。 */
+type SamplingSource = 'web' | 'local'
+const SAMPLING_SOURCES: SamplingSource[] = ['web', 'local']
+/** 设备本地采样间隔（ms）；固件契约 5..200 ms。 */
+const LOCAL_INTERVALS = [5, 10, 20, 50]
+const DEFAULT_LOCAL_INTERVAL_MS = 10
+/** 本地帧轮询周期（契约要求 20–50 ms）。 */
+const LOCAL_POLL_MS = 30
+const LOCAL_POLL_MAX_FRAMES = 32
 /** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
 const PIPELINE_DEPTH = 8
 const AUTO_MIN_RATE = 10
@@ -405,6 +466,17 @@ const sampleRate = ref(SAMPLE_RATES_DEFAULT)
 const samplingMode = ref<'live' | 'debug'>('live')
 const debugIntervalMs = ref(DEFAULT_DEBUG_INTERVAL_MS)
 const isDebugMode = computed(() => samplingMode.value === 'debug')
+/** 采样来源：web=现有 WebSocket-DAP 路径；local=ESP32 本地 halt→读→resume 闭环。 */
+const samplingSource = ref<SamplingSource>('web')
+const isLocalSource = computed(() => samplingSource.value === 'local')
+const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
+/** 本地采样器是否已 start（用于保证 stop/卸载时 POST /api/curve/stop）。 */
+const localActive = ref(false)
+const localStatusInfo = shallowRef<LocalCurveStatus | null>(null)
+const localFramesReceived = ref(0)
+const localInvalidCount = ref(0)
+const localOverwrittenCount = ref(0)
+const localGap = ref(false)
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<DisplayFormat>('auto')
@@ -450,6 +522,16 @@ let sampleTimer = 0
 let debugTimer = 0
 let debugRunId = 0
 let debugInFlight = false
+// 设备本地采样状态
+let localTimer = 0
+let localRunId = 0
+let localPollInFlight = false
+let localPollCounter = 0
+let localSince = 0
+let localBaseTimestampUs = 0
+let localLastPollAt = 0
+let localRateTimestamps: number[] = []
+let localSnapshot: Array<{item: CurveSeries; expr: AddressExpr; size: number}> = []
 let sampleSeq = 0
 let sampleEpochMs = 0
 let nextSampleAt = 0
@@ -495,6 +577,12 @@ const f64U32 = new Uint32Array(f64Buffer.buffer)
 
 // ---- 连接状态 -------------------------------------------------------------
 const statusTagType = computed<'primary' | 'success' | 'info' | 'warning' | 'danger'>(() => {
+  if (isLocalSource.value) {
+    if (sampling.value) return 'success'
+    if (statusError.value) return 'danger'
+    if (localActive.value) return 'warning'
+    return 'info'
+  }
   if (connecting.value) return 'warning'
   if (!connected.value) return 'info'
   if (sampling.value) return 'success'
@@ -504,6 +592,11 @@ const statusTagType = computed<'primary' | 'success' | 'info' | 'warning' | 'dan
 })
 
 const statusText = computed(() => {
+  if (isLocalSource.value) {
+    if (sampling.value) return translate('curve.statusSampling')
+    if (statusError.value) return translate('curve.statusError')
+    return translate('curve.localStopped')
+  }
   if (connecting.value) return translate('curve.statusConnecting')
   if (!connected.value) return translate('curve.statusIdle')
   if (sampling.value) return translate('curve.statusSampling')
@@ -731,6 +824,10 @@ function scheduleStatsFlush(): void {
 function flushStats(): void {
   lastStatsAt = performance.now()
   sampleCount.value = ringCount
+  if (isLocalSource.value) {
+    effectiveRate.value = localRateTimestamps.length
+    return
+  }
   effectiveRate.value = recentCompletions.length
   if (droppedPending > 0) {
     droppedCount.value += droppedPending
@@ -1018,7 +1115,211 @@ async function debugSampleTick(runId: number): Promise<void> {
   }
 }
 
+// ---- 设备本地采样（ESP32 halt→read→resume 闭环，Web 只轮询批量帧） ----
+function localErrorText(error: unknown): string {
+  if (error instanceof CurveLocalError) return error.httpStatus > 0 ? `${error.message} (HTTP ${error.httpStatus})` : error.message
+  return error instanceof Error ? error.message : 'unknown error'
+}
+
+/** 按 series 顺序把一帧 payload 拆成每路原始字节；长度不符时返回 null（跳过该帧）。 */
+function splitLocalPayload(payload: Uint8Array): Uint8Array[] | null {
+  const expected = localSnapshot.reduce((sum, entry) => sum + entry.size, 0)
+  if (payload.length < expected) return null
+  const values: Uint8Array[] = []
+  let offset = 0
+  for (const entry of localSnapshot) {
+    values.push(payload.slice(offset, offset + entry.size))
+    offset += entry.size
+  }
+  return values
+}
+
+function trimLocalRateWindow(latestSeconds: number): void {
+  const cutoff = latestSeconds - 1
+  while (localRateTimestamps.length > 0 && localRateTimestamps[0] < cutoff) localRateTimestamps.shift()
+}
+
+async function refreshLocalStatus(): Promise<void> {
+  const status = await getLocalCurveStatus()
+  if (!sampling.value) return
+  localStatusInfo.value = status
+  localInvalidCount.value = status.invalid
+  localOverwrittenCount.value = status.overwritten
+  if (status.running !== true && status.error > 0) {
+    localGap.value = true
+  }
+}
+
+async function postLocalStop(): Promise<void> {
+  try {
+    await stopLocalCurve()
+    // stop 成功后刷新一次状态，页面显示设备已恢复/采样器已停止。
+    try {
+      localStatusInfo.value = await getLocalCurveStatus()
+    } catch {
+      /* 状态刷新失败不影响停止结果 */
+    }
+  } catch (error) {
+    notice.value = {type: 'error', title: translate('curve.localStopFailed', {err: localErrorText(error)})}
+  }
+}
+
+/** 停止设备本地采样：本地先置 stopped，再 best-effort POST /api/curve/stop。 */
+function stopLocalSampling(): void {
+  const wasActive = localActive.value
+  sampling.value = false
+  localRunId += 1
+  localActive.value = false
+  if (localTimer) {
+    window.clearTimeout(localTimer)
+    localTimer = 0
+  }
+  if (wasActive) void postLocalStop()
+  flushStats()
+  scheduleDraw()
+}
+
+async function startLocalSampling(): Promise<void> {
+  if (sampling.value || seriesList.value.length === 0) return
+  // 设备本地与 WebSocket-DAP 互斥：已连接时先停止/断开，避免 DAP 会话冲突。
+  if (connected.value || connecting.value) {
+    await onDisconnect()
+  }
+  const snapshot = seriesList.value.slice()
+  const specs: Array<{id: number; size: number; expr: AddressExpr}> = []
+  const entries: Array<{item: CurveSeries; expr: AddressExpr; size: number}> = []
+  for (let index = 0; index < snapshot.length; index++) {
+    const item = snapshot[index]
+    const expr = item.location
+      ?? (item.sample.address ? {kind: 'addr' as const, address: item.sample.address >>> 0} : null)
+    if (!expr) {
+      notice.value = {type: 'error', title: translate('curve.localRegisterUnsupported')}
+      return
+    }
+    entries.push({item, expr, size: Math.max(1, Math.min(8, item.sample.size))})
+    specs.push({id: index, size: Math.max(1, Math.min(8, item.sample.size)), expr})
+  }
+  statusError.value = false
+  notice.value = null
+  try {
+    await startLocalCurve({intervalUs: localIntervalMs.value * 1000, halt: true, series: specs})
+  } catch (error) {
+    statusError.value = true
+    notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
+    return
+  }
+  // 设备时间戳与既有 ring 时间轴不同源：清空旧数据，按帧时间戳重新累积。
+  clearData()
+  failedCount.value = 0
+  localSnapshot = entries
+  localSince = 0
+  localBaseTimestampUs = 0
+  localPollCounter = 0
+  localPollInFlight = false
+  localRateTimestamps = []
+  localFramesReceived.value = 0
+  localInvalidCount.value = 0
+  localOverwrittenCount.value = 0
+  localGap.value = false
+  localStatusInfo.value = null
+  localActive.value = true
+  sampling.value = true
+  everSampled.value = true
+  localLastPollAt = performance.now()
+  const runId = ++localRunId
+  scheduleLocalPoll(runId, 0)
+  scheduleDraw()
+}
+
+function scheduleLocalPoll(runId: number, delay = LOCAL_POLL_MS): void {
+  if (!localActive.value || runId !== localRunId) return
+  localTimer = window.setTimeout(() => { void localPollTick(runId) }, Math.max(0, delay))
+}
+
+/** 轮询 /api/curve/frames（20–50ms），把 ESP32 微秒时间戳写入现有 ring。 */
+async function localPollTick(runId: number): Promise<void> {
+  localTimer = 0
+  if (!sampling.value || runId !== localRunId || !localActive.value) return
+  if (localPollInFlight) {
+    scheduleLocalPoll(runId)
+    return
+  }
+  localPollInFlight = true
+  try {
+    const page = await getLocalCurveFrames(localSince, LOCAL_POLL_MAX_FRAMES)
+    if (!sampling.value || runId !== localRunId) return
+    if (page.frames.length > 0) {
+      if (page.gap || (localSince > 0 && page.frames[0].seq > localSince + 1)) localGap.value = true
+      const seriesSnapshot = localSnapshot.map((entry) => entry.item)
+      let applied = 0
+      for (const frame of page.frames) {
+        if (frame.seq <= localSince) continue
+        if (localBaseTimestampUs === 0) localBaseTimestampUs = frame.timestampUs
+        const rawValues = splitLocalPayload(frame.payload)
+        if (!rawValues) {
+          localInvalidCount.value += 1
+          continue
+        }
+        const seconds = (frame.timestampUs - localBaseTimestampUs) / 1e6
+        pushSample(seconds, rawValues, seriesSnapshot)
+        localRateTimestamps.push(seconds)
+        trimLocalRateWindow(seconds)
+        localSince = frame.seq
+        applied += 1
+      }
+      if (applied > 0) {
+        localFramesReceived.value += applied
+        effectiveRate.value = localRateTimestamps.length
+        scheduleDraw()
+      }
+    }
+    localPollCounter += 1
+    if (localPollCounter % 10 === 0 || localStatusInfo.value === null) {
+      await refreshLocalStatus()
+    }
+    localLastPollAt = performance.now()
+  } catch (error) {
+    if (!sampling.value || runId !== localRunId) return
+    notice.value = {type: 'error', title: translate('curve.localPollFailed', {err: localErrorText(error)})}
+    stopLocalSampling()
+    statusError.value = true
+    return
+  } finally {
+    localPollInFlight = false
+  }
+  if (sampling.value && runId === localRunId) scheduleLocalPoll(runId)
+}
+
+/** 切换采样来源：本地方案不建立 WS-DAP；从 Web 切到本地时先断开 DAP。 */
+async function onSamplingSourceChange(): Promise<void> {
+  if (sampling.value) return
+  statusError.value = false
+  everSampled.value = false
+  notice.value = null
+  if (isLocalSource.value) {
+    if (connected.value || connecting.value) {
+      await onDisconnect()
+    }
+    const removable = seriesList.value.filter((item) => item.register !== undefined
+      || (!item.location && !item.sample.address))
+    for (const item of removable) removeSeries(item.id)
+    if (removable.length > 0) {
+      globalNotify(translate('curve.localSeriesRemoved', {count: removable.length}), 'info')
+    }
+    localStatusInfo.value = null
+    localFramesReceived.value = 0
+    localInvalidCount.value = 0
+    localOverwrittenCount.value = 0
+    localGap.value = false
+  }
+  scheduleDraw()
+}
+
 function startSampling(): void {
+  if (isLocalSource.value) {
+    void startLocalSampling()
+    return
+  }
   if (!connected.value || !client || seriesList.value.length === 0) return
   if (sampling.value) return
   statusError.value = false
@@ -1052,7 +1353,7 @@ function startSampling(): void {
   scheduleBeat(runId, 0)
 }
 
-function stopSampling(): void {
+function stopWebSampling(): void {
   sampling.value = false
   samplingRunId += 1
   debugRunId += 1
@@ -1071,6 +1372,15 @@ function stopSampling(): void {
   }
   inflightSamples = 0
   flushStats()
+}
+
+/** 统一停止入口：本地采样 POST /api/curve/stop，Web-DAP 保持原有停止逻辑。 */
+function stopSampling(): void {
+  if (isLocalSource.value || localActive.value) {
+    stopLocalSampling()
+    return
+  }
+  stopWebSampling()
 }
 
 /** 切换采样模式：实时模式不能采样依赖寄存器的调试帧变量，切回时移除这些曲线。 */
@@ -1333,6 +1643,9 @@ function nodeMatchesDeep(node: VariableNode, path: string, query: string): boole
 
 /** 当前采样模式下该节点是否可选（实时：固定地址/无寄存器指针；调试：含帧/寄存器位置）。 */
 function nodeSelectable(node: VariableNode): boolean {
+  if (isLocalSource.value) {
+    return !!localExprForNode(node)
+  }
   if (samplingMode.value === 'debug') {
     return !!node.sampleable && (!!node.sample || !!node.location)
   }
@@ -1345,6 +1658,21 @@ function nodeLocationText(node: VariableNode): string {
   if (expr) return addressExprText(expr)
   if (node.sample?.register !== undefined) return `r${node.sample.register}`
   return ''
+}
+
+/** 设备本地采样使用的 AddressExpr：优先调试/指针位置，其次固定地址。 */
+function localExprForNode(node: VariableNode): AddressExpr | null {
+  const location = node.sample?.location ?? node.location
+  if (location) return location
+  if (node.sample?.register !== undefined) return null
+  const address = node.sample?.address ?? 0
+  if (node.sample && address !== 0) return {kind: 'addr', address: address >>> 0}
+  return null
+}
+
+/** 寄存器值变量（DW_OP_reg）暂不支持设备本地采样。 */
+function isLocalRegisterValue(node: VariableNode): boolean {
+  return node.sample?.register !== undefined
 }
 
 const variableRows = computed<VariableRow[]>(() => {
@@ -1367,6 +1695,7 @@ const variableRows = computed<VariableRow[]>(() => {
   // 默认只列当前模式下可采样的变量；关闭过滤后把“有名字但无位置”的变量也列出（标记不可采样）。
   const base = info.variables.filter((node) => {
     if (!onlySampleable.value) return true
+    if (isLocalSource.value) return !!localExprForNode(node)
     return samplingMode.value === 'debug' ? node.sampleable : node.liveSamplable
   })
   if (groupBy.value === 'none') {
@@ -1441,8 +1770,13 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
   if (!node.sample && !node.location) return null
   const location = node.sample?.location ?? node.location
   const register = node.sample?.register
+  if (isLocalSource.value && !localExprForNode(node)) return null
   if (seriesList.value.some((item) => item.key === key)) return null
-  if (seriesList.value.length >= MAX_CURVE_SERIES) {
+  if (isLocalSource.value && seriesList.value.length >= CURVE_LOCAL_MAX_SERIES) {
+    globalNotify(translate('curve.localSeriesLimit', {count: CURVE_LOCAL_MAX_SERIES}), 'warning')
+    return null
+  }
+  if (!isLocalSource.value && seriesList.value.length >= MAX_CURVE_SERIES) {
     globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
     return null
   }
@@ -1471,6 +1805,10 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
 
 function toggleRow(row: VariableRow): void {
   if (row.kind !== 'variable' || !nodeSelectable(row.node)) return
+  if (isLocalSource.value && sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
   if (isRowSelected(row)) {
     removeSeriesByKey(row.key)
     return
@@ -1562,6 +1900,10 @@ function parseAddressToken(token: string): number | null {
 }
 
 function addManualAddress(): void {
+  if (isLocalSource.value && sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
   addressError.value = ''
   const tokens = manualInput.value.split(/[\s,;]+/).filter((token) => token.length > 0)
   if (tokens.length === 0) {
