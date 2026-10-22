@@ -1,9 +1,10 @@
 <template>
-  <div class="text-layout description-style">
+  <div class="text-layout bb-page bb-page--wide">
     <h1 class="page-title">{{ translate('page.update') }}</h1>
-    <p class="text-center text-xs opacity-70">{{ translate('protocol.refreshHint') }}</p>
+    <p class="text-center text-xs bb-muted">{{ translate('protocol.refreshHint') }}</p>
 
-    <el-descriptions class="mt-4" :title="translate('protocol.title')" border :column="1">
+    <section class="bb-card">
+    <el-descriptions :title="translate('protocol.title')" border :column="1">
       <el-descriptions-item :label="translate('protocol.firmwareVersion')">
         {{ currentRunningVersion }}
       </el-descriptions-item>
@@ -32,8 +33,7 @@
         {{ sysStore.sysInfo.sn }}
       </el-descriptions-item>
     </el-descriptions>
-
-    <el-divider></el-divider>
+    </section>
 
     <el-alert
         v-if="!otaEnabled || !store.otaSupported"
@@ -45,8 +45,9 @@
     />
 
     <template v-if="otaEnabled && store.otaSupported">
-    <h2 class="text-lg font-bold">{{ translate('ota.upload.title') }}</h2>
-    <p class="text-sm text-gray-600 mt-1">{{ translate('ota.upload.description') }}</p>
+    <section class="bb-card">
+    <h2 class="bb-card__title text-lg">{{ translate('ota.upload.title') }}</h2>
+    <p class="bb-card__hint">{{ translate('ota.upload.description') }}</p>
 
     <el-alert
         v-if="protocolMismatch"
@@ -58,7 +59,7 @@
     />
 
     <div
-        class="mt-3 border-2 border-dashed rounded-md p-6 text-center cursor-pointer hover:border-blue-400"
+        class="bb-dropzone mt-3 p-6 text-center cursor-pointer"
         :class="{ 'opacity-50 cursor-not-allowed': !canSelectFile }"
         @click="openFileDialog"
         @dragover.prevent
@@ -66,7 +67,7 @@
     >
       <input ref="fileInputRef" type="file" accept=".bin,application/octet-stream" class="hidden"
              @change="onFileInputChange"/>
-      <p class="text-sm text-gray-600">{{ translate('ota.upload.dragHint') }}</p>
+      <p class="text-sm bb-muted">{{ translate('ota.upload.dragHint') }}</p>
       <el-button type="primary" size="small" class="mt-2" :disabled="!canSelectFile">
         {{ translate('ota.upload.selectFile') }}
       </el-button>
@@ -120,7 +121,7 @@
       </div>
       <el-progress :percentage="store.devicePercent" :status="barStatus()"/>
 
-      <div class="grid grid-cols-2 gap-2 mt-2 text-xs text-gray-600">
+      <div class="grid grid-cols-2 gap-2 mt-2 text-xs bb-muted">
         <div>{{ translate('ota.upload.speed') }}: {{ speedText }}</div>
         <div>{{ translate('ota.upload.eta') }}: {{ etaText }}</div>
         <div>{{ formatBytes(store.progress.offset) }} / {{ formatBytes(store.progress.total) }}</div>
@@ -182,11 +183,10 @@
         :closable="false"
         show-icon
     />
+    </section>
     </template>
 
-    <el-divider></el-divider>
-
-    <div class="flex justify-center">
+    <div class="mt-6 flex justify-center">
       <el-button type="warning" :disabled="sysStore.rebootInProgress" @click="doReboot">
         {{ sysStore.rebootInProgress ? translate('system.rebooting') : translate('system.reboot') }}
       </el-button>

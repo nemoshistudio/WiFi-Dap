@@ -1,6 +1,6 @@
 <template>
   <div class="button-m-0 messages-container flex flex-grow overflow-hidden" :class="{'flex-col': store.winLayoutMode ==='col'}">
-    <div v-show="store.winLeft.show" ref="win1Ref" class="bg-gray-50 flex-shrink-0 overflow-auto"
+    <div v-show="store.winLeft.show" ref="win1Ref" class="bb-uart-panel bb-uart-panel--left flex-shrink-0 overflow-auto"
          :class="{
       'max-w-60': store.winLayoutMode==='row', 'xl:max-w-80': store.winLayoutMode==='row',
       'min-w-60': store.winLayoutMode==='row', 'xl:min-w-80': store.winLayoutMode==='row'
@@ -9,19 +9,19 @@
       <text-data-config></text-data-config>
     </div>
 
-    <div v-show="store.winLeft.show && (winDataView.show || store.winRight.show)" ref="firstWinResizeRef"></div>
+    <div v-show="store.winLeft.show && (winDataView.show || store.winRight.show)" ref="firstWinResizeRef" class="uart-splitter"></div>
 
     <div v-show="winDataView.show" class="flex flex-col flex-grow overflow-hidden p-2">
       <textDataViewer :showDataConfig="store.winLeft.show"></textDataViewer>
     </div>
 
-    <div v-show="winDataView.show && store.winRight.show" ref="thirdWinResizeRef"></div>
+    <div v-show="winDataView.show && store.winRight.show" ref="thirdWinResizeRef" class="uart-splitter"></div>
 
     <div v-show="store.winRight.show" ref="win2Ref" :class="{
       'max-w-80': store.winLayoutMode==='row', 'xl:max-w-96': store.winLayoutMode==='row',
       'min-w-80': store.winLayoutMode==='row', 'xl:min-w-96': store.winLayoutMode==='row'
     }"
-         class="bg-gray-50 flex flex-col flex-shrink-0 min-h-32 overflow-auto p-2">
+         class="bb-uart-panel bb-uart-panel--right flex flex-col flex-shrink-0 min-h-32 overflow-auto p-2">
       <TextDataMacro @winSizeRefresh="handleWinSizeRefresh"></TextDataMacro>
     </div>
   </div>
@@ -468,9 +468,34 @@ onUnmounted(() => {
 }
 
 .custom-style .el-segmented {
-  --el-segmented-item-selected-color: var(--el-text-color-primary);
-  --el-segmented-item-selected-bg-color: var(--el-color-primary);
+  --el-segmented-item-selected-color: var(--bb-text-inverse);
+  --el-segmented-item-selected-bg-color: var(--bb-accent);
   --el-border-radius-base: 16px;
+}
+
+/* Side workbench panels (left config / right macros) */
+.bb-uart-panel {
+  background: var(--bb-panel-bg);
+  color: var(--bb-text);
+}
+
+.bb-uart-panel--left {
+  border-right: 1px solid var(--bb-border);
+}
+
+.bb-uart-panel--right {
+  border-left: 1px solid var(--bb-border);
+}
+
+/* Resizable splitters: JS sets only the border width; color follows the theme. */
+.uart-splitter {
+  flex: 0 0 auto;
+  border-style: solid;
+  border-color: var(--bb-border);
+}
+
+.uart-splitter:hover {
+  border-color: var(--bb-accent);
 }
 
 .button-m-0 :deep(.el-checkbox) {

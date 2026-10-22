@@ -1,7 +1,7 @@
 <template>
-  <div class="text-layout">
+  <div class="text-layout bb-page bb-page--wide">
     <h1 class="page-title">{{ translate('target.title') }}</h1>
-    <p class="text-center text-xs opacity-70">{{ translate('target.description') }}</p>
+    <p class="text-center text-xs bb-muted">{{ translate('target.description') }}</p>
 
     <el-alert
         class="mt-2"
@@ -11,14 +11,13 @@
         show-icon
     />
 
-    <el-divider></el-divider>
-
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h2 class="text-lg font-bold">{{ translate('target.detect') }}</h2>
-      <el-button type="primary" :loading="detecting" :disabled="flashing" @click="onDetect">
-        {{ detecting ? translate('target.detecting') : translate('target.detect') }}
-      </el-button>
-    </div>
+    <section class="bb-card">
+      <div class="bb-card__head">
+        <h2 class="bb-card__title text-lg">{{ translate('target.detect') }}</h2>
+        <el-button type="primary" :loading="detecting" :disabled="flashing" @click="onDetect">
+          {{ detecting ? translate('target.detecting') : translate('target.detect') }}
+        </el-button>
+      </div>
 
     <el-alert
         v-if="detectError"
@@ -56,12 +55,13 @@
         show-icon
     />
 
-    <el-divider></el-divider>
+    </section>
 
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h2 class="text-lg font-bold">{{ translate('target.selectFile') }}</h2>
-      <el-button :disabled="flashing" @click="openFileDialog">{{ translate('target.selectFile') }}</el-button>
-    </div>
+    <section class="bb-card">
+      <div class="bb-card__head">
+        <h2 class="bb-card__title text-lg">{{ translate('target.selectFile') }}</h2>
+        <el-button :disabled="flashing" @click="openFileDialog">{{ translate('target.selectFile') }}</el-button>
+      </div>
     <input
         ref="fileInputRef"
         type="file"
@@ -121,7 +121,10 @@
         show-icon
     />
 
-    <div class="flex flex-wrap gap-2 justify-center mt-4">
+    </section>
+
+    <section class="bb-card">
+    <div class="flex flex-wrap gap-2 justify-center">
       <el-button
           type="primary"
           :loading="flashing"
@@ -193,6 +196,7 @@
         :closable="false"
         show-icon
     />
+    </section>
   </div>
 </template>
 

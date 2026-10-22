@@ -1,12 +1,11 @@
 <template>
-  <div class="text-layout">
+  <div class="text-layout bb-page bb-page--wide">
     <h1 class="page-title">
       Wi-Fi {{ translate('wifi.settings') }}
     </h1>
-    <el-divider></el-divider>
-
-    <h2 class="mb-4 text-xl font-bold tracking-tight md:text-2xl lg:text-3xl">{{ translate('wifi.connection') }} Wi-Fi</h2>
-    <el-form label-width="auto" ref="formRef" :model="ssidValidateForm" class="m-auto">
+    <section class="bb-card">
+      <h2 class="bb-card__title mb-4">{{ translate('wifi.connection') }} Wi-Fi</h2>
+      <el-form label-width="auto" ref="formRef" :model="ssidValidateForm" class="m-auto">
       <el-form-item
           label="Wi-Fi"
           prop="wifiSsid"
@@ -52,14 +51,13 @@
       <div class="flex justify-center">
         <el-button @click="onConnectClick" type="primary">{{ translate('wifi.connect') }}</el-button>
       </div>
-    </el-form>
+      </el-form>
+    </section>
 
-    <el-divider></el-divider>
-
-    <div v-if="savedSupported" class="mb-4">
+    <section v-if="savedSupported" class="bb-card">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-xl font-bold tracking-tight md:text-2xl">
+          <h2 class="bb-card__title">
             {{ translate('wifi.saved.title') }}
           </h2>
           <el-tooltip effect="light" :content="translate('wifi.saved.autoSaveHint')" :show-after="500">
@@ -88,7 +86,7 @@
           </el-tooltip>
         </div>
       </div>
-      <p class="text-sm text-gray-600 mt-1">{{ translate('wifi.saved.description') }}</p>
+      <p class="bb-card__hint">{{ translate('wifi.saved.description') }}</p>
 
       <el-empty v-if="!savedList.length" :description="translate('wifi.saved.empty')" :image-size="80"/>
       <el-table v-else :data="savedList" size="small" class="mt-2" border>
@@ -122,33 +120,30 @@
           </template>
         </el-table-column>
       </el-table>
-    </div>
+    </section>
 
-    <el-divider></el-divider>
-    <div class="flex items-center">
-      <h5 class="text-md font-bold text-gray-800 w-32">Wi-Fi {{ translate('wifi.mode') }}</h5>
-      <div class="flex shrink-0">
+    <section class="bb-card">
+      <div class="flex flex-wrap items-center gap-3">
+        <h2 class="bb-card__title w-32">Wi-Fi {{ translate('wifi.mode') }}</h2>
         <el-tooltip effect="light">
           <template #content>
             <div v-html="translate('wifi.modeTipsHtml')"></div>
           </template>
-          <InlineSvg name="help" class="w-3.5 h-3.5 text-gray-500 cursor-help"></InlineSvg>
+          <InlineSvg name="help" class="w-3.5 h-3.5 bb-muted cursor-help"></InlineSvg>
         </el-tooltip>
+        <el-select v-model="wifiMode" :disabled="wsStore.state != ControlEvent.CONNECTED" class="wifi-mode-select">
+          <el-option
+              v-for="item in wifiModeOptions"
+              :key="item.key"
+              :value="item.key"
+              :label="item.label"
+          />
+        </el-select>
+        <el-button type="primary" @click="wifiChangeMode" :loading="wifiMode_loading">{{ translate('wifi.save') }}</el-button>
       </div>
-      <el-select v-model="wifiMode" :disabled="wsStore.state != ControlEvent.CONNECTED">
-        <el-option
-            v-for="item in wifiModeOptions"
-            :key="item.key"
-            :value="item.key"
-            :label="item.label"
-        />
-      </el-select>
-      <el-button type="primary" @click="wifiChangeMode" :loading="wifiMode_loading">{{ translate('wifi.save') }}</el-button>
-    </div>
+    </section>
 
-    <el-divider></el-divider>
-
-
+    <section class="bb-card">
     <el-descriptions
         :column="1"
         border
@@ -310,9 +305,9 @@
     <div class="flex justify-center mt-4">
       <el-button type="primary" :loading="wifiMode_loading" @click="wifiStaSetStaticInfo">{{ translate('wifi.save') }}</el-button>
     </div>
+    </section>
 
-    <el-divider></el-divider>
-
+    <section class="bb-card">
     <el-descriptions
         :column="1"
         border
@@ -341,7 +336,7 @@
               {{ isDefaultApSsid ? translate('wifi.saved.apDefault') : translate('wifi.saved.apCustom') }}
             </el-tag>
           </div>
-          <p class="text-xs text-gray-500 mt-1">{{ translate('wifi.saved.apDefaultHint') }}</p>
+          <p class="bb-card__hint">{{ translate('wifi.saved.apDefaultHint') }}</p>
         </div>
       </el-descriptions-item>
       <el-descriptions-item span="6">
@@ -392,7 +387,7 @@
       <el-button :loading="wifiMode_loading" @click="onResetApDefault">{{ translate('wifi.ap.resetDefault') }}</el-button>
       <el-button type="primary" :loading="wifiMode_loading" @click="wifiApChangeCredential">{{ translate('wifi.save') }}</el-button>
     </div>
-    <el-divider></el-divider>
+    </section>
 
     <el-dialog v-model="savedAddVisible" :title="translate('wifi.saved.addTitle')" width="420px">
       <el-form label-width="auto">
@@ -1042,5 +1037,20 @@ onUnmounted(() => {
 <style scoped lang="postcss">
 .description-style :deep(.el-descriptions__label) {
   @apply w-32
+}
+
+.wifi-mode-select {
+  flex: 0 0 auto;
+  width: 12rem;
+}
+
+@media (max-width: 639px) {
+  .description-style :deep(.el-descriptions__label) {
+    @apply w-20;
+  }
+
+  .wifi-mode-select {
+    width: 100%;
+  }
 }
 </style>

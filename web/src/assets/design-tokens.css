@@ -425,3 +425,131 @@ html.dark .border-gray-200 {
 html.dark .border-gray-300 {
   border-color: var(--bb-border-strong) !important;
 }
+
+/* --------------------------------------------------------------------------
+ * 6. Page content scaffolding (WiFi / UART / Target / Update / About / 404)
+ *
+ *    Shared primitives so every non-curve page uses the same panel/card,
+ *    muted-text and spacing language as the app shell. Dark-first; light
+ *    theme switches automatically through the tokens above.
+ * ------------------------------------------------------------------------ */
+
+/* Light theme: white brand artwork needs inverting on light surfaces.
+ * (A plain global class keeps this out of Vue's scoped `:global()` handling,
+ * which mis-compiles pseudo-selectors such as html:not(.dark) in this build.) */
+html:not(.dark) .bb-invert-on-light {
+  filter: invert(1);
+}
+
+/* Plain anchors (About credits, etc.) follow the themed accent instead of
+ * the browser default blue, which is unreadable on the dark background. */
+a {
+  color: var(--bb-accent);
+}
+
+.bb-page {
+  color: var(--bb-text);
+}
+
+/* Roomier variant of .text-layout for pages with tables/descriptions. */
+.bb-page--wide {
+  max-width: 64rem;
+}
+
+.bb-card {
+  margin: var(--bb-space-4) 0;
+  padding: var(--bb-space-5);
+  background: var(--bb-panel-bg);
+  border: 1px solid var(--bb-panel-border);
+  border-radius: var(--bb-panel-radius);
+  box-shadow: var(--bb-shadow-sm);
+  color: var(--bb-text);
+}
+
+.bb-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--bb-space-2);
+  margin-bottom: var(--bb-space-3);
+}
+
+.bb-card__title {
+  color: var(--bb-text);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.bb-card__hint {
+  margin-top: var(--bb-space-1);
+  font-size: var(--bb-font-size-md);
+  color: var(--bb-text-muted);
+}
+
+.bb-muted {
+  color: var(--bb-text-muted);
+}
+
+.bb-text-secondary {
+  color: var(--bb-text-secondary);
+}
+
+.bb-mono {
+  font-family: var(--bb-font-mono);
+}
+
+/* Small, tokenised drop zone (Update page) - also used as a generic dashed
+ * surface for future pages. */
+.bb-dropzone {
+  border: 2px dashed var(--bb-border-strong);
+  border-radius: var(--bb-radius-md);
+  background: var(--bb-surface-inset);
+  color: var(--bb-text-secondary);
+  transition: border-color var(--bb-duration-fast) var(--bb-ease),
+    background-color var(--bb-duration-fast) var(--bb-ease);
+}
+
+.bb-dropzone:hover {
+  border-color: var(--bb-accent);
+  background: var(--bb-accent-soft);
+}
+
+/* --------------------------------------------------------------------------
+ * 7. Element Plus content polish for the migrated pages
+ * ------------------------------------------------------------------------ */
+html.dark .el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: var(--bb-surface-inset);
+  --el-table-border-color: var(--bb-border);
+  --el-table-row-hover-bg-color: var(--bb-surface-raised);
+}
+
+html.dark .el-empty__description p {
+  color: var(--bb-text-muted);
+}
+
+/* The default dark empty illustration is nearly invisible on the near-black
+ * page background; lift it slightly for contrast. */
+html.dark .el-empty__image {
+  filter: brightness(1.55);
+}
+
+/* Disabled primary buttons keep readable text on the dark surface instead of
+ * the default blue-tinted block with 50% white text. */
+html.dark .el-button--primary.is-disabled,
+html.dark .el-button--primary.is-disabled:hover,
+html.dark .el-button--primary.is-disabled:focus {
+  background-color: var(--bb-surface-raised);
+  border-color: var(--bb-border);
+  color: var(--bb-text-faint);
+}
+
+@media (max-width: 639px) {
+  .bb-card {
+    margin: var(--bb-space-3) 0;
+    padding: var(--bb-space-3);
+    border-radius: var(--bb-radius-sm);
+  }
+}

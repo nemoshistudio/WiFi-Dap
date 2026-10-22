@@ -80,7 +80,8 @@ static struct {
     volatile bool stop_req;
     curve_worker_state_t worker_state;
     bool running;
-    uint8_t current_group;       /* round-robin sampling cursor (v2) */
+    uint8_t current_group;       /* next group to sample (status field) */
+    uint8_t schedule_pos;        /* weighted round-robin position */
     bool dap_held;               /* worker task only */
 
     const curve_config_t *cfg;   /* owned by HTTP layer; immutable while running */
@@ -646,9 +647,14 @@ static void curve_periodic_loop(void)
         uint16_t payload_len = 0U;
         uint8_t pc_state = 0U;
         uint32_t pc_value = 0U;
-        uint8_t group_index = s_engine.current_group;
+        uint8_t group_index;
         const curve_group_t *group;
 
+        if (cfg->schedule_len > 0U) {
+            group_index = cfg->schedule[s_engine.schedule_pos];
+        } else {
+            group_index = s_engine.current_group;
+        }
         if (group_index >= cfg->group_count) {
             group_index = 0U;
         }
@@ -712,7 +718,11 @@ static void curve_periodic_loop(void)
                                 tick_ok, (uint32_t)(t_end - t_start), tick_err);
         }
         engine_lock();
-        s_engine.current_group = curve_next_group(group_index, cfg->group_count);
+        s_engine.schedule_pos =
+            curve_next_slot(s_engine.schedule_pos, cfg->schedule_len);
+        s_engine.current_group = (cfg->schedule_len > 0U)
+                                     ? cfg->schedule[s_engine.schedule_pos]
+                                     : 0U;
         engine_unlock();
 
         if (tick_ok) {
@@ -928,9 +938,14 @@ static void curve_breakpoint_loop(void)
             uint32_t sample_us;
             uint8_t pc_state = 0U;
             uint32_t pc_value = 0U;
-            uint8_t group_index = s_engine.current_group;
+            uint8_t group_index;
             const curve_group_t *group;
 
+            if (cfg->schedule_len > 0U) {
+                group_index = cfg->schedule[s_engine.schedule_pos];
+            } else {
+                group_index = s_engine.current_group;
+            }
             if (group_index >= cfg->group_count) {
                 group_index = 0U;
             }
@@ -963,7 +978,11 @@ static void curve_breakpoint_loop(void)
                                 collect_ok, sample_us, collect_err);
             engine_lock();
             s_engine.stat_sampled++;
-            s_engine.current_group = curve_next_group(group_index, cfg->group_count);
+            s_engine.schedule_pos =
+                curve_next_slot(s_engine.schedule_pos, cfg->schedule_len);
+            s_engine.current_group = (cfg->schedule_len > 0U)
+                                         ? cfg->schedule[s_engine.schedule_pos]
+                                         : 0U;
             engine_unlock();
             if (!collect_ok) {
                 ESP_LOGW(CURVE_TAG, "breakpoint sample failed (%s)",
@@ -1415,7 +1434,8 @@ esp_err_t curve_engine_start(const curve_config_t *cfg, char *err, size_t err_le
         return rc;
     }
     s_engine.cfg = cfg; /* HTTP-owned static config; valid while running */
-    s_engine.current_group = 0U;
+    s_engine.schedule_pos = 0U;
+    s_engine.current_group = (cfg->schedule_len > 0U) ? cfg->schedule[0] : 0U;
     s_engine.message[0] = '\0';
     s_engine.cmd_result = ESP_FAIL;
     s_engine.stop_req = false;

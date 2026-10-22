@@ -509,6 +509,112 @@ if (typeof File === 'undefined') {
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n[12] task-29：有变量文件过滤 / 实时值 / 行地址 / 按 key 定位')
+// ---------------------------------------------------------------------------
+const keepSet = new Set(['src/main.c', 'src/pid.c'])
+const filtered = sp.filterSourceFiles(projectFiles, keepSet)
+eq('filter: only matched files', filtered.map((file) => file.path), ['src/main.c', 'src/pid.c'])
+eq('filter: Map input (refsByFile)', sp.filterSourceFiles(projectFiles, new Map([['lib/motor/motor.cpp', []], ['src/main.c', []]])).map((file) => file.path), ['lib/motor/motor.cpp', 'src/main.c'])
+eq('filter: windows path normalization', sp.filterSourceFiles(projectFiles, new Set(['src\\main.c'])).map((file) => file.path), ['src/main.c'])
+eq('filter: null -> empty', sp.filterSourceFiles(projectFiles, null), [])
+eq('filter: empty set -> empty', sp.filterSourceFiles(projectFiles, new Set()), [])
+
+const variableTree = sp.buildVariableSourceTree(projectFiles, keepSet, 'proj')
+eq('variable tree: only kept dirs', variableTree.dirs.map((dir) => dir.name), ['src'])
+eq('variable tree: total kept files', variableTree.totalFileCount, 2)
+eq('variable tree: root name', variableTree.name, 'proj')
+eq('variable tree: kept files', variableTree.dirs[0].files.map((file) => file.name), ['main.c', 'pid.c'])
+const motorTree = sp.buildVariableSourceTree(projectFiles, new Set(['lib/motor/motor.cpp']))
+eq('variable tree: nested dirs kept', motorTree.dirs.map((dir) => dir.name), ['lib'])
+eq('variable tree: nested total', motorTree.dirs[0].totalFileCount, 1)
+
+// 按 key 定位（复用 [6] 的 matchResult）
+const gSpeedKey = sp.sourceVariableKey('g_speed', {address: 0x20000010})
+const keyed = sp.findVariableLocationByKey(matchResult, gSpeedKey)
+eq('find by key: file', keyed?.filePath, 'src/main.c')
+eq('find by key: line', keyed?.ref.line, 10)
+eq('find by key: identifier', keyed?.ref.identifier, 'g_speed')
+eq('find by key: missing key', sp.findVariableLocationByKey(matchResult, 'nope@0'), null)
+eq('find by key: blank key', sp.findVariableLocationByKey(matchResult, '  '), null)
+eq('find by key: null key', sp.findVariableLocationByKey(matchResult, null), null)
+
+// 实时值（liveValues）
+const mainRefs = matchResult.refsByFile.get('src/main.c')
+const liveRefs = mainRefs.slice(0, 2)
+const liveMap = {
+  [liveRefs[0].key]: {text: '1.5', color: '#38bdf8'},
+  [liveRefs[1].key]: {text: '7', stale: true},
+  'not-in-file@0': {text: 'x'},
+}
+const liveEntries = sp.collectLiveValueEntries(liveRefs, liveMap)
+eq('live values: count', liveEntries.length, 2)
+eq('live values: key order', liveEntries.map((entry) => entry.key), [liveRefs[0].key, liveRefs[1].key])
+eq('live values: text', liveEntries.map((entry) => entry.value.text), ['1.5', '7'])
+eq('live values: color passthrough', liveEntries[0].value.color, '#38bdf8')
+eq('live values: stale passthrough', liveEntries[1].value.stale, true)
+eq('live values: identifier', liveEntries[0].identifier, 'g_speed')
+eq('live values: dedupe same key', sp.collectLiveValueEntries([liveRefs[0], liveRefs[0]], liveMap).length, 1)
+eq('live values: null map', sp.collectLiveValueEntries(liveRefs, null), [])
+eq('live values: unknown keys skipped', sp.collectLiveValueEntries(liveRefs, {}), [])
+eq('live values: non-string text skipped', sp.collectLiveValueEntries([liveRefs[0]], {[liveRefs[0].key]: {text: 42}}), [])
+
+// 行地址（line-click / 断点）
+const lineAddresses = {'src/main.c': {10: 0x08001235, 12: 0}}
+eq('line address: direct', sp.resolveLineAddress(lineAddresses, 'src/main.c', 10), 0x08001235)
+eq('line address: windows path normalized', sp.resolveLineAddress(lineAddresses, 'src\\main.c', 10), 0x08001235)
+eq('line address: other file', sp.resolveLineAddress(lineAddresses, 'src/pid.c', 10), undefined)
+eq('line address: zero filtered', sp.resolveLineAddress(lineAddresses, 'src/main.c', 12), undefined)
+eq('line address: unknown line', sp.resolveLineAddress(lineAddresses, 'src/main.c', 99), undefined)
+eq('line address: invalid line', sp.resolveLineAddress(lineAddresses, 'src/main.c', 0), undefined)
+eq('line address: null map', sp.resolveLineAddress(null, 'src/main.c', 10), undefined)
+eq('line address: absolute key form', sp.resolveLineAddress({'/abs/src/main.c': {3: 0x08000011}}, '/abs/src/main.c', 3), 0x08000011)
+
+// ---------------------------------------------------------------------------
+console.log('\n[13] task-29：SourceBrowser 组件静态契约（API/虚拟树/实时值/断点）')
+// ---------------------------------------------------------------------------
+const componentRoot = path.join(root, 'src', 'components', 'source')
+const sourceBrowserSource = fs.readFileSync(path.join(componentRoot, 'SourceBrowser.vue'), 'utf8')
+const sourceLabelsSource = fs.readFileSync(path.join(componentRoot, 'labels.ts'), 'utf8')
+const sourceBrowserDocs = fs.readFileSync(path.join(root, '..', 'docs', 'source-browser.md'), 'utf8')
+check('component: props liveValues/activeKey/lineAddresses', /liveValues\?: SourceLiveValueMap/.test(sourceBrowserSource)
+  && /activeKey\?: string \| null/.test(sourceBrowserSource)
+  && /lineAddresses\?: SourceLineAddressMap \| null/.test(sourceBrowserSource))
+check('component: emit line-click payload path/line/address', /\(event: 'line-click', payload: SourceLineClickPayload\): void/.test(sourceBrowserSource))
+check('component: 默认 Files with variables（showAllFiles=false）', /const showAllFiles = ref\(false\)/.test(sourceBrowserSource)
+  && /!showAllFiles\.value && hasVariables\.value && matchedFilePaths\.value\.size > 0/.test(sourceBrowserSource))
+check('component: 有变量文件过滤用 filterSourceFiles', /filterSourceFiles\(project\.files, matchedFilePaths\.value\)/.test(sourceBrowserSource)
+  && /buildSourceTree\(visibleProjectFiles\.value, project\.rootName\)/.test(sourceBrowserSource))
+check('component: Show all project files 开关', /v-model="showAllFiles"/.test(sourceBrowserSource)
+  && /labels\.showAllProjectFiles/.test(sourceBrowserSource))
+check('component: 虚拟树只渲染可见窗口', /treeViewportRef/.test(sourceBrowserSource)
+  && /tree-canvas/.test(sourceBrowserSource)
+  && /visibleTreeRows/.test(sourceBrowserSource)
+  && /const TREE_ROW_HEIGHT = 24/.test(sourceBrowserSource)
+  && /treeVirtualWindow/.test(sourceBrowserSource))
+check('component: 行号 gutter 点击 emit line-click + 地址解析', /data-gutter/.test(sourceBrowserSource)
+  && /onGutterClick/.test(sourceBrowserSource)
+  && /resolveLineAddress\(props\.lineAddresses, path, line\)/.test(sourceBrowserSource)
+  && /emit\('line-click'/.test(sourceBrowserSource))
+check('component: 实时值渲染（行尾 chip/颜色点/stale）', /collectLiveValueEntries/.test(sourceBrowserSource)
+  && /sb-live-value/.test(sourceBrowserSource)
+  && /sb-live-dot/.test(sourceBrowserSource)
+  && /entry\.value\.stale/.test(sourceBrowserSource))
+check('component: activeKey 高亮（行/变量 token）', /activeKeyValue/.test(sourceBrowserSource)
+  && /sb-line-active/.test(sourceBrowserSource)
+  && /sb-token-active/.test(sourceBrowserSource))
+check('component: expose scrollToVariableByKey', /scrollToVariableByKey,/.test(sourceBrowserSource)
+  && /findVariableLocationByKey\(matchResult\.value, needle\)/.test(sourceBrowserSource))
+check('component: unmatched 默认折叠（details 无 open）', /<details v-if="matchResult && matchResult\.unmatchedCount > 0" class="sb-unmatched">/.test(sourceBrowserSource)
+  && !/<details[^>]*\sopen[\s>]/.test(sourceBrowserSource))
+const newLabelFields = ['onlyFilesWithVariables', 'showAllProjectFiles', 'noFilesWithVariables', 'liveValueStale', 'breakpointLineHint', 'liveValues']
+check('labels: task-29 新增字段可选且有默认英文', newLabelFields.every((field) => {
+  const defaultValue = labels.DEFAULT_SOURCE_BROWSER_LABELS[field]
+  return sourceLabelsSource.includes(`${field}?: string`) && typeof defaultValue === 'string' && defaultValue.length > 0
+}))
+eq('labels: showAllProjectFiles 默认文案', labels.DEFAULT_SOURCE_BROWSER_LABELS.showAllProjectFiles, 'Show all project files')
+check('docs: SourceBrowser API 文档覆盖 task-29', ['liveValues', 'line-click', 'scrollToVariableByKey', 'lineAddresses', 'Files with variables'].every((needle) => sourceBrowserDocs.includes(needle)))
+
+// ---------------------------------------------------------------------------
 console.log('\n[10] 可选：只读扫描真实项目根目录')
 // ---------------------------------------------------------------------------
 const realRoot = process.env.REFERENCE_ROOT ?? '$HOME/reference firmware'

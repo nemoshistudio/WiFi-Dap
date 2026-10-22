@@ -69,14 +69,16 @@ version=2, flags bit0=gap, count u16, first_seq u32, frame_bytes u16 = max group
 payload, reserved) and variable-length frames (`seq u32`, `timestamp_us u64`,
 `group u8`, `payload_len u16`, payload bytes).  CVF1 is no longer produced.
 
-Ring: dynamically 128..512 frames, clamped to a ~32 KiB budget
-(`capacity = clamp(32768 / (15 + frame_bytes), 128, 512)`: 16 B payload -> 512
-frames, 32 B -> 512, 128 B -> 229, 256 B (one full group) -> 128 frames /
-~34 KiB heap).  This is the *ESP32* localStorage ring; the target-side CVF2
-`frame_bytes` is the max group payload, and per-frame `payload_len` can be
-smaller.  The 128-frame floor keeps the worst-case allocation bounded while
-still covering >2.5 s of history at 50 Hz (`ring_frames` in status reports the
-actual capacity).  The 128-frame floor keeps the worst-case allocation bounded while still
+Ring: hard-bounded by an **8 KiB heap budget**; the capacity is
+`clamp(8192 / (15 + frame_bytes), 16, 512)` frames, so a large payload buys
+fewer slots instead of a larger allocation:
+16 B -> 264 frames (~8.2 KiB), 64 B -> 103, 128 B -> 57, 256 B (one full group)
+-> 30 frames (~8.1 KiB).  The 16-frame floor is only a math guard (never
+reached within the 256 B payload cap); if `malloc` still fails the engine halves
+the count down to 8 frames.  This guarantees `start` for 32x8B / 64x8B / 256+
+series payloads without the old ~34 KiB worst case.  `ring_frames` in
+`/api/curve/status` reports the actual capacity (never a nominal value);
+history at 50 Hz is ~5.3 s / 2.1 s / 1.1 s / 0.6 s for the sizes above.  The 128-frame floor keeps the worst-case allocation bounded while still
 covering >2.5 s of history at 50 Hz (`ring_frames` in status reports the
 actual capacity).  `overwritten` counts **frames that were
 evicted before any `frames?since=...` response delivered them** (a served
@@ -203,6 +205,15 @@ function PC range:
 * **CVF2**: per-frame `group`/`payload_len` allow different group payload sizes;
   the ring slots are `max(group sample_bytes)`.  `served_seq`/`overwritten`/`gap`
   semantics are unchanged (one ring for all groups).
+* **Group weights (P2, backend-only)**: each `groups[]` entry accepts an
+  optional `weight` 1..8 (default 1).  The parser expands the weights into a
+  deterministic schedule (group index repeated `weight` times, total slots
+  <= 8 groups x 8 = 64) and every tick samples the next schedule entry, so a
+  heavier ("visible/critical") group gets proportionally more frames.  All
+  weights default to 1, which reproduces the legacy equal round-robin exactly;
+  the Web UI does not send the field yet and existing clients are unaffected.
+  Invalid weights (0, >8, non-numeric) return HTTP 400.  `CVF2.group` still
+  carries the original group index, so the Web mapping is unchanged.
 * **Static budget**: the HTTP layer owns one static `curve_config_t`
   (~17.2 KiB: 8 groups, 256 series, 256 loclist variants, 768 expression nodes)
   and the engine only keeps a const pointer while running; the parser refuses
@@ -287,6 +298,12 @@ function PC range:
 * The static config is a single instance: only one sampler session at a time
   (as before), and a new start request while running returns 409 busy before
   the request body is parsed.
+* The ring is intentionally small (8 KiB budget): at 256 B/frame only 30 frames
+  (~0.6 s at 50 Hz) are retained.  The Web UI polls every 30-50 ms, so this is
+  enough; a stalled browser will see `overwritten` grow sooner than before.
+* Group weights are a backend-only scheduling feature for now; the Web UI does
+  not send `weight` and always gets equal round-robin.  A weight only changes
+  how often a group is sampled, not its refresh timestamp cadence per group.
 * Very large logical combinations (e.g. hundreds of deep variant expressions)
   are bounded by the 256-variant / 768-expression-node pools; the parser
   rejects them explicitly.  HTTP request bodies are capped at 4 KiB, so real

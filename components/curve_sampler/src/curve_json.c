@@ -115,7 +115,6 @@ static esp_err_t parse_expr_compact(const char **cursor, curve_config_t *cfg,
     uint16_t index;
     uint32_t value;
     uint32_t reg;
-    int32_t offset;
 
     if (depth > CURVE_MAX_EXPR_DEPTH) {
         return curve_parse_fail(err, err_len, "expr depth > %u",
@@ -668,11 +667,24 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         }
         cJSON_ArrayForEach(group, groups_item) {
             const cJSON *series_array;
+            const cJSON *weight_item;
+            uint32_t weight = 1U;
 
             if (!cJSON_IsObject(group)) {
                 result = curve_parse_fail(err, err_len,
                                           "groups[%u] must be an object",
                                           (unsigned)parsed_groups);
+                goto out;
+            }
+            /* P2 optional weighted round-robin weight (1..8, default 1). */
+            weight_item = cJSON_GetObjectItemCaseSensitive(group, "weight");
+            if (weight_item != NULL &&
+                !json_u32(weight_item, 1.0, (double)CURVE_MAX_GROUP_WEIGHT,
+                          &weight)) {
+                result = curve_parse_fail(err, err_len,
+                                          "groups[%u].weight must be 1..%u",
+                                          (unsigned)parsed_groups,
+                                          (unsigned)CURVE_MAX_GROUP_WEIGHT);
                 goto out;
             }
             series_array = cJSON_GetObjectItemCaseSensitive(group, "series");
@@ -682,6 +694,7 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
             if (result != ESP_OK) {
                 goto out;
             }
+            cfg->groups[parsed_groups].weight = (uint8_t)weight;
             parsed_groups++;
         }
         cfg->group_count = (uint8_t)parsed_groups;
@@ -705,7 +718,22 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         if (result != ESP_OK) {
             goto out;
         }
+        cfg->groups[0].weight = 1U; /* legacy single group: weight 1 */
         cfg->group_count = 1U;
+    }
+
+    /* Weighted round-robin schedule: group index repeated `weight` times.
+     * All weights default to 1, which reproduces the legacy equal rotation. */
+    cfg->schedule_len = 0U;
+    for (uint8_t g = 0U; g < cfg->group_count; g++) {
+        uint8_t w = cfg->groups[g].weight;
+
+        if (w == 0U) {
+            w = 1U;
+        }
+        for (uint8_t slot = 0U; slot < w; slot++) {
+            cfg->schedule[cfg->schedule_len++] = g;
+        }
     }
 
     cfg->sample_bytes = max_sample_bytes;

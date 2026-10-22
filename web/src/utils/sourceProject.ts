@@ -569,6 +569,36 @@ export function flattenSourceTree(tree: SourceTreeNode, expanded: ReadonlySet<st
     return rows
 }
 
+/**
+ * 只保留 path 在 keepPaths 中的项目文件（保持原顺序）。
+ *
+ * 用于 SourceBrowser 默认视图 "Files with variables"：keepPaths 通常直接传
+ * `VariableFileMatchResult.refsByFile`（Map，key 为匹配到的项目相对路径），
+ * 从而把文件树从 2000 文件收敛到真正有 DWARF 变量的少数文件。
+ */
+export function filterSourceFiles(
+    files: readonly SourceFileMeta[],
+    keepPaths: ReadonlySet<string> | ReadonlyMap<string, unknown> | null | undefined,
+): SourceFileMeta[] {
+    if (!keepPaths) return []
+    const keep = new Set<string>()
+    for (const path of keepPaths.keys()) {
+        const normalized = normalizeRelativePath(String(path ?? ''))
+        if (normalized) keep.add(normalized)
+    }
+    if (keep.size === 0) return []
+    return files.filter((file) => keep.has(normalizeRelativePath(file.path)))
+}
+
+/** 只由“有变量的文件”构建目录树（目录/计数只统计命中文件）。 */
+export function buildVariableSourceTree(
+    files: readonly SourceFileMeta[],
+    keepPaths: ReadonlySet<string> | ReadonlyMap<string, unknown> | null | undefined,
+    rootName = '',
+): SourceTreeNode {
+    return buildSourceTree(filterSourceFiles(files, keepPaths), rootName)
+}
+
 // ---------------------------------------------------------------------------
 // 5. DWARF 变量 -> 源码文件匹配
 // ---------------------------------------------------------------------------
@@ -1036,6 +1066,113 @@ export function findVariableCandidates<V extends SourceVariableLike>(
         }
     }
     return out
+}
+
+// ---- 5.1 实时值 / 活动变量 / 行断点（父页面联动，纯数据） --------------------
+
+/** 源码行尾/变量 token 旁显示的实时值（父页面从曲线最新点生成）。 */
+export interface SourceLiveValue {
+    /** 已格式化的值文本（组件只展示，不做采样/解码） */
+    text: string
+    /** 颜色点（通常取曲线颜色），缺省用主题 accent */
+    color?: string
+    /** 数据已过期（如已停止采样/该系列当前无新点）：灰显 */
+    stale?: boolean
+}
+
+/** key = 变量选中键（`path@address`，与 CurveSeries.key/selectedKeys 一致）。 */
+export type SourceLiveValueMap = Readonly<Record<string, SourceLiveValue>>
+
+export interface SourceLiveValueEntry<V extends SourceVariableLike = SourceVariableLike> {
+    key: string
+    /** 源码标识符（空时回退变量树路径） */
+    identifier: string
+    line?: number
+    variable: V
+    path: string
+    value: SourceLiveValue
+}
+
+/**
+ * 取出给定变量引用中带实时值的条目（同一 key 只保留一次）。
+ * 组件按行调用；导出便于单测（不引入采样逻辑）。
+ */
+export function collectLiveValueEntries<V extends SourceVariableLike>(
+    refs: readonly FileVariableRef<V>[],
+    liveValues: SourceLiveValueMap | null | undefined,
+): SourceLiveValueEntry<V>[] {
+    if (!liveValues) return []
+    const out: SourceLiveValueEntry<V>[] = []
+    const seen = new Set<string>()
+    for (const ref of refs) {
+        if (seen.has(ref.key)) continue
+        const value = liveValues[ref.key]
+        if (!value || typeof value.text !== 'string') continue
+        seen.add(ref.key)
+        out.push({
+            key: ref.key,
+            identifier: ref.identifier || ref.path,
+            line: ref.line,
+            variable: ref.variable,
+            path: ref.path,
+            value,
+        })
+    }
+    return out
+}
+
+/** 按 key 定位变量引用（跨文件；供 `scrollToVariableByKey()` 使用）。 */
+export interface KeyedVariableLocation<V extends SourceVariableLike = SourceVariableLike> {
+    /** 变量匹配到的项目相对文件路径 */
+    filePath: string
+    ref: FileVariableRef<V>
+}
+
+/** 按选中键（`path@address`）查找变量引用；未匹配返回 null。 */
+export function findVariableLocationByKey<V extends SourceVariableLike>(
+    result: VariableFileMatchResult<V> | null | undefined,
+    key: string | null | undefined,
+): KeyedVariableLocation<V> | null {
+    const needle = String(key ?? '').trim()
+    if (!result || !needle) return null
+    for (const [filePath, refs] of result.refsByFile) {
+        const ref = refs.find((candidate) => candidate.key === needle)
+        if (ref) return {filePath, ref}
+    }
+    return null
+}
+
+/** 源码行号点击（父页面可据此设置断点/触发采样）。 */
+export interface SourceLineClickPayload {
+    /** 项目相对文件路径 */
+    path: string
+    /** 1 起始行号 */
+    line: number
+    /** 可执行地址（父页面提供 `lineAddresses` 且该行有地址时才有） */
+    address?: number
+}
+
+/** 行地址表：项目相对路径 -> 行号 -> 可执行地址。 */
+export type SourceLineAddressMap = Readonly<Record<string, Readonly<Record<number, number>>>>
+
+/**
+ * 从父页面提供的行地址表解析断点地址；缺失/非法/0 返回 undefined。
+ * 路径会做 Windows/Unix 规范化（同时接受原始 key）。
+ */
+export function resolveLineAddress(
+    lineAddresses: SourceLineAddressMap | null | undefined,
+    path: string,
+    line: number,
+): number | undefined {
+    if (!lineAddresses) return undefined
+    if (typeof line !== 'number' || !Number.isFinite(line) || line <= 0) return undefined
+    const normalized = normalizeRelativePath(path)
+    const byFile = lineAddresses[normalized] ?? lineAddresses[path] ?? lineAddresses[normalizePath(path)]
+    if (!byFile) return undefined
+    const raw = byFile[Math.floor(line)]
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined
+    const address = raw >>> 0
+    return address > 0 ? address : undefined
 }
 
 // ---------------------------------------------------------------------------

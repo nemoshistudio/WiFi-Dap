@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 526
+const EXPECTED_TOTAL = 549
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 378
+const EXPECTED_ADDED = 401
 
 const errors = []
 const warnings = []
@@ -192,6 +192,13 @@ const ADDED_KEYS = [
         'sourceSampleable', 'sourceUnsampleable', 'sourceTypeLabel', 'sourceFileLine', 'sourceHoverMore',
         'sourceNoVariables', 'sourceNoVariablesHint', 'sourceLoading', 'sourceOpenProjectFallback',
         'sourceLineLabel', 'sourceClose',
+        // task-28：Y/X 轴、格式/缩放、选择 UX、源码联动 liveValues/line-click
+        'localTakeoverNote', 'selectCurrentFile', 'selectCurrentGroup', 'shiftSelectHint',
+        'yAxis', 'yAxisAuto', 'yAxisNormalized', 'yAxisLog', 'timeAxis', 'followLatest',
+        'freeze', 'unfreeze', 'valueScale', 'autoCapReduced', 'aModeOverload',
+        'sourceOnlyFilesWithVariables', 'sourceShowAllProjectFiles', 'sourceNoFilesWithVariables',
+        'sourceLiveValueStale', 'sourceLiveValues', 'sourceLineNoAddress', 'sourceBreakpointSet',
+        'sourceBreakpointLineHint',
     ]),
     ...keys('page', ['debugCurve']),
 ]

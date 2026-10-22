@@ -4,6 +4,8 @@ import {useSystemStore} from "@/stores/useSystemStore";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
 import {PROTOCOL_VERSION} from "@/api";
+import {BRAND_MARK_64} from "@/assets/brand/brand-assets";
+import {BRAND_NAME} from "@/constants/brand";
 
 const sysStore = useSystemStore();
 const webInfo = window.__BIRDIEBOT_WEB__;
@@ -63,13 +65,19 @@ function copyVersionInfo() {
 </script>
 
 <template>
-  <div class="text-layout">
-    <el-divider></el-divider>
-    <el-divider>{{ translate('page.about') }}</el-divider>
-    <el-divider></el-divider>
+  <div class="text-layout bb-page">
+    <section class="bb-card about-brand">
+      <img class="about-brand__mark bb-invert-on-light" :src="BRAND_MARK_64" alt="" width="48" height="48"/>
+      <div class="about-brand__text">
+        <h1 class="about-brand__name">{{ BRAND_NAME }}</h1>
+        <p class="about-brand__meta">{{ translate('page.about') }} · Web UI v{{ webInfo.webVersion }}</p>
+      </div>
+      <el-tag :type="protocolTagType" size="small" class="about-brand__tag">{{ protocolStateText }}</el-tag>
+    </section>
 
+    <section class="bb-card">
     <el-descriptions :title="translate('protocol.title')" border :column="1"
-                     class="mt-5 description-style">
+                     class="description-style">
       <template #extra>
         <el-button size="small" @click="copyVersionInfo">{{ translate('about.copyInfo') }}</el-button>
       </template>
@@ -81,10 +89,12 @@ function copyVersionInfo() {
       <el-descriptions-item :label="translate('protocol.buildTag')">{{ webInfo.gitTag }}</el-descriptions-item>
       <el-descriptions-item :label="translate('protocol.buildTime')">{{ webInfo.buildTime }}</el-descriptions-item>
     </el-descriptions>
+    </section>
 
-    <el-collapse class="mt-5">
+    <section class="bb-card">
+    <el-collapse class="about-collapse">
       <el-collapse-item :title="translate('aboutDebugger')">
-        <el-descriptions border :column="1" class="mt-5 description-style">
+        <el-descriptions border :column="1" class="mt-4 description-style">
           <el-descriptions-item :label="translate('protocol.firmwareVersion')">{{ sysStore.curFmInfo.ver }}</el-descriptions-item>
           <el-descriptions-item :label="translate('releaseTime')">{{ sysStore.curFmInfo.date }}</el-descriptions-item>
           <el-descriptions-item :label="translate('about.hardwareVersion')">{{ sysStore.hwInfo.ver }}</el-descriptions-item>
@@ -92,7 +102,7 @@ function copyVersionInfo() {
           <el-descriptions-item :label="translate('serialNumber')">{{ sysStore.sysInfo.sn }}</el-descriptions-item>
         </el-descriptions>
 
-        <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
+        <el-descriptions :title="translate('credit')" border :column="1" class="mt-4 description-style">
           <el-descriptions-item label="windowsair/wireless-esp8266-dap">
             <a target="_blank" href="https://github.com/windowsair/wireless-esp8266-dap">https://github.com/windowsair/wireless-esp8266-dap</a>
           </el-descriptions-item>
@@ -109,12 +119,12 @@ function copyVersionInfo() {
       </el-collapse-item>
 
       <el-collapse-item :title="translate('aboutWebHost')">
-        <el-descriptions border :column="1" class="mt-5 description-style">
+        <el-descriptions border :column="1" class="mt-4 description-style">
           <el-descriptions-item :label="translate('version')">{{ webInfo.webVersion }}</el-descriptions-item>
           <el-descriptions-item :label="translate('releaseTime')">{{ webInfo.buildTime }}</el-descriptions-item>
         </el-descriptions>
 
-        <el-descriptions :title="translate('credit')" border :column="1" class="mt-5 description-style">
+        <el-descriptions :title="translate('credit')" border :column="1" class="mt-4 description-style">
           <el-descriptions-item label="kerms/wireless-esp32-tools">
             <a target="_blank" href="https://github.com/kerms/wireless-esp32-tools">https://github.com/kerms/wireless-esp32-tools</a>
           </el-descriptions-item>
@@ -145,13 +155,68 @@ function copyVersionInfo() {
         </el-descriptions>
       </el-collapse-item>
     </el-collapse>
-
+    </section>
   </div>
-  <el-divider></el-divider>
 </template>
 
 <style scoped lang="postcss">
 .description-style :deep(.el-descriptions__label) {
   @apply w-32
+}
+
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--bb-space-4);
+}
+
+.about-brand__mark {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+}
+
+.about-brand__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.about-brand__name {
+  margin: 0;
+  font-size: var(--bb-font-size-xl);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--bb-text);
+}
+
+.about-brand__meta {
+  margin: 2px 0 0;
+  font-size: var(--bb-font-size-md);
+  color: var(--bb-text-muted);
+}
+
+.about-brand__tag {
+  flex: 0 0 auto;
+}
+
+.about-collapse {
+  border: 0;
+  --el-collapse-border-color: transparent;
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+}
+
+@media (max-width: 639px) {
+  .description-style :deep(.el-descriptions__label) {
+    @apply w-20;
+  }
+
+  .about-brand {
+    align-items: flex-start;
+  }
+
+  .about-brand__tag {
+    display: none;
+  }
 }
 </style>

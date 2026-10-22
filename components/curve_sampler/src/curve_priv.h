@@ -55,17 +55,22 @@ extern "C" {
 #define CURVE_JSON_BODY_MAX         16384U
 #define CURVE_MAX_FRAMES_PER_REQ    64U
 
-/* Frame ring.  The contract recommends >= 256 frames; the sampler uses up to
- * 512 when the per-frame payload is small and clamps down for large payloads
- * so the heap cost stays bounded.  Phase 2.5 allows 32 series (up to 256 B
- * payload) and the minimum was lowered to 128 frames to keep the worst-case
- * allocation at ~34 KiB:
- *   capacity = clamp(CURVE_RING_BYTES_BUDGET / (12 + frame_bytes), 128, 512)
- *   <= 116 B/frame -> >= 256 frames (e.g. 32 x 4 B: 292 frames / ~33 KiB)
- *   128 B/frame    -> 234 frames / ~33 KiB
- *   256 B/frame    -> 128 frames / ~34 KiB
- * Allocated lazily on the first start and reused across sessions. */
-#define CURVE_RING_FRAMES_MIN       128U
+/* Frame ring.  The hard constraint is the heap budget (8 KiB), so the capacity
+ * is budget/stride first and only then clamped to a small safety floor.  Large
+ * payloads (v2: up to 256 B per frame) therefore get fewer frames instead of a
+ * large allocation that could fail on the fragmented WiFi heap:
+ *   stride   = CURVE_FRAME_META_BYTES (15) + frame_bytes
+ *   capacity = clamp(CURVE_RING_BYTES_BUDGET / stride,
+ *                    CURVE_RING_FRAMES_MIN (16), CURVE_RING_FRAMES_MAX (512))
+ *   ring bytes = capacity * stride <= CURVE_RING_BYTES_BUDGET (8 KiB)
+ *   16 B/frame  -> 264 frames (~8.2 KiB incl. metadata; <= budget)
+ *   64 B/frame  -> 103 frames
+ *   128 B/frame ->  57 frames
+ *   256 B/frame ->  30 frames (the 16-frame floor is never reached within the
+ *                           contract payload limit; it only guards the math)
+ * Allocated lazily on the first start and reused across sessions; if malloc
+ * still fails the engine halves the frame count down to 8 frames. */
+#define CURVE_RING_FRAMES_MIN       16U
 #define CURVE_RING_FRAMES_MAX       512U
 #define CURVE_RING_BYTES_BUDGET     (8U * 1024U)
 /* Protocol v2 ring/CVF2 per-frame metadata: seq (u32) + timestamp_us (u64) +
@@ -120,14 +125,14 @@ const char *curve_trigger_name(uint8_t trigger);
  */
 bool curve_pc_in_scope(uint32_t pc_low, uint32_t pc_high, uint32_t pc);
 
-/** Round-robin increment for the current sampling group. */
-static inline uint8_t curve_next_group(uint8_t current, uint8_t group_count)
+/** Advance a weighted-round-robin schedule slot. */
+static inline uint8_t curve_next_slot(uint8_t position, uint8_t schedule_len)
 {
-    if (group_count == 0U) {
+    if (schedule_len == 0U) {
         return 0U;
     }
-    current++;
-    return (current >= group_count) ? 0U : current;
+    position++;
+    return (position >= schedule_len) ? 0U : position;
 }
 
 /* Phase 0 selftest: N halt -> regs -> mem -> resume iterations. */
@@ -220,12 +225,18 @@ typedef struct {
     uint8_t reserved;
 } curve_series_t;
 
+/* P2: optional per-group scheduling weight (weighted round-robin).  Web does
+ * not send it yet; every group defaults to 1 => the existing equal round-robin
+ * schedule (0,1,2,...) is reproduced exactly. */
+#define CURVE_MAX_GROUP_WEIGHT      8U
+
 /** One sampling group: a contiguous slice of curve_config_t.series[]. */
 typedef struct {
     uint16_t series_first;
     uint16_t series_count;
     uint16_t sample_bytes;    /* sum of this group's series sizes (<= 256) */
     bool pc_needed;           /* any series needs r15 (pc gate or variants) */
+    uint8_t weight;           /* 1..8 scheduling slots per round (default 1) */
     uint8_t reg_count;        /* core registers needed by this group only */
     uint8_t regs[CURVE_MAX_CORE_REGS];
 } curve_group_t;
@@ -250,6 +261,10 @@ typedef struct {
     uint8_t regs[CURVE_MAX_CORE_REGS];
     uint16_t pc_gate_count;         /* series that need r15 (gate or variants) */
     curve_group_t groups[CURVE_MAX_GROUPS];
+    /* Weighted round-robin expansion: group index repeated `weight` times.
+     * schedule_len = sum(weights) <= CURVE_MAX_GROUPS * CURVE_MAX_GROUP_WEIGHT. */
+    uint8_t schedule[CURVE_MAX_GROUPS * CURVE_MAX_GROUP_WEIGHT];
+    uint8_t schedule_len;
     curve_series_t series[CURVE_MAX_SERIES];
     curve_variant_t variants[CURVE_MAX_VARIANTS];
     uint16_t variant_used;

@@ -164,7 +164,7 @@ static void test_parse_series_counts(void)
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
     CHECK(cfg.series_count == 32U);
     CHECK(cfg.sample_bytes == 256U);
-    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 128U);
+    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 30U);
 
     /* 33 series rejected */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,\"series\":[");
@@ -295,12 +295,12 @@ static void test_eval(void)
 
 static void test_ring_capacity(void)
 {
-    /* capacity = clamp(8 KiB / (15 + frame_bytes), 128, 512) */
+    /* capacity = clamp(8 KiB / (15 + frame_bytes), 16, 512) */
     CHECK(curve_ring_capacity_for(16U) == 264U);  /* 8192 / 31 */
     CHECK(curve_ring_capacity_for(28U) == 190U);  /* 8192 / 43 */
-    CHECK(curve_ring_capacity_for(64U) == 128U);  /* 107 -> clamp to 128 */
-    CHECK(curve_ring_capacity_for(128U) == 128U); /* 58 -> clamp to 128 */
-    CHECK(curve_ring_capacity_for(256U) == 128U); /* 30 -> clamp to 128 */
+    CHECK(curve_ring_capacity_for(64U) == 103U);  /* 8192 / 79 */
+    CHECK(curve_ring_capacity_for(128U) == 57U);  /* 8192 / 143 */
+    CHECK(curve_ring_capacity_for(256U) == 30U);  /* 8192 / 271 */
     CHECK(curve_ring_capacity_for(0U) == 0U);
     CHECK(curve_ring_capacity_for(CURVE_MAX_SAMPLE_BYTES + 1U) == 0U);
 }
@@ -750,7 +750,7 @@ static void test_pc_scope_parse(void)
         CHECK(cfg.sample_bytes == 64U);
         CHECK(cfg.pc_gate_count == 32U);
         CHECK(cfg.pool_used == 32U);
-        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 128U);
+        CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 103U);
         (void)p;
     }
 }
@@ -893,7 +893,7 @@ static void test_groups_boundaries(void)
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
     CHECK(cfg.sample_bytes == 256U);
-    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 128U);
+    CHECK(curve_ring_capacity_for(cfg.sample_bytes) == 30U);
 }
 
 static void test_variants_parse_select(void)
@@ -1093,13 +1093,141 @@ static void test_expr_pool_limit(void)
 
 static void test_group_rotation(void)
 {
-    CHECK(curve_next_group(0U, 1U) == 0U);
-    CHECK(curve_next_group(0U, 2U) == 1U);
-    CHECK(curve_next_group(1U, 2U) == 0U);
-    CHECK(curve_next_group(2U, 3U) == 0U);
-    CHECK(curve_next_group(0U, 8U) == 1U);
-    CHECK(curve_next_group(7U, 8U) == 0U);
-    CHECK(curve_next_group(3U, 0U) == 0U);
+    CHECK(curve_next_slot(0U, 1U) == 0U);
+    CHECK(curve_next_slot(0U, 2U) == 1U);
+    CHECK(curve_next_slot(1U, 2U) == 0U);
+    CHECK(curve_next_slot(2U, 3U) == 0U);
+    CHECK(curve_next_slot(0U, 8U) == 1U);
+    CHECK(curve_next_slot(7U, 8U) == 0U);
+    CHECK(curve_next_slot(63U, 64U) == 0U);
+    CHECK(curve_next_slot(3U, 0U) == 0U);
+}
+
+/* 8 KiB ring budget: every contract payload size must fit the budget and keep a
+ * useful history floor, so 'start' never needs the old ~34 KiB allocation. */
+static void test_ring_budget_boundaries(void)
+{
+    for (uint32_t payload = 1U; payload <= CURVE_MAX_SAMPLE_BYTES; payload++) {
+        uint32_t capacity = curve_ring_capacity_for(payload);
+        uint32_t stride = CURVE_FRAME_META_BYTES + payload;
+
+        CHECK(capacity >= CURVE_RING_FRAMES_MIN);
+        CHECK(capacity <= CURVE_RING_FRAMES_MAX);
+        CHECK((uint64_t)capacity * stride <= CURVE_RING_BYTES_BUDGET);
+    }
+    /* 32 x 8 B group payload: 30 frames x 271 B = 8130 B <= 8 KiB. */
+    CHECK((uint64_t)curve_ring_capacity_for(256U) *
+              (CURVE_FRAME_META_BYTES + 256U) <=
+          CURVE_RING_BYTES_BUDGET);
+    /* Monotonic: a larger payload never gets more frames. */
+    for (uint32_t payload = 1U; payload < CURVE_MAX_SAMPLE_BYTES; payload++) {
+        CHECK(curve_ring_capacity_for(payload) >=
+              curve_ring_capacity_for(payload + 1U));
+    }
+}
+
+/* P2 weighted round-robin: optional group weight 1..8 (default 1); the parser
+ * expands weights into a schedule, so equal weights reproduce legacy rotation
+ * and a heavier group is sampled more often per schedule cycle. */
+static void test_group_weights(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+    static const char *json =
+        "{\"interval_us\":20000,\"halt\":true,\"groups\":["
+        "{\"weight\":2,\"series\":[{\"size\":4,\"expr\":"
+        "{\"kind\":\"addr\",\"address\":536870912}}]},"
+        "{\"weight\":1,\"series\":[{\"size\":4,\"expr\":"
+        "{\"kind\":\"addr\",\"address\":536870916}}]},"
+        "{\"series\":[{\"size\":4,\"expr\":"
+        "{\"kind\":\"addr\",\"address\":536870920}}]}]}";
+
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 3U);
+    CHECK(cfg.groups[0].weight == 2U);
+    CHECK(cfg.groups[1].weight == 1U);
+    CHECK(cfg.groups[2].weight == 1U); /* default */
+    CHECK(cfg.schedule_len == 4U);
+    CHECK(cfg.schedule[0] == 0U);
+    CHECK(cfg.schedule[1] == 0U);
+    CHECK(cfg.schedule[2] == 1U);
+    CHECK(cfg.schedule[3] == 2U);
+
+    /* Weighted rotation: group 0 sampled twice per 4-slot cycle. */
+    {
+        uint8_t pos = 0U;
+        uint8_t seen[CURVE_MAX_GROUPS] = {0U, 0U, 0U};
+        uint8_t order[8];
+        uint8_t n = 0U;
+
+        for (uint8_t i = 0U; i < cfg.schedule_len; i++) {
+            order[n++] = cfg.schedule[pos];
+            seen[cfg.schedule[pos]]++;
+            pos = curve_next_slot(pos, cfg.schedule_len);
+        }
+        CHECK(seen[0] == 2U);
+        CHECK(seen[1] == 1U);
+        CHECK(seen[2] == 1U);
+        CHECK(order[0] == 0U && order[1] == 0U && order[2] == 1U &&
+              order[3] == 2U);
+        CHECK(pos == 0U);
+    }
+
+    /* Legacy single group -> schedule [0]. */
+    {
+        static const char *legacy =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":[{\"size\":4,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}";
+
+        CHECK(curve_config_parse(legacy, strlen(legacy), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.schedule_len == 1U);
+        CHECK(cfg.schedule[0] == 0U);
+        CHECK(cfg.groups[0].weight == 1U);
+    }
+
+    /* Max weights: 8 groups x weight 8 = 64 slots (schedule array cap). */
+    {
+        static char big[2048];
+        size_t pos = (size_t)snprintf(big, sizeof(big),
+                                      "{\"interval_us\":20000,\"halt\":true,"
+                                      "\"groups\":[");
+        for (int g = 0; g < 8; g++) {
+            pos += (size_t)snprintf(big + pos, sizeof(big) - pos,
+                                    "%s{\"weight\":8,\"series\":[{\"size\":1,"
+                                    "\"expr\":{\"kind\":\"addr\","
+                                    "\"address\":536870912}}]}",
+                                    (g == 0) ? "" : ",");
+        }
+        (void)snprintf(big + pos, sizeof(big) - pos, "]}");
+        CHECK(curve_config_parse(big, strlen(big), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.schedule_len == 64U);
+        CHECK(cfg.schedule[63] == 7U);
+    }
+
+    /* Invalid weights are rejected (0 and 9); non-number too. */
+    {
+        static const char *bad1 =
+            "{\"interval_us\":20000,\"halt\":true,\"groups\":["
+            "{\"weight\":0,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870912}}]}]}";
+        static const char *bad2 =
+            "{\"interval_us\":20000,\"halt\":true,\"groups\":["
+            "{\"weight\":9,\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870912}}]}]}";
+        static const char *bad3 =
+            "{\"interval_us\":20000,\"halt\":true,\"groups\":["
+            "{\"weight\":\"fast\",\"series\":[{\"size\":1,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870912}}]}]}";
+
+        CHECK(curve_config_parse(bad1, strlen(bad1), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        CHECK(curve_config_parse(bad2, strlen(bad2), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        CHECK(curve_config_parse(bad3, strlen(bad3), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+    }
 }
 
 static void test_cvf2_wire(void)
@@ -1167,6 +1295,8 @@ int main(void)
     test_variant_pool_limit();
     test_expr_pool_limit();
     test_group_rotation();
+    test_ring_budget_boundaries();
+    test_group_weights();
     test_cvf2_wire();
     test_config_static_budget();
 

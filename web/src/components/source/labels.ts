@@ -121,6 +121,20 @@ export interface SourceBrowserLabels {
     lineLabel: string
     /** 关闭候选浮层 */
     close: string
+
+    // ---- task-29 新增（可选：旧父组件未传时使用下方英文默认，不破坏既有集成） ----
+    /** 默认视图开关：“只显示有变量的文件”（Files with variables） */
+    onlyFilesWithVariables?: string
+    /** “显示全部项目文件”开关 */
+    showAllProjectFiles?: string
+    /** 默认视图下没有任何文件匹配到变量时的提示 */
+    noFilesWithVariables?: string
+    /** 实时值已过期（stale）徽标 */
+    liveValueStale?: string
+    /** 行号 gutter hover 提示（断点），`{line}` */
+    breakpointLineHint?: string
+    /** 源码行尾实时值区域标题 */
+    liveValues?: string
 }
 
 export const DEFAULT_SOURCE_BROWSER_LABELS: SourceBrowserLabels = {
@@ -184,6 +198,13 @@ export const DEFAULT_SOURCE_BROWSER_LABELS: SourceBrowserLabels = {
     openProjectFallback: 'Choose project folder…',
     lineLabel: 'Line {line}',
     close: 'Close',
+    onlyFilesWithVariables: 'Files with variables',
+    showAllProjectFiles: 'Show all project files',
+    noFilesWithVariables:
+        'No source file matches the loaded variables. Turn on "Show all project files" to browse the whole project.',
+    liveValueStale: 'stale',
+    breakpointLineHint: 'Click line {line} to request a breakpoint',
+    liveValues: 'Live values',
 }
 
 /** 用 `{name}` 占位符格式化 label（未知占位符原样保留）。 */

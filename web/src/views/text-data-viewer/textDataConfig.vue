@@ -142,7 +142,7 @@
               <VueDraggable v-model="store.frameBreakRules" target="tbody" handle=".sort-target"
                             :animation="150"
                             :on-move="checkMove">
-                <table class="w-full bg-white">
+                <table class="config-table w-full">
                   <thead>
                   <tr class="text-sm h-7">
                     <th>{{ $t('uart.priority') }}</th>
@@ -153,7 +153,7 @@
                           <template #content>
                             <div v-html="translate('uart.ruleTips')"></div>
                           </template>
-                          <InlineSvg name="help" class="w-4 text-gray-500 cursor-help"></InlineSvg>
+                          <InlineSvg name="help" class="w-4 bb-muted cursor-help"></InlineSvg>
                         </el-tooltip>
                       </div>
                     </th>
@@ -179,7 +179,7 @@
                           <template #prepend>
                             <el-button size="small" @click="store.frameBreakAfterSequence = false">
                               <span
-                                  :class="store.frameBreakAfterSequence ? 'text-gray-400' : 'text-blue-400 font-bold'">
+                                  :class="store.frameBreakAfterSequence ? 'config-fmt-muted' : 'config-fmt-active'">
                               {{ translate("uart.begin") }}
                               </span>
                             </el-button>
@@ -187,7 +187,7 @@
                           <template #append>
                             <el-button size="small" @click="store.frameBreakAfterSequence = true">
                               <span
-                                  :class="store.frameBreakAfterSequence ? 'text-blue-400 font-bold' : 'text-gray-300'">
+                                  :class="store.frameBreakAfterSequence ? 'config-fmt-active' : 'config-fmt-muted'">
                               {{ translate("uart.end") }}
                               </span>
                             </el-button>
@@ -220,7 +220,7 @@
                     </template>
                   </el-input>
 
-                  <div class="border rounded flex flex-col">
+                  <div class="config-panel flex flex-col">
 
                     <el-checkbox border v-model="store.dataFilterAutoUpdate">{{ translate('uart.autoUpdateNewData') }}</el-checkbox>
 
@@ -302,8 +302,8 @@
       <el-tab-pane :label="translate('uart.proxy')" name="fourth" class="min-h-80">
         <template #label>{{ $t("uart.passthrough") }}</template>
         <div class="flex flex-col gap-2">
-          <div class="border rounded bg-white p-2">
-            <span class="border-r px-2">TCP {{ translate('uart.serverPort') }}</span>
+          <div class="config-panel p-2">
+            <span class="config-panel-divider border-r px-2">TCP {{ translate('uart.serverPort') }}</span>
             <span class="px-2 cursor-not-allowed">1346</span>
           </div>
           <div>
@@ -451,8 +451,46 @@ function refreshTCPClientList() {
   transition: all 0s; /* Customize the duration and easing */
 }
 
+.config-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bb-panel-bg);
+  color: var(--bb-text);
+}
+
+.config-table thead tr {
+  border-bottom: 1px solid var(--bb-border);
+}
+
+.config-table tbody tr {
+  border-bottom: 1px solid var(--bb-border-subtle);
+}
+
+.config-table tbody tr:last-child {
+  border-bottom: 0;
+}
+
+.config-panel {
+  background: var(--bb-panel-bg);
+  border: 1px solid var(--bb-border);
+  border-radius: var(--bb-radius-sm);
+}
+
+.config-panel-divider {
+  border-color: var(--bb-border);
+}
+
+.config-fmt-muted {
+  color: var(--bb-text-faint);
+}
+
+.config-fmt-active {
+  color: var(--bb-accent);
+  font-weight: 700;
+}
+
 .sortable-chosen {
-  background-color: var(--el-color-primary-light-9);
+  background-color: var(--bb-accent-soft);
 }
 
 .sort-target {

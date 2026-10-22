@@ -87,38 +87,50 @@
       <aside class="sb-sidebar">
         <div class="sb-sidebar-head">
           <input v-model="fileSearch" class="sb-search" type="search" :placeholder="labels.searchPlaceholder"/>
-          <span class="sb-search-count">{{ searchCountText }}</span>
+          <div class="sb-filter-row">
+            <label class="sb-toggle" :title="labels.onlyFilesWithVariables">
+              <input v-model="showAllFiles" type="checkbox"/>
+              <span>{{ labels.showAllProjectFiles }}</span>
+            </label>
+            <span class="sb-search-count">{{ searchCountText }}</span>
+          </div>
         </div>
-        <div class="sb-tree">
-          <template v-for="row in treeRows" :key="`${row.kind}:${row.path}`">
-            <button
-                v-if="row.kind === 'directory'"
-                type="button"
-                class="sb-tree-row sb-tree-dir"
-                :style="{paddingLeft: `${8 + row.depth * 12}px`}"
-                @click="toggleDirectory(row.path)"
-            >
-              <span class="sb-caret">{{ expandedDirs.has(row.path) ? '▾' : '▸' }}</span>
-              <span class="sb-tree-name">{{ row.name }}</span>
-              <span class="sb-tree-badge">{{ row.totalFileCount }}</span>
-            </button>
-            <button
-                v-else
-                type="button"
-                class="sb-tree-row sb-tree-file"
-                :class="{active: row.path === openFilePath, 'has-vars': fileVariableCount(row.path) > 0}"
-                :style="{paddingLeft: `${8 + row.depth * 12}px`}"
-                :title="row.path"
-                @click="openFile(row.path)"
-            >
-              <span class="sb-file-dot">•</span>
-              <span class="sb-tree-name">{{ row.name }}</span>
-              <span v-if="fileVariableCount(row.path) > 0" class="sb-tree-badge sb-tree-badge-var">
-                {{ formatLabel(labels.fileVariables, {count: fileVariableCount(row.path)}) }}
-              </span>
-            </button>
-          </template>
-          <div v-if="treeRows.length === 0" class="sb-sidebar-empty">{{ labels.noSearchResults }}</div>
+        <div ref="treeViewportRef" class="sb-tree" @scroll.passive="onTreeScroll">
+          <div class="sb-tree-canvas" :style="{height: `${treeTotalHeight}px`}">
+            <template v-for="row in visibleTreeRows" :key="`${row.kind}:${row.path}`">
+              <button
+                  v-if="row.kind === 'directory'"
+                  type="button"
+                  class="sb-tree-row sb-tree-dir"
+                  :style="{top: `${row.top}px`, paddingLeft: `${8 + row.depth * 12}px`}"
+                  @click="toggleDirectory(row.path)"
+              >
+                <span class="sb-caret">{{ expandedDirs.has(row.path) ? '▾' : '▸' }}</span>
+                <span class="sb-tree-name">{{ row.name }}</span>
+                <span class="sb-tree-badge">{{ row.totalFileCount }}</span>
+              </button>
+              <button
+                  v-else
+                  type="button"
+                  class="sb-tree-row sb-tree-file"
+                  :class="{active: row.path === openFilePath, 'has-vars': fileVariableCount(row.path) > 0}"
+                  :style="{top: `${row.top}px`, paddingLeft: `${8 + row.depth * 12}px`}"
+                  :title="row.path"
+                  @click="openFile(row.path)"
+              >
+                <span class="sb-file-dot">•</span>
+                <span class="sb-tree-name">{{ row.name }}</span>
+                <span v-if="fileVariableCount(row.path) > 0" class="sb-tree-badge sb-tree-badge-var">
+                  {{ formatLabel(labels.fileVariables, {count: fileVariableCount(row.path)}) }}
+                </span>
+              </button>
+            </template>
+          </div>
+          <div v-if="treeRows.length === 0" class="sb-sidebar-empty">
+            <template v-if="fileSearch.trim()">{{ labels.noSearchResults }}</template>
+            <template v-else-if="filesWithVariablesMode">{{ labels.noFilesWithVariables }}</template>
+            <template v-else>{{ labels.noSearchResults }}</template>
+          </div>
         </div>
         <details v-if="matchResult && matchResult.unmatchedCount > 0" class="sb-unmatched">
           <summary>{{ formatLabel(labels.unmatchedSummary, {count: matchResult.unmatchedCount}) }}</summary>
@@ -198,18 +210,43 @@
                   :class="{
                     'sb-line-vars': row.hasVariables,
                     'sb-line-selected': row.selected,
+                    'sb-line-active': row.active,
                     'sb-line-flash': row.index + 1 === flashLine,
                   }"
                   :style="{top: `${row.top}px`, height: `${ROW_HEIGHT}px`}"
               >
-                <span class="sb-gutter">{{ row.index + 1 }}</span>
+                <button
+                    type="button"
+                    class="sb-gutter"
+                    :title="breakpointHint(row.index + 1)"
+                    data-gutter
+                    @click.stop="onGutterClick(row.index + 1)"
+                >{{ row.index + 1 }}</button>
                 <span class="sb-line-text"><span
                     v-for="(token, tokenIndex) in row.tokens"
                     :key="tokenIndex"
-                    :class="tokenClass(token)"
+                    :class="[
+                      tokenClass(token),
+                      token.kind === 'variable' && row.liveIdentifiers.has(token.variable ?? '') ? 'sb-token-live' : '',
+                      token.kind === 'variable' && row.activeIdentifiers.has(token.variable ?? '') ? 'sb-token-active' : '',
+                    ]"
                     :data-variable="token.kind === 'variable' ? token.variable : null"
                     :data-line="row.index + 1"
                 >{{ token.text }}</span></span>
+                <span v-if="row.liveEntries.length > 0" class="sb-live-values" :title="labels.liveValues">
+                  <span
+                      v-for="entry in row.liveEntries"
+                      :key="entry.key"
+                      class="sb-live-value"
+                      :class="{stale: entry.value.stale}"
+                      :title="entry.path"
+                  >
+                    <span class="sb-live-dot" :style="{background: entry.value.color || 'var(--sb-accent)'}"></span>
+                    <span class="sb-live-name">{{ entry.identifier }}</span>
+                    <span class="sb-live-text">{{ entry.value.text }}</span>
+                    <span v-if="entry.value.stale" class="sb-live-stale">{{ labels.liveValueStale }}</span>
+                  </span>
+                </span>
               </div>
             </div>
           </div>
@@ -239,6 +276,11 @@
       </div>
       <div v-if="hover.candidates.length > 3" class="sb-tooltip-more">
         {{ formatLabel(labels.hoverMore, {count: hover.candidates.length - 3}) }}
+      </div>
+      <div v-if="hoverLiveValue" class="sb-tooltip-row sb-tooltip-live">
+        <span class="sb-live-dot" :style="{background: hoverLiveValue.color || 'var(--sb-accent)'}"></span>
+        <span class="sb-tooltip-live-text">{{ hoverLiveValue.text }}</span>
+        <span v-if="hoverLiveValue.stale" class="sb-live-stale">{{ labels.liveValueStale }}</span>
       </div>
     </div>
 
@@ -278,11 +320,15 @@
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import {
   basename,
+  buildSourceTree,
   collectIdentifiers,
+  collectLiveValueEntries,
   computeBlockCommentStates,
   computeVirtualWindow,
   createSourceFileIndex,
+  filterSourceFiles,
   findVariableCandidates,
+  findVariableLocationByKey,
   flattenSourceTree,
   formatFileSize,
   groupReferencesByLine,
@@ -290,13 +336,21 @@ import {
   normalizeRelativePath,
   pickInitialSourceFile,
   refsForFile,
+  resolveLineAddress,
   searchSourceFiles,
   tokenizeCodeLine,
   variableLines,
   walkSourceVariables,
   type CodeToken,
   type FileVariableRef,
+  type SourceFileMeta,
+  type SourceLineAddressMap,
+  type SourceLineClickPayload,
+  type SourceLiveValue,
+  type SourceLiveValueEntry,
+  type SourceLiveValueMap,
   type SourceTreeRow,
+  type SourceTreeNode,
   type SourceVariableEntry,
   type SourceVariableLike,
   type SourceVariableSelectionPayload,
@@ -327,6 +381,21 @@ const props = defineProps<{
   labels?: Partial<SourceBrowserLabels>
   /** 初始打开的文件（项目相对路径） */
   initialFile?: string | null
+  /**
+   * 实时值（task-29）：key 与 selectedKeys/CurveSeries.key 一致（`path@address`）。
+   * 组件只负责展示（token 高亮 + 行尾值），不做采样/解码；stale 灰显。
+   */
+  liveValues?: SourceLiveValueMap
+  /**
+   * 当前活动变量 key：源码中高亮“当前选中/正在查看”的变量（可与 selectedKeys 不同）。
+   * 父页面可在点击曲线时传入，并调用 expose 的 scrollToVariableByKey() 跳转。
+   */
+  activeKey?: string | null
+  /**
+   * 行地址表（task-29，可选）：项目相对路径 -> 行号 -> 可执行地址。
+   * 父页面有 ELF 行表/符号地址时传入，`line-click` 才会携带 address；否则只给 line。
+   */
+  lineAddresses?: SourceLineAddressMap | null
 }>()
 
 const emit = defineEmits<{
@@ -335,11 +404,17 @@ const emit = defineEmits<{
   (event: 'elf-file', file: File): void
   (event: 'file-open', path: string): void
   (event: 'error', message: string): void
+  /** 点击源码行号 gutter（断点槽）：父页面可据此设断点/触发采样；address 仅在行地址表提供时存在 */
+  (event: 'line-click', payload: SourceLineClickPayload): void
 }>()
 
 const ROW_HEIGHT = 20
 const OVERSCAN = 6
 const DEFAULT_VIEWPORT_HEIGHT = 480
+/** 文件树行高 / 视线外预渲染行（虚拟树，2000+ 文件只渲染可见窗口）。 */
+const TREE_ROW_HEIGHT = 24
+const TREE_OVERSCAN = 8
+const DEFAULT_TREE_HEIGHT = 320
 
 const labels = computed<SourceBrowserLabels>(() => resolveSourceBrowserLabels(props.labels))
 const directoryPickerAvailable = computed<boolean>(() => supportsDirectoryPicker())
@@ -385,6 +460,14 @@ const variableCounts = computed<Map<string, number>>(() => {
   return counts
 })
 const selectedKeySet = computed<Set<string>>(() => new Set(props.selectedKeys ?? []))
+/** 内部活动 key（点击变量 / scrollToVariableByKey 时更新；父组件 activeKey 变化时同步）。 */
+const internalActiveKey = ref<string | null>(null)
+/** 有效 active key：组件内交互（点击/跳转）优先，其次是父组件传入的 activeKey。 */
+const activeKeyValue = computed<string | null>(() => internalActiveKey.value ?? props.activeKey ?? null)
+// 父组件更新 activeKey（如点击另一条曲线）时，覆盖内部临时高亮。
+watch(() => props.activeKey, (key) => {
+  internalActiveKey.value = key ?? null
+}, {immediate: true})
 const unmatchedPreview = computed<SourceVariableEntry<V>[]>(() => {
   const unmatched = matchResult.value?.unmatched ?? []
   return unmatched.slice(0, showAllUnmatched.value ? 500 : 20)
@@ -395,17 +478,40 @@ function fileVariableCount(path: string): number {
   return variableCounts.value.get(normalizeRelativePath(path)) ?? 0
 }
 
-// ---- 目录树 / 搜索 --------------------------------------------------------
+// ---- 目录树 / 搜索（默认只显示有变量的文件 + 虚拟滚动） ------------------
 
 const fileSearch = ref('')
 const expandedDirs = ref<ReadonlySet<string>>(new Set())
+/** false（默认）= Files with variables；true = 显示全部项目文件。 */
+const showAllFiles = ref(false)
 
-const treeRows = computed<SourceTreeRow[]>(() => {
+/** 已匹配到变量的文件路径集合（来自 refsByFile，路径已规范化）。 */
+const matchedFilePaths = computed<Set<string>>(() => new Set(refsByFile.value.keys()))
+/**
+ * 默认视图是否生效：已加载变量且至少一个文件匹配。
+ * 无 ELF / 全部未匹配时回退显示全部项目文件（仍可浏览源码），并显示切换提示。
+ */
+const filesWithVariablesMode = computed<boolean>(
+    () => !showAllFiles.value && hasVariables.value && matchedFilePaths.value.size > 0,
+)
+/** 当前文件树/搜索的数据源（过滤后 或 全部项目文件）。 */
+const visibleProjectFiles = computed<SourceFileMeta[]>(() => {
   const project = currentProject.value
   if (!project) return []
+  if (!filesWithVariablesMode.value) return project.files
+  return filterSourceFiles(project.files, matchedFilePaths.value)
+})
+/** 当前视图的目录树（过滤模式下目录/计数只统计有变量的文件）。 */
+const treeSource = computed<SourceTreeNode | null>(() => {
+  const project = currentProject.value
+  if (!project) return null
+  if (!filesWithVariablesMode.value) return project.tree
+  return buildSourceTree(visibleProjectFiles.value, project.rootName)
+})
+const treeRows = computed<SourceTreeRow[]>(() => {
   const query = fileSearch.value.trim()
   if (query) {
-    return searchSourceFiles(project.files, query, 300).map((file) => ({
+    return searchSourceFiles(visibleProjectFiles.value, query, Math.max(300, visibleProjectFiles.value.length)).map((file) => ({
       kind: 'file' as const,
       path: file.path,
       name: file.path,
@@ -413,7 +519,27 @@ const treeRows = computed<SourceTreeRow[]>(() => {
       file,
     }))
   }
-  return flattenSourceTree(project.tree, expandedDirs.value)
+  const tree = treeSource.value
+  return tree ? flattenSourceTree(tree, expandedDirs.value) : []
+})
+
+// 虚拟树：只渲染侧栏可见窗口（2000+ 文件/展开大目录时不创建全部 DOM）
+const treeViewportRef = ref<HTMLDivElement | null>(null)
+const treeScrollTop = ref(0)
+const treeViewportHeight = ref(DEFAULT_TREE_HEIGHT)
+const treeVirtualWindow = computed(() => computeVirtualWindow({
+  scrollTop: treeScrollTop.value,
+  viewportHeight: treeViewportHeight.value || DEFAULT_TREE_HEIGHT,
+  rowHeight: TREE_ROW_HEIGHT,
+  lineCount: treeRows.value.length,
+  overscan: TREE_OVERSCAN,
+}))
+const treeTotalHeight = computed<number>(() => treeRows.value.length * TREE_ROW_HEIGHT)
+const visibleTreeRows = computed<Array<SourceTreeRow & { top: number }>>(() => {
+  const window = treeVirtualWindow.value
+  return treeRows.value
+      .slice(window.start, window.end)
+      .map((row, offset) => ({...row, top: (window.start + offset) * TREE_ROW_HEIGHT}))
 })
 
 const searchCountText = computed<string>(() => {
@@ -421,7 +547,16 @@ const searchCountText = computed<string>(() => {
   if (!project) return ''
   const query = fileSearch.value.trim()
   if (query) {
-    return formatLabel(labels.value.searchResultsCount, {shown: treeRows.value.length, total: project.sourceCount})
+    return formatLabel(labels.value.searchResultsCount, {
+      shown: treeRows.value.length,
+      total: visibleProjectFiles.value.length,
+    })
+  }
+  if (filesWithVariablesMode.value) {
+    return formatLabel(labels.value.searchResultsCount, {
+      shown: visibleProjectFiles.value.length,
+      total: project.sourceCount,
+    })
   }
   return formatLabel(labels.value.filesCount, {count: project.sourceCount})
 })
@@ -454,6 +589,25 @@ function expandPathToFile(path: string): void {
   expandedDirs.value = next
 }
 
+function onTreeScroll(event: Event): void {
+  const target = event.currentTarget as HTMLElement | null
+  treeScrollTop.value = target?.scrollTop ?? 0
+}
+
+/** 侧栏虚拟树滚动到指定文件行（openFile / scrollToVariableByKey 联动）。 */
+function scrollTreeToPath(path: string): void {
+  const normalized = normalizeRelativePath(path)
+  const index = treeRows.value.findIndex((row) => row.path === normalized)
+  const viewport = treeViewportRef.value
+  if (index < 0 || !viewport) return
+  const rowTop = index * TREE_ROW_HEIGHT
+  const viewHeight = treeViewportHeight.value || DEFAULT_TREE_HEIGHT
+  if (rowTop < viewport.scrollTop || rowTop + TREE_ROW_HEIGHT > viewport.scrollTop + viewHeight) {
+    viewport.scrollTop = Math.max(0, rowTop - Math.floor(viewHeight / 2))
+    treeScrollTop.value = viewport.scrollTop
+  }
+}
+
 // ---- 打开文件 / 代码视图 --------------------------------------------------
 
 const openFilePath = ref('')
@@ -470,6 +624,19 @@ let lastAutoOpenedInitial = ''
 const fileRefs = computed<FileVariableRef<V>[]>(() => refsForFile(matchResult.value, openFilePath.value))
 const identifierSet = computed<Set<string>>(() => collectIdentifiers(fileRefs.value))
 const lineRefs = computed(() => groupReferencesByLine(fileRefs.value))
+/** 每行实时值条目（props.liveValues 与本文件变量引用求交；不参与采样逻辑）。 */
+const liveEntriesByLine = computed<Map<number, SourceLiveValueEntry<V>[]>>(() => {
+  const liveValues = props.liveValues
+  const map = new Map<number, SourceLiveValueEntry<V>[]>()
+  if (!liveValues) return map
+  for (const [line, refs] of lineRefs.value) {
+    const entries = collectLiveValueEntries(refs, liveValues)
+    if (entries.length > 0) map.set(line, entries)
+  }
+  return map
+})
+/** 活动变量位置（跨文件）与行号：用于源码行/变量 token 的 active 高亮。 */
+const activeLocation = computed(() => findVariableLocationByKey(matchResult.value, activeKeyValue.value))
 const selectedLineNumbers = computed<Set<number>>(() => {
   const lines = new Set<number>()
   for (const ref of fileRefs.value) {
@@ -486,6 +653,7 @@ const canvasWidth = computed<string>(() => {
 const scrollTop = ref(0)
 const viewportHeight = ref(DEFAULT_VIEWPORT_HEIGHT)
 let resizeObserver: ResizeObserver | null = null
+let treeResizeObserver: ResizeObserver | null = null
 
 const virtualWindow = computed(() => computeVirtualWindow({
   scrollTop: scrollTop.value,
@@ -500,6 +668,10 @@ interface RenderRow {
   top: number
   hasVariables: boolean
   selected: boolean
+  active: boolean
+  liveEntries: SourceLiveValueEntry<V>[]
+  liveIdentifiers: ReadonlySet<string>
+  activeIdentifiers: ReadonlySet<string>
   tokens: CodeToken[]
 }
 
@@ -509,12 +681,29 @@ const visibleRows = computed<RenderRow[]>(() => {
   const grouped = lineRefs.value
   const selected = selectedLineNumbers.value
   const names = identifierSet.value
+  const liveByLine = liveEntriesByLine.value
+  const active = activeLocation.value
   for (let index = window.start; index < window.end; index++) {
+    const lineNumber = index + 1
+    const lineRefList = grouped.get(lineNumber) ?? []
+    const liveEntries = liveByLine.get(lineNumber) ?? []
+    const liveIdentifiers = new Set(liveEntries.map((entry) => entry.identifier))
+    const activeIdentifiers = new Set<string>()
+    const rowActive = active !== null
+        && active.ref.line === lineNumber
+        && normalizeRelativePath(active.filePath) === openFilePath.value
+    if (rowActive) {
+      for (const ref of lineRefList) activeIdentifiers.add(ref.identifier)
+    }
     rows.push({
       index,
       top: index * ROW_HEIGHT,
-      hasVariables: grouped.has(index + 1),
-      selected: selected.has(index + 1),
+      hasVariables: grouped.has(lineNumber),
+      selected: selected.has(lineNumber),
+      active: rowActive,
+      liveEntries,
+      liveIdentifiers,
+      activeIdentifiers,
       tokens: tokensForLine(index, names),
     })
   }
@@ -565,6 +754,7 @@ async function openFile(path: string, options: { line?: number } = {}): Promise<
   if (!project.files.some((file) => file.path === normalized)) return
   const requestId = ++openRequestId
   openFilePath.value = normalized
+  expandPathToFile(normalized)
   openLoading.value = true
   openError.value = ''
   hover.value = null
@@ -585,6 +775,7 @@ async function openFile(path: string, options: { line?: number } = {}): Promise<
     }
     maxLineLength.value = longest
     await nextTick()
+    scrollTreeToPath(normalized)
     const target = options.line ?? variableLines(fileRefs.value)[0]
     if (target) scrollToLine(target)
     else scrollToTop()
@@ -624,6 +815,29 @@ function onScroll(event: Event): void {
   hideHover()
 }
 
+// ---- 行号 gutter：断点请求（line-click） ---------------------------------
+
+function breakpointHint(line: number): string {
+  const template = labels.value.breakpointLineHint ?? 'Click line {line} to request a breakpoint'
+  return formatLabel(template, {line})
+}
+
+/**
+ * 点击行号 gutter -> emit `line-click`。
+ * 若父组件提供了 `lineAddresses`（ELF 行表/符号地址）则附带可执行地址，否则只给行号。
+ */
+function onGutterClick(line: number): void {
+  const path = openFilePath.value
+  if (!path) return
+  const address = resolveLineAddress(props.lineAddresses, path, line)
+  const payload: SourceLineClickPayload = address === undefined ? {path, line} : {path, line, address}
+  flashLine.value = line
+  window.setTimeout(() => {
+    if (flashLine.value === line) flashLine.value = null
+  }, 1600)
+  emit('line-click', payload)
+}
+
 // ---- 变量 token 点击 / hover / 候选浮层 ----------------------------------
 
 interface HoverState {
@@ -641,6 +855,12 @@ interface CandidateMenuState {
 const hover = shallowRef<HoverState | null>(null)
 const candidateMenu = shallowRef<CandidateMenuState | null>(null)
 const hoverPrimary = computed<VariableCandidate<V> | null>(() => hover.value?.candidates[0] ?? null)
+/** hover 变量对应的实时值（若有）：tooltip 内展示，便于确认数值。 */
+const hoverLiveValue = computed<SourceLiveValue | null>(() => {
+  const primary = hoverPrimary.value
+  if (!primary) return null
+  return props.liveValues?.[primary.ref.key] ?? null
+})
 
 function closestVariableToken(target: EventTarget | null): HTMLElement | null {
   if (!(target instanceof Element)) return null
@@ -751,6 +971,7 @@ function selectCandidate(candidate: VariableCandidate<V>, candidates: readonly V
       if (flashLine.value === flashTarget) flashLine.value = null
     }, 1600)
   }
+  internalActiveKey.value = ref.key
   emit('select-variable', {
     variable: ref.variable,
     key: ref.key,
@@ -791,6 +1012,27 @@ function jumpBy(direction: number): void {
   scrollToLine(target)
 }
 
+/**
+ * 按选中 key（`path@address`）滚动到对应变量（task-29，父页面通过 ref 调用）：
+ * 变量在其它文件时自动切换文件；找到并滚动返回 true，未匹配返回 false。
+ */
+async function scrollToVariableByKey(key: string): Promise<boolean> {
+  const needle = String(key ?? '').trim()
+  if (!needle) return false
+  internalActiveKey.value = needle
+  const location = findVariableLocationByKey(matchResult.value, needle)
+  if (!location) return false
+  const filePath = normalizeRelativePath(location.filePath)
+  expandPathToFile(filePath)
+  if (filePath !== openFilePath.value) {
+    await openFile(filePath, {line: location.ref.line})
+    return true
+  }
+  if (location.ref.line !== undefined) scrollToLine(location.ref.line)
+  scrollTreeToPath(filePath)
+  return true
+}
+
 // ---- 项目加载 / ELF -------------------------------------------------------
 
 const scanLabel = computed<string>(() => formatLabel(labels.value.scanProgress, {count: scannedEntries.value}))
@@ -809,6 +1051,9 @@ function applyLoadedProject(project: SourceProject): void {
   fileSearch.value = ''
   expandedDirs.value = new Set()
   showAllUnmatched.value = false
+  showAllFiles.value = false
+  internalActiveKey.value = null
+  treeScrollTop.value = 0
   resetFileState()
   emit('project-loaded', project)
 }
@@ -955,6 +1200,16 @@ watch(viewportRef, () => {
   void nextTick(observeViewport)
 })
 
+watch(treeViewportRef, () => {
+  void nextTick(observeTreeViewport)
+})
+
+// 过滤/搜索变化时虚拟树回到顶部，避免沿用旧 scrollTop 造成“空白列表”。
+watch([showAllFiles, filesWithVariablesMode, fileSearch], () => {
+  treeScrollTop.value = 0
+  if (treeViewportRef.value) treeViewportRef.value.scrollTop = 0
+})
+
 function observeViewport(): void {
   resizeObserver?.disconnect()
   resizeObserver = null
@@ -968,6 +1223,19 @@ function observeViewport(): void {
   resizeObserver.observe(element)
 }
 
+function observeTreeViewport(): void {
+  treeResizeObserver?.disconnect()
+  treeResizeObserver = null
+  const element = treeViewportRef.value
+  if (!element) return
+  treeViewportHeight.value = element.clientHeight || DEFAULT_TREE_HEIGHT
+  if (typeof ResizeObserver === 'undefined') return
+  treeResizeObserver = new ResizeObserver(() => {
+    treeViewportHeight.value = element.clientHeight || DEFAULT_TREE_HEIGHT
+  })
+  treeResizeObserver.observe(element)
+}
+
 function onDocumentPointerDown(event: PointerEvent): void {
   if (!candidateMenu.value) return
   const target = event.target
@@ -979,12 +1247,15 @@ function onDocumentPointerDown(event: PointerEvent): void {
 onMounted(() => {
   document.addEventListener('pointerdown', onDocumentPointerDown, true)
   observeViewport()
+  observeTreeViewport()
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocumentPointerDown, true)
   resizeObserver?.disconnect()
   resizeObserver = null
+  treeResizeObserver?.disconnect()
+  treeResizeObserver = null
 })
 
 function formatLabel(template: string, values: Record<string, string | number> = {}): string {
@@ -996,6 +1267,13 @@ defineExpose({
   openFile,
   /** 滚动到指定行并高亮 */
   scrollToLine,
+  /**
+   * task-29：按选中 key（`path@address`）滚动到变量；必要时自动切文件。
+   * 父页面点击曲线/图例时调用；找不到返回 false。
+   */
+  scrollToVariableByKey,
+  /** 当前活动变量 key（props.activeKey 或内部最近一次点击） */
+  getActiveKey: (): string | null => activeKeyValue.value,
   /** 当前映射结果（调试/父组件统计用） */
   getMatchResult: (): VariableFileMatchResult<V> | null => matchResult.value,
   /** 关闭候选浮层/hover */
@@ -1237,6 +1515,40 @@ defineExpose({
   border-bottom: 1px solid var(--sb-border);
 }
 
+.sb-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 18px;
+}
+
+/* “Files with variables / Show all project files” 切换 */
+.sb-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--sb-muted);
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+
+.sb-toggle input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--sb-accent-strong);
+  cursor: pointer;
+}
+
+.sb-toggle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sb-search {
   width: 100%;
   box-sizing: border-box;
@@ -1263,18 +1575,28 @@ defineExpose({
 }
 
 .sb-tree {
+  position: relative;
   flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
-  padding: 4px 0;
+}
+
+/* 虚拟树：canvas 撑出总高度，只渲染可见行（行高 = TREE_ROW_HEIGHT） */
+.sb-tree-canvas {
+  position: relative;
+  width: 100%;
 }
 
 .sb-tree-row {
+  position: absolute;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   gap: 4px;
-  width: 100%;
-  padding: 2px 8px;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 8px;
   font-size: 12px;
   color: inherit;
   background: transparent;
@@ -1463,6 +1785,12 @@ defineExpose({
   background: var(--sb-accent-soft-strong);
 }
 
+/* task-29：activeKey 对应的源码行（当前曲线选中） */
+.sb-line-active {
+  background: var(--sb-accent-soft-strong);
+  box-shadow: inset 3px 0 0 var(--sb-accent-strong);
+}
+
 .sb-line-flash {
   animation: sb-flash 1.4s ease-out;
 }
@@ -1480,16 +1808,107 @@ defineExpose({
   position: sticky;
   left: 0;
   flex: 0 0 52px;
-  padding-right: 10px;
+  width: 52px;
+  margin: 0;
+  padding: 0 10px 0 0;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  line-height: inherit;
   text-align: right;
   color: var(--sb-muted);
   background: var(--sb-bg);
   user-select: none;
+  cursor: pointer;
   z-index: 1;
+}
+
+/* 行号 gutter = 断点槽：hover 高亮，点击 emit line-click */
+.sb-gutter:hover,
+.sb-gutter:focus-visible {
+  color: var(--sb-accent-strong);
+  background: var(--sb-panel);
+  outline: none;
+}
+
+.sb-gutter:hover::after {
+  content: '●';
+  margin-left: 4px;
+  font-size: 8px;
+  color: var(--sb-danger);
 }
 
 .sb-line-text {
   flex: 0 0 auto;
+}
+
+/* 行尾实时值（task-29）：sticky 在可视区右侧，长行横向滚动时仍可见 */
+.sb-live-values {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 0 8px 0 14px;
+  background: linear-gradient(90deg, transparent, var(--sb-bg) 14px);
+  white-space: nowrap;
+}
+
+.sb-live-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--sb-text);
+  background: var(--sb-panel);
+  border: 1px solid var(--sb-border);
+  border-radius: 999px;
+}
+
+.sb-live-value.stale {
+  opacity: 0.55;
+}
+
+.sb-live-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--sb-accent);
+}
+
+.sb-live-name {
+  color: var(--sb-muted);
+  font-family: var(--bb-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.sb-live-text {
+  font-family: var(--bb-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-weight: 700;
+}
+
+.sb-live-value.stale .sb-live-text {
+  text-decoration: line-through;
+}
+
+.sb-live-stale {
+  font-size: 9px;
+  text-transform: uppercase;
+  color: var(--sb-warn);
+}
+
+.sb-tooltip-live {
+  margin-top: 2px;
+  align-items: center;
+}
+
+.sb-tooltip-live-text {
+  font-family: var(--bb-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-weight: 700;
 }
 
 .sb-token-variable {
@@ -1504,6 +1923,20 @@ defineExpose({
 
 .sb-token-variable:hover {
   background: var(--sb-accent-soft-strong);
+}
+
+/* task-29：有实时值的变量（实线强调） & 当前 active 变量（强高亮） */
+.sb-token-live {
+  text-decoration: underline solid var(--sb-accent-strong);
+  text-underline-offset: 2px;
+}
+
+.sb-token-active {
+  background: var(--sb-accent-soft-strong);
+  color: var(--sb-accent-strong);
+  outline: 1px solid var(--sb-accent-strong);
+  outline-offset: -1px;
+  border-radius: 2px;
 }
 
 .sb-token-keyword {

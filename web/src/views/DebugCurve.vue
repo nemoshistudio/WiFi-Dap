@@ -3,9 +3,18 @@
     <h1 class="page-title">{{ translate('page.debugCurve') }}</h1>
 
     <el-alert
+        v-if="!isLocalSource"
         class="mb-3"
         type="warning"
         :title="translate('curve.takeoverHint')"
+        :closable="false"
+        show-icon
+    />
+    <el-alert
+        v-else
+        class="mb-3"
+        type="info"
+        :title="translate('curve.localTakeoverNote')"
         :closable="false"
         show-icon
     />
@@ -291,7 +300,9 @@
           <el-button size="small" :disabled="bulkSelectDisabled" @click="selectAllVisible">{{ translate('curve.selectAllVisible') }}</el-button>
           <el-button size="small" :disabled="bulkSelectDisabled" @click="selectAllSampleable">{{ translate('curve.selectAllSampleable') }}</el-button>
           <el-button size="small" :disabled="(isLocalSource && sampling) || seriesList.length === 0" @click="clearSelection">{{ translate('curve.clearSelection') }}</el-button>
-          <span class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }}/{{ selectionLimitForSource() }}</span>
+          <el-button size="small" :disabled="bulkSelectDisabled || !lastClickedFile" @click="selectCurrentFile">{{ translate('curve.selectCurrentFile') }}</el-button>
+          <el-button size="small" :disabled="bulkSelectDisabled || !lastClickedGroup" @click="selectCurrentGroup">{{ translate('curve.selectCurrentGroup') }}</el-button>
+          <span class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }}/{{ selectionLimitForSource() }} · {{ translate('curve.shiftSelectHint') }}</span>
         </div>
 
         <div class="var-table mt-2" :key="variableListEpoch">
@@ -304,17 +315,21 @@
             <span>{{ translate('curve.colSource') }}</span>
           </div>
           <div class="var-list">
-            <template v-for="row in shownVariableRows" :key="row.key">
-              <div v-if="row.kind === 'group'" class="var-group-row">
+            <div
+                v-for="row in shownVariableRows"
+                :key="row.key"
+                v-memo="[row.key, row.kind, row.expanded, row.depth, selectedKeySet, variableListEpoch,
+                  onlySampleable, groupBy, variableSearch, samplingSource, row.groupLabel, row.groupCount]"
+                :class="row.kind === 'group'
+                  ? 'var-group-row'
+                  : ['var-row', {selected: isRowSelected(row), unsampleable: !row.node.sampleable, selectable: nodeSelectable(row.node)}]"
+                @click="row.kind === 'variable' ? onVariableRowClick(row, $event) : undefined"
+            >
+              <template v-if="row.kind === 'group'">
                 <span class="truncate font-semibold" :title="row.groupLabel">{{ row.groupLabel }}</span>
                 <span class="opacity-60">({{ row.groupCount }})</span>
-              </div>
-              <div
-                  v-else
-                  class="var-row"
-                  :class="{selected: isRowSelected(row), unsampleable: !row.node.sampleable, selectable: nodeSelectable(row.node)}"
-                  @click="nodeSelectable(row.node) ? toggleRow(row) : undefined"
-              >
+              </template>
+              <template v-else>
                 <span class="var-check" @click.stop>
                   <el-checkbox
                       v-if="nodeSelectable(row.node)"
@@ -355,8 +370,8 @@
                 <span v-else class="var-addr unsampleable-text" :title="translate('curve.unsampleable')">{{ translate('curve.unsampleable') }}</span>
                 <span class="var-size text-right">{{ row.node.size }}</span>
                 <span class="var-src truncate" :title="row.node.file || ''">{{ sourceLabel(row.node) }}</span>
-              </div>
-            </template>
+              </template>
+            </div>
             <div v-if="visibleVariableCount === 0" class="px-2 py-2 text-sm opacity-70">
               {{ translate('curve.noSymbols') }}
             </div>
@@ -387,13 +402,18 @@
       <!-- Source：本地项目源码浏览 + 点击变量直接加入曲线（SourceBrowser 独立组件，labels 由页面 i18n 注入） -->
       <div v-if="sourceViewEverOpened" v-show="elfView === 'source'" class="source-view">
         <SourceBrowser
+            ref="sourceBrowserRef"
             :project="sourceProject"
             :variables="elfInfo?.variables ?? []"
             :selected-keys="sourceSelectedKeys"
             :labels="sourceBrowserLabels"
+            :live-values="sourceLiveValues"
+            :active-key="activeSourceKey"
+            :line-addresses="sourceLineAddresses"
             @project-loaded="onSourceProjectLoaded"
             @select-variable="onSourceVariableSelected"
             @elf-file="onSourceElfFile"
+            @line-click="onSourceLineClick"
         />
       </div>
     </section>
@@ -415,12 +435,14 @@
         >
           <el-checkbox :model-value="item.visible" size="small" @change="toggleVisible(item)"/>
           <span class="series-dot" :style="{background: seriesDisplayColor(item.color)}"></span>
-          <span class="truncate" :title="item.name">{{ item.name }}</span>
+          <span class="truncate jump-source" :title="translate('curve.sourceViewSource')" @click.stop="jumpToSource(item.key)">{{ item.name }}</span>
           <span class="truncate text-xs opacity-70" :title="item.typeName">{{ item.typeName || translate('curve.unknownType') }}</span>
           <span class="font-mono text-xs opacity-70" :title="item.location ? addressExprText(item.location) : ''">{{ item.location ? addressExprText(item.location) : formatHex32(item.address) }}</span>
           <el-select v-model="item.format" size="small" style="width: 5.5rem" @change="onSeriesFormatChange(item)">
             <el-option v-for="format in FORMATS" :key="format" :value="format" :label="format"/>
           </el-select>
+          <el-button link size="small" :disabled="seriesList[0]?.id === item.id" @click="moveSeries(item, -1)">↑</el-button>
+          <el-button link size="small" :disabled="seriesList[seriesList.length - 1]?.id === item.id" @click="moveSeries(item, 1)">↓</el-button>
           <el-button type="danger" link size="small" @click="removeSeries(item.id)">×</el-button>
         </div>
         <div v-if="remainingSelected > 0" class="show-more-row">
@@ -448,6 +470,32 @@
       <div class="render-bar mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <span>{{ translate('curve.rendering') }}: <b>{{ renderingLabel }}</b></span>
         <label class="flex items-center gap-1">
+          <span>{{ translate('curve.yAxis') }}</span>
+          <el-select v-model="yAxisMode" size="small" style="width: 7.5rem">
+            <el-option value="auto" :label="translate('curve.yAxisAuto')"/>
+            <el-option value="normalized" :label="translate('curve.yAxisNormalized')"/>
+            <el-option value="log" :label="translate('curve.yAxisLog')"/>
+          </el-select>
+        </label>
+        <label class="flex items-center gap-1">
+          <span>{{ translate('curve.timeAxis') }}</span>
+          <el-select v-model="timeWindowSeconds" size="small" style="width: 4.5rem">
+            <el-option v-for="window in TIME_WINDOW_OPTIONS" :key="window" :value="window" :label="window + 's'"/>
+          </el-select>
+        </label>
+        <label class="flex items-center gap-1">
+          <el-switch v-model="followLatest" size="small"/>
+          <span>{{ translate('curve.followLatest') }}</span>
+        </label>
+        <span class="font-mono">{{ timeAxisStatus }}</span>
+        <el-button size="small" @click="toggleFreeze">{{ chartFrozen ? translate('curve.unfreeze') : translate('curve.freeze') }}</el-button>
+        <label class="flex items-center gap-1">
+          <span>{{ translate('curve.valueScale') }}</span>
+          <el-input-number v-model="valueMultiplier" size="small" :step="0.1" :controls="false" style="width: 4.5rem"/>
+          <span>× +</span>
+          <el-input-number v-model="valueOffset" size="small" :step="1" :controls="false" style="width: 4.5rem"/>
+        </label>
+        <label class="flex items-center gap-1">
           <el-switch v-model="renderAll" size="small"/>
           <span>{{ translate('curve.renderModeA') }}</span>
         </label>
@@ -458,11 +506,22 @@
           </el-select>
         </label>
         <span v-if="hiddenByCapCount > 0" class="render-warning">{{ translate('curve.hiddenByCap', {count: hiddenByCapCount}) }}</span>
+        <span v-if="autoCapReduced" class="render-warning">{{ translate('curve.autoCapReduced') }}</span>
+        <span v-if="renderAll && visibleSeriesList.length > 128" class="render-warning">{{ translate('curve.aModeOverload', {count: visibleSeriesList.length}) }}</span>
         <span v-if="renderAll" class="render-warning">{{ translate('curve.renderAllHint') }}</span>
       </div>
 
       <div ref="chartWrapRef" class="chart-wrap">
-        <canvas ref="canvasRef" @mousemove="onCanvasMove" @mouseleave="onCanvasLeave"></canvas>
+        <canvas
+            ref="canvasRef"
+            @pointermove="onCanvasPointerMove"
+            @pointerdown="onCanvasPointerDown"
+            @pointerup="onCanvasPointerUp"
+            @pointercancel="onCanvasPointerUp"
+            @pointerleave="onCanvasLeave"
+            @wheel.prevent="onCanvasWheel"
+            @dblclick="resetTimeView"
+        ></canvas>
         <canvas ref="hoverCanvasRef" class="chart-overlay"></canvas>
         <div v-if="sampleCount === 0" class="chart-empty">{{ translate('curve.noData') }}</div>
         <div v-if="hover" class="chart-tooltip" :style="hoverStyle">
@@ -510,12 +569,13 @@
 </template>
 
 <script setup lang="ts">
-import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import {ElMessageBox} from 'element-plus'
 import {translate, translateRaw, type TranslationKeys} from '@/locales'
 import {globalNotify} from '@/composables/notification'
 import SourceBrowser from '@/components/source/SourceBrowser.vue'
 import type {SourceBrowserLabels} from '@/components/source/labels'
+import type {SourceLineAddressMap, SourceLineClickPayload, SourceLiveValueMap} from '@/utils/sourceProject'
 import type {SourceProject} from '@/components/source/projectLoader'
 import type {SourceVariableSelectionPayload} from '@/utils/sourceProject'
 import {CmsisDapClient, DapError, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} from '@/api/wsDap'
@@ -554,12 +614,15 @@ import {
   parseBreakpointAddressInput,
   startLocalCurve,
   stopLocalCurve,
+  type CurveLocalFrame,
+  type CurveLocalFramesPage,
   type CurveLocalSeriesSpec,
   type CurveLocalTrigger,
   type LocalCurveStatus,
 } from '@/api/curveLocal'
 
-const FORMATS: DisplayFormat[] = ['auto', 'u32', 'i32', 'f32']
+type CurveFormat = DisplayFormat | 'u8' | 'i8' | 'u16' | 'i16' | 'hex' | 'bool' | 'enum'
+const FORMATS: CurveFormat[] = ['auto', 'u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'f32', 'hex', 'bool', 'enum']
 /**
  * 采样率选项；0 = Auto（自适应目标速率）。
  * 默认 100 Hz；WS-DAP 管线化后实际速率受网络往返限制，Auto 会自动降低目标
@@ -597,12 +660,12 @@ const SEARCH_PAGE_SIZE = 100
 /** 已选面板默认只渲染前 64 行（批量选择 256 时避免挂载数百个 Element 组件），可 Show all。 */
 const SELECTED_RENDER_LIMIT = 64
 /** 采样统计 UI 刷新间隔（数据仍按采样率入 ring）；降低 Vue 全页 rerender 频率。 */
-const STATS_FLUSH_MS = 500
+const STATS_FLUSH_MS = 1000
 /** 本地采样计数器（frames/current group 等）UI 刷新间隔。 */
-const LOCAL_UI_FLUSH_MS = 400
+const LOCAL_UI_FLUSH_MS = 1000
 /** 本地帧轮询周期（契约要求 20–50 ms）。 */
 const LOCAL_POLL_MS = 20
-const LOCAL_POLL_MAX_FRAMES = 32
+const LOCAL_POLL_MAX_FRAMES = 64
 /** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
 const PIPELINE_DEPTH = 8
 const AUTO_MIN_RATE = 10
@@ -652,7 +715,7 @@ interface CurveSeries {
   address: number
   size: number
   sample: SampleLeaf
-  format: DisplayFormat
+  format: CurveFormat
   color: string
   visible: boolean
   /** 该曲线开始采样的 sampleSeq：中途新增的曲线不回填旧点。 */
@@ -718,9 +781,16 @@ const localGroupRefreshRate = computed(() => {
 })
 /** 可见曲线（勾选 legend/selected 的 visible）与 B 模式实际绘制列表。 */
 const visibleSeriesList = computed(() => seriesList.value.filter((item) => item.visible))
+/** 自适应 B cap：>128 条可见时自动降到 32（仍保留手动 32/64/128），提示用户切 A。 */
+const effectiveDrawCap = computed(() => {
+  if (renderAll.value) return Number.MAX_SAFE_INTEGER
+  const visible = visibleSeriesList.value.length
+  return visible > 128 ? Math.min(drawCap.value, 32) : drawCap.value
+})
+const autoCapReduced = computed(() => !renderAll.value && effectiveDrawCap.value < drawCap.value)
 const drawnSeriesList = computed(() => (renderAll.value
   ? visibleSeriesList.value
-  : visibleSeriesList.value.slice(0, drawCap.value)))
+  : visibleSeriesList.value.slice(0, effectiveDrawCap.value)))
 const hiddenByCapCount = computed(() => Math.max(0, visibleSeriesList.value.length - drawnSeriesList.value.length))
 const renderingLabel = computed(() => `${drawnSeriesList.value.length}/${visibleSeriesList.value.length}`)
 /** 图例：默认 24 条，展开后全部。 */
@@ -730,6 +800,13 @@ const shownSelectedSeries = computed(() => (selectedShowAll.value
   ? seriesList.value
   : seriesList.value.slice(0, SELECTED_RENDER_LIMIT)))
 const remainingSelected = computed(() => Math.max(0, seriesList.value.length - shownSelectedSeries.value.length))
+/** 时间轴位置文本：跟随时显示窗口；否则显示当前视图起止秒。 */
+const timeAxisStatus = computed(() => {
+  if (followLatest.value) return `${timeWindowSeconds.value}s · ${translate('curve.followLatest')}`
+  const end = viewEndTime.value > 0 ? viewEndTime.value : lastDataTime.value
+  const start = Math.max(0, end - timeWindowSeconds.value)
+  return `${timeWindowSeconds.value}s · ${start.toFixed(1)}–${end.toFixed(1)}s`
+})
 /** 变量树首屏行数（Show more 增量），避免数千行 DOM 一次性渲染。 */
 const shownVariableRows = computed(() => variableRows.value.slice(0, variableDisplayLimit.value))
 const remainingVariableRows = computed(() => Math.max(0, variableRows.value.length - shownVariableRows.value.length))
@@ -784,13 +861,30 @@ const localCurrentGroup = ref<number | null>(null)
 const localSeriesLimit = CURVE_LOCAL_MAX_TOTAL_SERIES
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
-const globalFormat = ref<DisplayFormat>('auto')
+const globalFormat = ref<CurveFormat>('auto')
 /** B/A 渲染模式：B（默认）只绘制前 drawCap 条可见曲线；A 绘制全部可见（降采样）。 */
 const renderAll = ref(false)
 const drawCap = ref(DEFAULT_DRAW_CAP)
 const legendExpanded = ref(false)
 const selectedCollapsed = ref(false)
 const selectedShowAll = ref(false)
+/** Y 轴：共享 auto（默认）/每变量归一化 0-100% / 对数。 */
+type YAxisMode = 'auto' | 'normalized' | 'log'
+const Y_AXIS_MODES: YAxisMode[] = ['auto', 'normalized', 'log']
+const yAxisMode = ref<YAxisMode>('auto')
+/** X 时间轴：窗口秒数、是否跟随最新、非跟随时视图右端。 */
+const TIME_WINDOW_OPTIONS = [1, 2, 5, 10, 20, 60]
+const timeWindowSeconds = ref(20)
+const followLatest = ref(true)
+const viewEndTime = ref(0)
+/** 冻结显示：采样继续，图表暂停重绘（freeze/export 简化）。 */
+const chartFrozen = ref(false)
+/** 最近数据时间（用于时间轴状态显示，随 stats flush 更新）。 */
+const lastDataTime = ref(0)
+/** 数值缩放（格式设置，localStorage 持久化；不属于变量选择记忆）。 */
+const valueMultiplier = ref(1)
+const valueOffset = ref(0)
+const VALUE_SCALE_STORAGE_KEY = 'curve.valueScale'
 const seriesList = ref<CurveSeries[]>([])
 const variableSearch = ref('')
 /** 搜索框输入值；经 150ms debounce 后才驱动变量树过滤。 */
@@ -817,6 +911,10 @@ const elfViewOptions = computed(() => [
 ])
 /** 源码项目：SourceBrowser 首次选目录后由 @project-loaded 回传；切换视图复用，不重复选目录。 */
 const sourceProject = shallowRef<SourceProject | null>(null)
+/** 实时值推送节拍：stats flush 时 +1，驱动 SourceBrowser liveValues 更新（低频）。 */
+const sourceLivePulse = ref(0)
+/** SourceBrowser 当前高亮变量 key（点击源码变量/曲线时更新）。 */
+const activeSourceKey = ref<string | null>(null)
 /**
  * SourceBrowser labels：组件本身不 import i18n（避免契约冲突），页面把全部字段按当前语言注入。
  * 注意：必须保持与 `SourceBrowserLabels`（components/source/labels.ts）字段一字不差；
@@ -878,6 +976,12 @@ const sourceBrowserLabels = computed<SourceBrowserLabels>(() => ({
   loading: translateRaw('curve.sourceLoading'),
   openProjectFallback: translateRaw('curve.sourceOpenProjectFallback'),
   lineLabel: translateRaw('curve.sourceLineLabel'),
+  onlyFilesWithVariables: translateRaw('curve.sourceOnlyFilesWithVariables'),
+  showAllProjectFiles: translateRaw('curve.sourceShowAllProjectFiles'),
+  noFilesWithVariables: translateRaw('curve.sourceNoFilesWithVariables'),
+  liveValueStale: translateRaw('curve.sourceLiveValueStale'),
+  breakpointLineHint: translateRaw('curve.sourceBreakpointLineHint'),
+  liveValues: translateRaw('curve.sourceLiveValues'),
   close: translateRaw('curve.sourceClose'),
 }))
 
@@ -889,6 +993,7 @@ const sourceSelectedKeys = computed<string[]>(() => seriesList.value.map((item) 
  * 也避免影响只做变量选择的既有流程）；挂载后保持（v-show），切换视图不丢浏览状态。
  */
 const sourceViewEverOpened = ref(false)
+const sourceBrowserRef = ref<{scrollToVariableByKey(key: string): Promise<boolean>} | null>(null)
 watch(elfView, (view) => {
   if (view === 'source') sourceViewEverOpened.value = true
 }, {immediate: true})
@@ -930,9 +1035,17 @@ let debugTimer = 0
 let debugRunId = 0
 let debugInFlight = false
 // 设备本地采样状态
-let localTimer = 0
 let localRunId = 0
-let localPollInFlight = false
+/** 固定节拍轮询定时器 + 独立状态刷新/绘制定时器（task-33）。 */
+let localPollTimer = 0
+let localStatusTimer = 0
+let localDrawLoopTimer = 0
+/** 同时在途的 frames 请求数（允许 2–3 个，提升有效取帧率）。 */
+const LOCAL_POLL_MAX_IN_FLIGHT = 3
+let localPollsInFlightCount = 0
+let localPollError = false
+/** 乱序/重复帧缓冲：seq -> frame（按 seq 连续出队，gap 时排序重同步）。 */
+let localFrameBuffer = new Map<number, {frame: CurveLocalFrame; version: number}>()
 let localPollCounter = 0
 let localSince = 0
 let localBaseTimestampUs = 0
@@ -973,14 +1086,19 @@ let searchTimer = 0
 let hoverDrawPending = false
 /** 可选 debug 计数：window.__curveDebug()，供 E2E 性能断言。 */
 const perfCounter = {draws: 0, lastDrawMs: 0, drawMsTotal: 0, hiddenPauses: 0}
+/** task-33 取帧吞吐统计：完成响应数/滑动窗口。 */
+const pollCounterState = {completions: 0, windowStart: 0, windowCompletions: 0, pollsPerSecond: 0}
 /** Y 范围缓存 + dirty flag（避免每帧全量扫描）。 */
 let yRangeCache = {min: 0, max: 1, updatedAt: 0, seriesCount: -1, dirty: true}
+const normalizedRangeCache = new Map<number, {min: number; max: number; updatedAt: number; count: number}>()
 /** 最近一次绘制几何，供 hover overlay 使用（不重建 canvas/不重绘主图）。 */
 let lastGeometry: {
   padding: {left: number; right: number; top: number; bottom: number}
   plotWidth: number; plotHeight: number
   xMin: number; xMax: number
   minValue: number; maxValue: number
+  yAxisMode: YAxisMode
+  normalizedRanges?: Map<number, {min: number; max: number}>
   width: number; height: number
 } | null = null
 let hoverCanvasRef = ref<HTMLCanvasElement | null>(null)
@@ -1001,6 +1119,8 @@ let localPendingGroup: number | null = null
 // 低/高 32-bit（支持 DWARF 的 1/2/4/8 字节 + 位域）。
 const timestamps = new Float64Array(MAX_POINTS)
 const slotSeq = new Float64Array(MAX_POINTS)
+/** 每点所属本地 group（CSV 导出组/时间戳；CVF1/Web 恒 0）。 */
+const slotGroup = new Uint8Array(MAX_POINTS)
 const seriesLo = new Map<number, Uint32Array>()
 const seriesHi = new Map<number, Uint32Array>()
 /** 每系列解码后的数值缓存（Float64Array），绘制/缩放直接读，避免每帧重复 decode。 */
@@ -1263,10 +1383,19 @@ function scheduleLocalUiFlush(): void {
   if (localUiTimer) return
   localUiTimer = window.setTimeout(() => {
     localUiTimer = 0
-    if (localPendingFrames > 0) localFramesReceived.value += localPendingFrames
-    if (localPendingInvalid > 0) localInvalidCount.value += localPendingInvalid
-    if (localPendingOverwritten > 0) localOverwrittenCount.value += localPendingOverwritten
-    if (localPendingGroup !== null) localCurrentGroup.value = localPendingGroup
+    if (localPendingFrames > 0) {
+      const next = localFramesReceived.value + localPendingFrames
+      if (next !== localFramesReceived.value) localFramesReceived.value = next
+    }
+    if (localPendingInvalid > 0) {
+      const next = localInvalidCount.value + localPendingInvalid
+      if (next !== localInvalidCount.value) localInvalidCount.value = next
+    }
+    if (localPendingOverwritten > 0) {
+      const next = localOverwrittenCount.value + localPendingOverwritten
+      if (next !== localOverwrittenCount.value) localOverwrittenCount.value = next
+    }
+    if (localPendingGroup !== null && localCurrentGroup.value !== localPendingGroup) localCurrentGroup.value = localPendingGroup
     localPendingFrames = 0
     localPendingInvalid = 0
     localPendingOverwritten = 0
@@ -1276,9 +1405,13 @@ function scheduleLocalUiFlush(): void {
 
 function flushStats(): void {
   lastStatsAt = performance.now()
-  sampleCount.value = ringCount
+  if (sampleCount.value !== ringCount) sampleCount.value = ringCount
+  const dataTime = lastDataTimestamp()
+  if (lastDataTime.value !== dataTime) lastDataTime.value = dataTime
+  sourceLivePulse.value += 1
   if (isLocalSource.value) {
-    effectiveRate.value = localRateTimestamps.length
+    const rate = localRateTimestamps.length
+    if (effectiveRate.value !== rate) effectiveRate.value = rate
     return
   }
   effectiveRate.value = recentCompletions.length
@@ -1654,10 +1787,9 @@ function stopLocalSampling(): void {
   sampling.value = false
   localRunId += 1
   localActive.value = false
-  if (localTimer) {
-    window.clearTimeout(localTimer)
-    localTimer = 0
-  }
+  clearLocalPollTimers()
+  localPollsInFlightCount = 0
+  localFrameBuffer.clear()
   if (wasActive) void postLocalStop()
   flushStats()
   scheduleDraw()
@@ -1759,7 +1891,9 @@ async function startLocalSampling(): Promise<void> {
   localSince = 0
   localBaseTimestampUs = 0
   localPollCounter = 0
-  localPollInFlight = false
+  localPollsInFlightCount = 0
+  localFrameBuffer.clear()
+  localPollError = false
   localRateTimestamps = []
   localFramesReceived.value = 0
   localInvalidCount.value = 0
@@ -1779,88 +1913,143 @@ async function startLocalSampling(): Promise<void> {
   everSampled.value = true
   localLastPollAt = performance.now()
   const runId = ++localRunId
-  scheduleLocalPoll(runId, 0)
+  startLocalPolling(runId)
+  startSamplingDrawLoop()
   scheduleDraw()
 }
 
-function scheduleLocalPoll(runId: number, delay = LOCAL_POLL_MS): void {
-  if (!localActive.value || runId !== localRunId) return
-  localTimer = window.setTimeout(() => { void localPollTick(runId) }, Math.max(0, delay))
+function clearLocalPollTimers(): void {
+  if (localPollTimer) { window.clearInterval(localPollTimer); localPollTimer = 0 }
+  if (localStatusTimer) { window.clearInterval(localStatusTimer); localStatusTimer = 0 }
+  if (localDrawLoopTimer) { window.clearInterval(localDrawLoopTimer); localDrawLoopTimer = 0 }
 }
 
-/** 轮询 /api/curve/frames（20–50ms），把 ESP32 微秒时间戳写入现有 ring。 */
-async function localPollTick(runId: number): Promise<void> {
-  localTimer = 0
-  const pollStartedAt = performance.now()
-  if (!sampling.value || runId !== localRunId || !localActive.value) return
-  if (localPollInFlight) {
-    scheduleLocalPoll(runId)
+/** 固定节拍轮询（20ms）+ 最多 3 个请求在途：取帧率不再被单次 60ms+ 串行延迟限制。 */
+function startLocalPolling(runId: number): void {
+  clearLocalPollTimers()
+  localPollError = false
+  localStatusTimer = window.setInterval(() => {
+    if (!sampling.value || runId !== localRunId || localPollError) return
+    void refreshLocalStatus().catch(() => { /* 状态刷新失败不终止采样 */ })
+  }, 1000)
+  localPollTimer = window.setInterval(() => issueLocalPoll(runId), LOCAL_POLL_MS)
+  issueLocalPoll(runId)
+}
+
+/** 采样期间固定 30fps 视觉刷新（数据未到也重绘脏视图，hover/时间轴保持流畅）。 */
+function startSamplingDrawLoop(): void {
+  if (localDrawLoopTimer) return
+  localDrawLoopTimer = window.setInterval(() => {
+    if (sampling.value && !chartFrozen.value) scheduleDraw()
+  }, 33)
+}
+
+function issueLocalPoll(runId: number): void {
+  if (!sampling.value || runId !== localRunId || !localActive.value || localPollError) return
+  if (localPollsInFlightCount >= LOCAL_POLL_MAX_IN_FLIGHT) return
+  const since = localSince
+  localPollsInFlightCount += 1
+  void getLocalCurveFrames(since, LOCAL_POLL_MAX_FRAMES)
+    .then((page) => {
+      if (!sampling.value || runId !== localRunId) return
+      handleLocalFramesPage(page)
+    })
+    .catch((error: unknown) => {
+      if (!sampling.value || runId !== localRunId || localPollError) return
+      localPollError = true
+      notice.value = {type: 'error', title: translate('curve.localPollFailed', {err: localErrorText(error)})}
+      statusError.value = true
+      stopLocalSampling()
+    })
+    .finally(() => {
+      localPollsInFlightCount = Math.max(0, localPollsInFlightCount - 1)
+    })
+}
+
+/** 单帧映射：group payload -> series ring（CVF1 单组/CVF2 按 frame.group）。 */
+function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
+  if (localBaseTimestampUs === 0) localBaseTimestampUs = frame.timestampUs
+  const groupIndex = version >= 2 ? frame.group : 0
+  const groupEntries = localGroupEntries[groupIndex]
+  if (!groupEntries) {
+    localPendingInvalid += 1
+    return false
+  }
+  const parts = splitPayloadBytes(frame.payload, groupEntries.map((entry) => entry.size))
+  if (!parts) {
+    localPendingInvalid += 1
+    return false
+  }
+  groupEntries.forEach((entry, slot) => {
+    localLatestValues.set(entry.item.id, parts[slot] ?? new Uint8Array(entry.size))
+  })
+  // 多组轮转：本轮未采样的组沿用最近值，保持图表连续（不写假 0）。
+  const rawValues = localSeriesOrder.map((item) => {
+    const latest = localLatestValues.get(item.id)
+    return latest ?? new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
+  })
+  const seconds = (frame.timestampUs - localBaseTimestampUs) / 1e6
+  pushSample(seconds, rawValues, localSeriesOrder, groupIndex)
+  localRateTimestamps.push(seconds)
+  trimLocalRateWindow(seconds)
+  localPendingGroup = groupIndex
+  return true
+}
+
+/**
+ * 处理单次 frames 响应：按 seq 去重/排序；正常连续出队，检测到 gap 时排序重同步。
+ * 乱序响应只入 buffer，按 localSince+1 连续应用，避免前跳/重复。
+ */
+function handleLocalFramesPage(page: CurveLocalFramesPage): void {
+  localPollCounter += 1
+  const now = performance.now()
+  if (pollCounterState.windowStart === 0) pollCounterState.windowStart = now
+  pollCounterState.completions += 1
+  pollCounterState.windowCompletions += 1
+  if (now - pollCounterState.windowStart >= 1000) {
+    pollCounterState.pollsPerSecond = pollCounterState.windowCompletions * 1000 / (now - pollCounterState.windowStart)
+    pollCounterState.windowStart = now
+    pollCounterState.windowCompletions = 0
+  }
+  if (page.frames.length === 0) return
+  if (page.gap || (localFrameBuffer.size === 0 && localSince > 0 && page.frames[0].seq > localSince + 1)) {
+    localGap.value = true
+  }
+  for (const frame of page.frames) {
+    if (frame.seq <= localSince) continue
+    localFrameBuffer.set(frame.seq, {frame, version: page.version})
+  }
+  const buffered = [...localFrameBuffer.values()].sort((left, right) => left.frame.seq - right.frame.seq)
+  const firstSeq = buffered[0]?.frame.seq
+  if (localGap.value || (firstSeq !== undefined && firstSeq > localSince + 1)) {
+    // ring 已覆盖旧帧：按序应用现有帧并重同步 seq（允许缺口）。
+    localGap.value = true
+    let applied = 0
+    for (const entry of buffered) {
+      if (entry.frame.seq <= localSince) continue
+      if (applyLocalFrame(entry.frame, entry.version)) applied += 1
+      localSince = entry.frame.seq
+    }
+    localFrameBuffer.clear()
+    if (applied > 0) {
+      localPendingFrames += applied
+      scheduleLocalUiFlush()
+      scheduleDraw()
+    }
     return
   }
-  localPollInFlight = true
-  try {
-    const page = await getLocalCurveFrames(localSince, LOCAL_POLL_MAX_FRAMES)
-    if (!sampling.value || runId !== localRunId) return
-    if (page.frames.length > 0) {
-      if (page.gap || (localSince > 0 && page.frames[0].seq > localSince + 1)) localGap.value = true
-      let applied = 0
-      for (const frame of page.frames) {
-        if (frame.seq <= localSince) continue
-        if (localBaseTimestampUs === 0) localBaseTimestampUs = frame.timestampUs
-        // CVF1 单组 group=0；CVF2 按 frame.group 映射该组 series 顺序。
-        const groupIndex = page.version >= 2 ? frame.group : 0
-        const groupEntries = localGroupEntries[groupIndex]
-        if (!groupEntries) {
-          localPendingInvalid += 1
-          localSince = frame.seq
-          continue
-        }
-        const parts = splitPayloadBytes(frame.payload, groupEntries.map((entry) => entry.size))
-        if (!parts) {
-          localPendingInvalid += 1
-          localSince = frame.seq
-          continue
-        }
-        groupEntries.forEach((entry, slot) => {
-          localLatestValues.set(entry.item.id, parts[slot] ?? new Uint8Array(entry.size))
-        })
-        // 多组轮转：本轮未采样的组沿用最近值，保持图表连续（不写假 0）。
-        const rawValues = localSeriesOrder.map((item) => {
-          const latest = localLatestValues.get(item.id)
-          return latest ?? new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
-        })
-        const seconds = (frame.timestampUs - localBaseTimestampUs) / 1e6
-        pushSample(seconds, rawValues, localSeriesOrder)
-        localRateTimestamps.push(seconds)
-        trimLocalRateWindow(seconds)
-        localPendingGroup = groupIndex
-        localSince = frame.seq
-        applied += 1
-      }
-      if (applied > 0) {
-        localPendingFrames += applied
-        scheduleLocalUiFlush()
-        scheduleDraw()
-      }
-    }
-    localPollCounter += 1
-    if (localPollCounter % 25 === 0 || localStatusInfo.value === null) {
-      await refreshLocalStatus()
-    }
-    localLastPollAt = performance.now()
-  } catch (error) {
-    if (!sampling.value || runId !== localRunId) return
-    notice.value = {type: 'error', title: translate('curve.localPollFailed', {err: localErrorText(error)})}
-    stopLocalSampling()
-    statusError.value = true
-    return
-  } finally {
-    localPollInFlight = false
+  let applied = 0
+  while (localFrameBuffer.has(localSince + 1)) {
+    const entry = localFrameBuffer.get(localSince + 1)
+    localFrameBuffer.delete(localSince + 1)
+    if (!entry) break
+    if (applyLocalFrame(entry.frame, entry.version)) applied += 1
+    localSince += 1
   }
-  if (sampling.value && runId === localRunId) {
-    // 扣掉本次请求耗时，保持 ~20ms 轮询节拍（契约 20–50ms），提升 50Hz 帧的绘制率。
-    const elapsed = performance.now() - pollStartedAt
-    scheduleLocalPoll(runId, Math.max(0, LOCAL_POLL_MS - elapsed))
+  if (applied > 0) {
+    localPendingFrames += applied
+    scheduleLocalUiFlush()
+    scheduleDraw()
   }
 }
 
@@ -2092,10 +2281,11 @@ function extractSampleBits(bytes: Uint8Array, leaf: SampleLeaf): {lo: number; hi
   return {lo: lo >>> 0, hi: hi >>> 0}
 }
 
-function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly CurveSeries[]): void {
+function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly CurveSeries[], group = 0): void {
   const slot = ringHead
   timestamps[slot] = time
   slotSeq[slot] = sampleSeq
+  slotGroup[slot] = group & 0xff
   for (let i = 0; i < snapshot.length; i++) {
     const item = snapshot[i]
     const loBuffer = seriesLo.get(item.id)
@@ -2369,9 +2559,12 @@ const unsampleableCount = computed(() => {
   return info.variables.filter((node) => !node.sampleable).length
 })
 
+/** O(1) 选中集合：替代每行线性扫 seriesList（300 行 × 256 选中）。 */
+const selectedKeySet = computed<Set<string>>(() => new Set(seriesList.value.map((item) => item.key)))
+
 function isRowSelected(row: VariableRow): boolean {
   if (row.kind !== 'variable') return false
-  return seriesList.value.some((item) => item.key === row.key)
+  return selectedKeySet.value.has(row.key)
 }
 
 function toggleExpand(row: VariableRow): void {
@@ -2583,6 +2776,81 @@ function clearSelection(): void {
 
 const bulkSelectDisabled = computed(() => (isLocalSource.value && sampling.value)
   || !elfInfo.value || (elfInfo.value?.variables.length ?? 0) === 0)
+/** Shift 连选锚点 + Select current file/group 的上下文。 */
+let lastClickedRowKey = ''
+let lastClickedNode: VariableNode | null = null
+const lastClickedFile = computed(() => lastClickedNode ? (lastClickedNode.relativeFile ?? lastClickedNode.file ?? '') : '')
+const lastClickedGroup = computed(() => {
+  if (!lastClickedNode || groupBy.value === 'none') return ''
+  return groupKeyOf(lastClickedNode, groupBy.value)
+})
+
+function rowsBetweenKeys(fromKey: string, toKey: string): Array<{name: string; key: string; node: VariableNode}> {
+  const rows = variableRows.value
+  const from = rows.findIndex((row) => row.key === fromKey)
+  const to = rows.findIndex((row) => row.key === toKey)
+  if (from < 0 || to < 0) return []
+  const [low, high] = from <= to ? [from, to] : [to, from]
+  return rows.slice(low, high + 1)
+    .filter((row) => row.kind === 'variable' && nodeSelectable(row.node))
+    .map((row) => ({name: row.path, key: row.key, node: row.node}))
+}
+
+function onVariableRowClick(row: VariableRow, event: MouseEvent): void {
+  if (row.kind !== 'variable' || !nodeSelectable(row.node)) return
+  if (isLocalSource.value && sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
+  if (event.shiftKey && lastClickedRowKey) {
+    const entries = rowsBetweenKeys(lastClickedRowKey, row.key)
+    if (entries.length > 0) {
+      const selecting = !isRowSelected(row)
+      if (selecting) {
+        addSelectedRowsBulk(entries)
+      } else {
+        for (const entry of entries) removeSeriesByKey(entry.key)
+      }
+    }
+    lastClickedRowKey = row.key
+    lastClickedNode = row.node
+    return
+  }
+  lastClickedRowKey = row.key
+  lastClickedNode = row.node
+  toggleRow(row)
+}
+
+function selectCurrentFile(): void {
+  const file = lastClickedFile.value
+  const info = elfInfo.value
+  if (!file || !info) return
+  const rows = info.variables
+    .filter((node) => (node.relativeFile ?? node.file) === file && nodeSelectable(node))
+    .map((node) => ({name: node.name, key: nodeKey(node.name, node), node}))
+  addSelectedRowsBulk(rows)
+}
+
+function selectCurrentGroup(): void {
+  const info = elfInfo.value
+  if (!lastClickedNode || !info || groupBy.value === 'none') return
+  const group = groupKeyOf(lastClickedNode, groupBy.value)
+  const rows = info.variables
+    .filter((node) => groupKeyOf(node, groupBy.value) === group && nodeSelectable(node))
+    .map((node) => ({name: node.name, key: nodeKey(node.name, node), node}))
+  addSelectedRowsBulk(rows)
+}
+
+function moveSeries(item: CurveSeries, delta: number): void {
+  const list = [...seriesList.value]
+  const index = list.findIndex((candidate) => candidate.id === item.id)
+  const next = index + delta
+  if (index < 0 || next < 0 || next >= list.length) return
+  const [moved] = list.splice(index, 1)
+  list.splice(next, 0, moved)
+  seriesList.value = list
+  scheduleDraw()
+}
 
 // 过滤/来源变化时重置“Show more”分页，避免搜索结果被旧 limit 截断。
 watch([variableSearch, onlySampleable, groupBy, elfInfo, samplingSource], () => {
@@ -2591,6 +2859,14 @@ watch([variableSearch, onlySampleable, groupBy, elfInfo, samplingSource], () => 
 })
 watch([renderAll, drawCap], () => {
   invalidateYRange()
+  scheduleDraw()
+})
+watch([yAxisMode], () => {
+  yRangeCache.dirty = true
+  normalizedRangeCache.clear()
+  scheduleDraw()
+})
+watch([timeWindowSeconds, followLatest], () => {
   scheduleDraw()
 })
 
@@ -2624,6 +2900,39 @@ function recomputeSeriesValues(item: CurveSeries): void {
 function invalidateYRange(): void {
   yRangeCache.dirty = true
 }
+
+/** 数值缩放：multiplier/offset 仅作用于图表数值（hex/bool/enum 文本保持原义）。 */
+function applyValueScale(value: number): number {
+  const multiplier = valueMultiplier.value
+  const offset = valueOffset.value
+  if (!Number.isFinite(value)) return value
+  if (multiplier === 1 && offset === 0) return value
+  if (!Number.isFinite(multiplier) || !Number.isFinite(offset)) return value
+  return value * multiplier + offset
+}
+
+function loadValueScale(): void {
+  try {
+    const raw = window.localStorage.getItem(VALUE_SCALE_STORAGE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as {multiplier?: number; offset?: number}
+    if (typeof parsed.multiplier === 'number' && Number.isFinite(parsed.multiplier)) valueMultiplier.value = parsed.multiplier
+    if (typeof parsed.offset === 'number' && Number.isFinite(parsed.offset)) valueOffset.value = parsed.offset
+  } catch { /* 忽略损坏的本地设置 */ }
+}
+
+function saveValueScale(): void {
+  try {
+    window.localStorage.setItem(VALUE_SCALE_STORAGE_KEY, JSON.stringify({multiplier: valueMultiplier.value, offset: valueOffset.value}))
+  } catch { /* localStorage 不可用时忽略 */ }
+}
+
+watch([valueMultiplier, valueOffset], () => {
+  for (const item of seriesList.value) recomputeSeriesValues(item)
+  invalidateYRange()
+  saveValueScale()
+  scheduleDraw()
+})
 
 const wideHint = computed(() => seriesList.value.some((item) => item.sample.size > 4 || item.sample.bitSize > 32))
 
@@ -2726,7 +3035,70 @@ function onSourceVariableSelected(payload: SourceVariableSelectionPayload<Variab
     globalNotify(translate('curve.sourceAlreadySelected'), 'info')
     return
   }
-  newSeries(payload.path, payload.key, node.typeName, node)
+  if (newSeries(payload.path, payload.key, node.typeName, node)) activeSourceKey.value = payload.key
+}
+
+/** SourceBrowser 实时值：key 与曲线 key 一致，低频（stats flush）刷新。 */
+const sourceLiveValues = computed<SourceLiveValueMap>(() => {
+  void sourceLivePulse.value
+  const map: Record<string, {text: string; color?: string; stale?: boolean}> = {}
+  for (const item of seriesList.value) {
+    const text = latestText(item)
+    map[item.key] = {
+      text,
+      color: seriesDisplayColor(item.color),
+      stale: !sampling.value || text === '-',
+    }
+  }
+  return map
+})
+
+/**
+ * 行地址表（近似）：DWARF 变量所属函数 low_pc 是真实可执行 Flash 地址，用它给
+ * gutter 断点；不能用 sample.address（0x2000xxxx 是数据 RAM，FPB 会设错）。
+ * 这是函数入口近似，不是精确行表；后续解析 .debug_line 行程序后可替换。
+ */
+const sourceLineAddresses = computed<SourceLineAddressMap>(() => {
+  const info = elfInfo.value
+  if (!info) return {}
+  const map: Record<string, Record<number, number>> = {}
+  for (const node of info.variables) {
+    const file = node.relativeFile ?? node.file
+    const low = node.pcLow
+    const high = node.pcHigh
+    if (!file || !node.line || low === undefined || high === undefined) continue
+    if (low < CURVE_LOCAL_FLASH_START || high > CURVE_LOCAL_FLASH_END || low >= high) continue
+    const normalized = file.replace(/^\+/, '').replace(/\\/g, '/')
+    if (!map[normalized]) map[normalized] = {}
+    if (map[normalized][node.line] === undefined) map[normalized][node.line] = low >>> 0
+  }
+  return map
+})
+
+function jumpToSource(key: string): void {
+  elfView.value = 'source'
+  sourceViewEverOpened.value = true
+  void nextTick(() => {
+    void sourceBrowserRef.value?.scrollToVariableByKey(key)
+  })
+}
+
+/** task-29 接口：点击源码行号 gutter -> 本地断点模式 + 地址（需本地采样支持）。 */
+function onSourceLineClick(payload: SourceLineClickPayload): void {
+  if (sampling.value) {
+    globalNotify(translate('curve.localSeriesLocked'), 'warning')
+    return
+  }
+  if (!payload.address) {
+    globalNotify(translate('curve.sourceLineNoAddress'), 'warning')
+    return
+  }
+  samplingSource.value = 'local'
+  localTrigger.value = 'breakpoint'
+  localBreakpointInput.value = formatHex32(payload.address >>> 0)
+  selectedFunctionAddress.value = null
+  localBreakpointOffsetInput.value = ''
+  globalNotify(`${translate('curve.sourceBreakpointSet')} ${formatHex32(payload.address >>> 0)}`, 'success')
 }
 
 function parseAddressToken(token: string): number | null {
@@ -2806,60 +3178,48 @@ function sampleBitWidth(item: CurveSeries): number {
 
 /** 图表 Y 值：按 series.format（auto 时按 DWARF 类型）解码成 number。 */
 function decodeNumber(item: CurveSeries, lo: number, hi: number): number {
-  if (item.format === 'u32') return lo >>> 0
-  if (item.format === 'i32') return lo | 0
-  if (item.format === 'f32') return f32FromU32(lo)
-  const bits = sampleBitWidth(item)
-  switch (item.sample.kind) {
-    case 'float32':
-      return f32FromU32(lo)
-    case 'float64':
-      return f64FromLoHi(lo, hi)
-    case 'bool':
-      return bitsValue(lo, hi, bits, false) !== 0n ? 1 : 0
-    case 'int':
-      return Number(bitsValue(lo, hi, bits, true))
-    case 'enum':
-      return Number(bitsValue(lo, hi, bits, false))
-    case 'raw':
-      return lo >>> 0
-    default:
-      return Number(bitsValue(lo, hi, bits, false))
+  let value: number
+  if (item.format === 'u8') value = lo & 0xff
+  else if (item.format === 'i8') value = (lo << 24) >> 24
+  else if (item.format === 'u16') value = lo & 0xffff
+  else if (item.format === 'i16') value = (lo << 16) >> 16
+  else if (item.format === 'u32') value = lo >>> 0
+  else if (item.format === 'i32') value = lo | 0
+  else if (item.format === 'f32') value = f32FromU32(lo)
+  else if (item.format === 'hex') value = lo >>> 0
+  else if (item.format === 'bool') value = (lo | hi) !== 0 ? 1 : 0
+  else if (item.format === 'enum') value = Number(bitsValue(lo, hi, sampleBitWidth(item), false))
+  else {
+    const bits = sampleBitWidth(item)
+    switch (item.sample.kind) {
+      case 'float32':
+        value = f32FromU32(lo)
+        break
+      case 'float64':
+        value = f64FromLoHi(lo, hi)
+        break
+      case 'bool':
+        value = bitsValue(lo, hi, bits, false) !== 0n ? 1 : 0
+        break
+      case 'int':
+        value = Number(bitsValue(lo, hi, bits, true))
+        break
+      case 'enum':
+        value = Number(bitsValue(lo, hi, bits, false))
+        break
+      case 'raw':
+        value = lo >>> 0
+        break
+      default:
+        value = Number(bitsValue(lo, hi, bits, false))
+    }
   }
+  return applyValueScale(value)
 }
 
 function formatFloatText(value: number): string {
   if (!Number.isFinite(value)) return String(value)
   return String(Number.parseFloat(value.toPrecision(7)))
-}
-
-/** 读数/图例/悬浮提示文本：auto 时按 DWARF 类型（64-bit 精确字符串、枚举名）。 */
-function decodeText(item: CurveSeries, lo: number, hi: number): string {
-  if (item.format === 'u32') return String(lo >>> 0)
-  if (item.format === 'i32') return String(lo | 0)
-  if (item.format === 'f32') return formatFloatText(f32FromU32(lo))
-  const bits = sampleBitWidth(item)
-  switch (item.sample.kind) {
-    case 'float32':
-      return formatFloatText(f32FromU32(lo))
-    case 'float64':
-      return formatFloatText(f64FromLoHi(lo, hi))
-    case 'bool':
-      return bitsValue(lo, hi, bits, false) !== 0n ? 'true' : 'false'
-    case 'enum': {
-      const value = Number(bitsValue(lo, hi, bits, false))
-      const enumerator = item.sample.enumValues?.find((entry) => entry[0] === value)
-      return enumerator ? `${enumerator[1]} (${value})` : String(value)
-    }
-    case 'int':
-      return String(bitsValue(lo, hi, bits, true))
-    case 'raw': {
-      if (bits <= 32) return `0x${(lo >>> 0).toString(16).toUpperCase()}`
-      return `0x${toBigInt(lo, hi).toString(16).toUpperCase()}`
-    }
-    default:
-      return String(bitsValue(lo, hi, bits, false))
-  }
 }
 
 function formatAxisValue(value: number): string {
@@ -2868,6 +3228,49 @@ function formatAxisValue(value: number): string {
   if (abs >= 1e6 || (abs > 0 && abs < 1e-3)) return value.toExponential(2)
   if (Number.isInteger(value)) return String(value)
   return value.toFixed(2)
+}
+
+function decodeText(item: CurveSeries, lo: number, hi: number): string {
+  if (item.format === 'u8') return String(applyValueScale(lo & 0xff))
+  if (item.format === 'i8') return String(applyValueScale((lo << 24) >> 24))
+  if (item.format === 'u16') return String(applyValueScale(lo & 0xffff))
+  if (item.format === 'i16') return String(applyValueScale((lo << 16) >> 16))
+  if (item.format === 'u32') return String(applyValueScale(lo >>> 0))
+  if (item.format === 'i32') return String(applyValueScale(lo | 0))
+  if (item.format === 'f32') return formatFloatText(applyValueScale(f32FromU32(lo)))
+  if (item.format === 'hex') {
+    const bits = sampleBitWidth(item)
+    if (bits <= 32) return `0x${(lo >>> 0).toString(16).toUpperCase()}`
+    return `0x${toBigInt(lo, hi).toString(16).toUpperCase()}`
+  }
+  if (item.format === 'bool') return (lo | hi) !== 0 ? 'true' : 'false'
+  if (item.format === 'enum') {
+    const value = Number(bitsValue(lo, hi, sampleBitWidth(item), false))
+    const enumerator = item.sample.enumValues?.find((entry) => entry[0] === value)
+    return enumerator ? `${enumerator[1]} (${value})` : String(value)
+  }
+  const bits = sampleBitWidth(item)
+  switch (item.sample.kind) {
+    case 'float32':
+      return formatFloatText(applyValueScale(f32FromU32(lo)))
+    case 'float64':
+      return formatFloatText(applyValueScale(f64FromLoHi(lo, hi)))
+    case 'bool':
+      return bitsValue(lo, hi, bits, false) !== 0n ? 'true' : 'false'
+    case 'enum': {
+      const value = Number(bitsValue(lo, hi, bits, false))
+      const enumerator = item.sample.enumValues?.find((entry) => entry[0] === value)
+      return enumerator ? `${enumerator[1]} (${value})` : String(value)
+    }
+    case 'int':
+      return String(applyValueScale(Number(bitsValue(lo, hi, bits, true))))
+    case 'raw': {
+      if (bits <= 32) return `0x${(lo >>> 0).toString(16).toUpperCase()}`
+      return `0x${toBigInt(lo, hi).toString(16).toUpperCase()}`
+    }
+    default:
+      return String(applyValueScale(Number(bitsValue(lo, hi, bits, false))))
+  }
 }
 
 function latestText(item: CurveSeries): string {
@@ -2903,11 +3306,14 @@ function lowerBoundTime(time: number): number {
 /** 列缓冲复用：min/max 降采样时避免每帧分配大数组。 */
 let columnMin = new Float32Array(0)
 let columnMax = new Float32Array(0)
+/** 每帧预计算一次 X 像素坐标（所有 series 共享时间轴），避免每系列重复 toX。 */
+let xCache = new Float32Array(0)
 let hoverMovePending = false
 let pendingMove: MouseEvent | null = null
 
 function scheduleDraw(): void {
   chartDirty = true
+  if (chartFrozen.value) return
   // document.hidden 时暂停绘制；visibilitychange 恢复后补一次。
   if (document.hidden) {
     perfCounter.hiddenPauses += 1
@@ -2918,12 +3324,26 @@ function scheduleDraw(): void {
   window.requestAnimationFrame(drawFrame)
 }
 
+function toggleFreeze(): void {
+  chartFrozen.value = !chartFrozen.value
+  if (!chartFrozen.value) {
+    invalidateYRange()
+    scheduleDraw()
+  }
+}
+
+/** 自适应 FPS：100+ 曲线（尤其 A 模式）降低重绘频率，防止主线程过载。 */
+function adaptiveDrawIntervalMs(): number {
+  // task-33：视觉刷新目标 ≥30fps；绘制成本由 dirty/cache/降采样控制，不再按曲线数降帧。
+  return DRAW_INTERVAL_MS
+}
+
 /** 约 30fps 节流：数据进入 ring 的频率可以更高，但主线程绘制降到 ~30fps。 */
 function drawFrame(now: number): void {
   drawPending = false
   if (document.hidden) return
   if (!chartDirty) return
-  if (now - lastDrawAt < DRAW_INTERVAL_MS) {
+  if (now - lastDrawAt < adaptiveDrawIntervalMs()) {
     drawPending = true
     window.requestAnimationFrame(drawFrame)
     return
@@ -3002,6 +3422,116 @@ function seriesDisplayColor(color: string): string {
   return darkTheme.value ? (DARK_COLOR_BY_BASE.get(color) ?? color) : color
 }
 
+/** 当前数据最后时间戳（ring 非响应式，绘制/交互时直接读取）。 */
+function lastDataTimestamp(): number {
+  return ringCount > 0 ? timestamps[ringSlot(ringCount - 1)] : 0
+}
+
+/** 当前 X 视图范围：跟随最新或固定右端；窗口受 ring 内数据范围约束。 */
+function currentXRange(lastTime = lastDataTimestamp()): {xMin: number; xMax: number} {
+  const win = timeWindowSeconds.value
+  const first = ringCount > 0 ? timestamps[ringSlot(0)] : 0
+  const minSpan = Math.max(first + win, win)
+  let xMax: number
+  if (followLatest.value) {
+    xMax = Math.max(lastTime, Math.min(win, 5))
+  } else {
+    const desired = viewEndTime.value > 0 ? viewEndTime.value : lastTime
+    xMax = Math.min(Math.max(desired, minSpan), Math.max(lastTime, minSpan))
+  }
+  xMax = Math.max(xMax, minSpan)
+  const xMin = Math.max(first, xMax - win)
+  return {xMin, xMax}
+}
+
+/** 归一化模式下每个变量在窗口内的 min/max（250ms 缓存 + 每变量抽样预算）。 */
+function normalizedRangeFor(item: CurveSeries, startOrder: number, now: number): {min: number; max: number} | null {
+  const cached = normalizedRangeCache.get(item.id)
+  if (cached && now - cached.updatedAt < Y_RANGE_TTL_MS && cached.count === ringCount - startOrder) {
+    return {min: cached.min, max: cached.max}
+  }
+  const values = seriesValues.get(item.id)
+  if (!values) return null
+  const total = Math.max(1, ringCount - startOrder)
+  const stride = Math.max(1, Math.ceil(total / 4000))
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  for (let order = startOrder; order < ringCount; order += stride) {
+    const slot = ringSlot(order)
+    if (slotSeq[slot] < item.startSeq) continue
+    const value = values[slot]
+    if (!Number.isFinite(value)) continue
+    if (value < min) min = value
+    if (value > max) max = value
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null
+  if (max - min < 1e-12) max = min + 1
+  normalizedRangeCache.set(item.id, {min, max, updatedAt: now, count: ringCount - startOrder})
+  return {min, max}
+}
+
+/** Y 轴范围：normalized 固定 0..100；log 在 log10 域；auto 为原始共享值。 */
+function computeYRange(
+  drawn: readonly CurveSeries[],
+  startOrder: number,
+  now: number,
+  normalizedRanges: Map<number, {min: number; max: number}>,
+): {min: number; max: number} | null {
+  if (yAxisMode.value === 'normalized') return {min: 0, max: 100}
+  const total = Math.max(1, (ringCount - startOrder) * Math.max(1, drawn.length))
+  const stride = Math.max(1, Math.ceil(total / Y_SCAN_BUDGET))
+  let minValue = Number.POSITIVE_INFINITY
+  let maxValue = Number.NEGATIVE_INFINITY
+  for (const item of drawn) {
+    const values = seriesValues.get(item.id)
+    if (!values) continue
+    for (let order = startOrder; order < ringCount; order += stride) {
+      const slot = ringSlot(order)
+      if (slotSeq[slot] < item.startSeq) continue
+      const raw = values[slot]
+      if (!Number.isFinite(raw)) continue
+      const value = yAxisMode.value === 'log'
+        ? (raw > 0 ? Math.log10(raw) : Number.NaN)
+        : raw
+      if (!Number.isFinite(value)) continue
+      if (value < minValue) minValue = value
+      if (value > maxValue) maxValue = value
+    }
+  }
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null
+  if (maxValue - minValue < 1e-9) {
+    minValue -= 1
+    maxValue += 1
+  } else {
+    const span = maxValue - minValue
+    minValue -= span * 0.08
+    maxValue += span * 0.08
+  }
+  return {min: minValue, max: maxValue}
+}
+
+/** 原始数值 -> Y 轴数值（normalized/log/auto）。 */
+function transformYValue(
+  item: CurveSeries,
+  raw: number,
+  normalizedRanges?: Map<number, {min: number; max: number}>,
+): number | null {
+  if (!Number.isFinite(raw)) return null
+  if (yAxisMode.value === 'auto') return raw
+  if (yAxisMode.value === 'log') return raw > 0 ? Math.log10(raw) : null
+  const range = normalizedRanges?.get(item.id)
+  if (!range) return null
+  const span = range.max - range.min
+  if (span < 1e-12) return 50
+  return ((raw - range.min) / span) * 100
+}
+
+function formatYTick(value: number): string {
+  if (yAxisMode.value === 'normalized') return `${Math.round(value)}%`
+  if (yAxisMode.value === 'log') return formatAxisValue(Math.pow(10, value))
+  return formatAxisValue(value)
+}
+
 function drawChart(now = performance.now()): void {
   const drawStart = performance.now()
   const canvas = canvasRef.value
@@ -3045,15 +3575,21 @@ function drawChart(now = performance.now()): void {
   }
 
   const lastTime = timestamps[ringSlot(ringCount - 1)]
-  const xMax = Math.max(lastTime, 5)
-  const xMin = Math.max(0, xMax - WINDOW_SECONDS)
+  const {xMin, xMax} = currentXRange(lastTime)
   const startOrder = lowerBoundTime(xMin)
   if (startOrder >= ringCount) {
     lastGeometry = null
     drawHoverOverlay()
     return
   }
-  const range = updateYRange(drawn, startOrder, now)
+  const normalizedRanges = new Map<number, {min: number; max: number}>()
+  if (yAxisMode.value === 'normalized') {
+    for (const item of drawn) {
+      const range = normalizedRangeFor(item, startOrder, now)
+      if (range) normalizedRanges.set(item.id, range)
+    }
+  }
+  const range = computeYRange(drawn, startOrder, now, normalizedRanges)
   if (!range) {
     lastGeometry = null
     drawHoverOverlay()
@@ -3063,6 +3599,11 @@ function drawChart(now = performance.now()): void {
 
   const toX = (time: number) => padding.left + ((time - xMin) / (xMax - xMin)) * plotWidth
   const toY = (value: number) => padding.top + (1 - (value - minValue) / (maxValue - minValue)) * plotHeight
+  const orderCount = ringCount - startOrder
+  if (xCache.length < orderCount) xCache = new Float32Array(orderCount)
+  for (let offset = 0; offset < orderCount; offset++) {
+    xCache[offset] = toX(timestamps[ringSlot(startOrder + offset)])
+  }
 
   // 网格 + Y 轴刻度
   context.font = '11px system-ui, sans-serif'
@@ -3079,7 +3620,7 @@ function drawChart(now = performance.now()): void {
     context.lineTo(padding.left + plotWidth, y)
     context.stroke()
     context.fillStyle = palette.text
-    context.fillText(formatAxisValue(value), padding.left - 6, y)
+    context.fillText(formatYTick(value), padding.left - 6, y)
   }
 
   // X 轴刻度（秒）
@@ -3098,79 +3639,92 @@ function drawChart(now = performance.now()): void {
     context.fillText(`${time.toFixed(0)}s`, x, padding.top + plotHeight + 6)
   }
 
-  // 数据曲线：每像素列 min/max 降采样（点数 > 列数时），否则直接画折线。
-  const plotColumns = Math.max(1, Math.floor(plotWidth))
+  // 数据曲线：共享窗口若点数超过列数则按列 min/max 降采样；A 模式 256 路时
+  // 合并到 1/2~1/3 像素列（视觉仍连续），把路径段数从 ~28 万降到 ~9 万/帧。
+  const useDecimation = orderCount > plotWidth * 1.5
+  const columnScale = drawn.length > 192 ? 12 : drawn.length > 96 ? 3 : 1
+  // A 模式 256 路：隔点采样（min/max 包络近似），把每帧变换/路径成本再减半。
+  const orderStep = drawn.length > 192 ? 3 : 1
+  const plotColumns = Math.max(1, Math.ceil(plotWidth / columnScale))
   if (columnMin.length < plotColumns) {
     columnMin = new Float32Array(plotColumns)
     columnMax = new Float32Array(plotColumns)
   }
   context.lineWidth = 1.5
+  const yMode = yAxisMode.value
+  // 同色曲线合批：最多 24 种颜色 -> 每帧 ~24 次 stroke，而不是 256 次。
+  const byColor = new Map<string, CurveSeries[]>()
   for (const item of drawn) {
-    const values = seriesValues.get(item.id)
-    if (!values) continue
-    let pointCount = 0
-    for (let order = startOrder; order < ringCount; order++) {
-      const slot = ringSlot(order)
-      if (slotSeq[slot] >= item.startSeq && Number.isFinite(values[slot])) pointCount += 1
-    }
-    if (pointCount === 0) continue
-    context.strokeStyle = seriesDisplayColor(item.color)
+    if (!seriesValues.get(item.id)) continue
+    const color = seriesDisplayColor(item.color)
+    const bucket = byColor.get(color)
+    if (bucket) bucket.push(item)
+    else byColor.set(color, [item])
+  }
+  for (const [color, items] of byColor) {
+    context.strokeStyle = color
     context.beginPath()
-    if (pointCount <= plotWidth * 1.5) {
-      let started = false
-      for (let order = startOrder; order < ringCount; order++) {
-        const slot = ringSlot(order)
-        if (slotSeq[slot] < item.startSeq) {
-          started = false
-          continue
+    for (const item of items) {
+      const values = seriesValues.get(item.id)
+      if (!values) continue
+      if (!useDecimation) {
+        let started = false
+        for (let order = startOrder; order < ringCount; order++) {
+          const slot = ringSlot(order)
+          if (slotSeq[slot] < item.startSeq) {
+            started = false
+            continue
+          }
+          const raw = values[slot]
+          const value = yMode === 'auto' ? (Number.isFinite(raw) ? raw : null) : transformYValue(item, raw, normalizedRanges)
+          if (value === null) {
+            started = false
+            continue
+          }
+          const x = xCache[order - startOrder]
+          const y = toY(value)
+          if (!started) {
+            context.moveTo(x, y)
+            started = true
+          } else {
+            context.lineTo(x, y)
+          }
         }
-        const value = values[slot]
-        if (!Number.isFinite(value)) {
-          started = false
-          continue
+      } else {
+        const minBuf = columnMin
+        const maxBuf = columnMax
+        for (let column = 0; column < plotColumns; column++) {
+          minBuf[column] = Number.POSITIVE_INFINITY
+          maxBuf[column] = Number.NEGATIVE_INFINITY
         }
-        const x = toX(timestamps[slot])
-        const y = toY(value)
-        if (!started) {
-          context.moveTo(x, y)
-          started = true
-        } else {
-          context.lineTo(x, y)
+        for (let order = startOrder; order < ringCount; order += orderStep) {
+          const slot = ringSlot(order)
+          if (slotSeq[slot] < item.startSeq) continue
+          const raw = values[slot]
+          const value = yMode === 'auto' ? (Number.isFinite(raw) ? raw : null) : transformYValue(item, raw, normalizedRanges)
+          if (value === null) continue
+          const column = Math.min(plotColumns - 1, Math.max(0, Math.floor((xCache[order - startOrder] - padding.left) / columnScale)))
+          if (value < minBuf[column]) minBuf[column] = value
+          if (value > maxBuf[column]) maxBuf[column] = value
         }
-      }
-    } else {
-      // 像素列 min/max 包络：20s 窗口每列只保留最小/最大 Y，逐点 lineTo 成本降为列数级。
-      const minBuf = columnMin
-      const maxBuf = columnMax
-      for (let column = 0; column < plotColumns; column++) {
-        minBuf[column] = Number.POSITIVE_INFINITY
-        maxBuf[column] = Number.NEGATIVE_INFINITY
-      }
-      for (let order = startOrder; order < ringCount; order++) {
-        const slot = ringSlot(order)
-        if (slotSeq[slot] < item.startSeq) continue
-        const value = values[slot]
-        if (!Number.isFinite(value)) continue
-        const column = Math.min(plotColumns - 1, Math.max(0, Math.floor(toX(timestamps[slot]) - padding.left)))
-        if (value < minBuf[column]) minBuf[column] = value
-        if (value > maxBuf[column]) maxBuf[column] = value
-      }
-      let previousColumn = -2
-      for (let column = 0; column < plotColumns; column++) {
-        if (!Number.isFinite(minBuf[column])) continue
-        const x = padding.left + column + 0.5
-        const yTop = toY(maxBuf[column])
-        const yBottom = toY(minBuf[column])
-        if (column !== previousColumn + 1) context.moveTo(x, yTop)
-        else context.lineTo(x, yTop)
-        context.lineTo(x, yBottom)
-        previousColumn = column
+        let previousColumn = -2
+        for (let column = 0; column < plotColumns; column++) {
+          if (!Number.isFinite(minBuf[column])) continue
+          const x = padding.left + column * columnScale + columnScale * 0.5
+          const yTop = toY(maxBuf[column])
+          const yBottom = toY(minBuf[column])
+          if (column !== previousColumn + 1) context.moveTo(x, yTop)
+          else context.lineTo(x, yTop)
+          context.lineTo(x, yBottom)
+          previousColumn = column
+        }
       }
     }
     context.stroke()
   }
 
-  lastGeometry = {padding, plotWidth, plotHeight, xMin, xMax, minValue, maxValue, width, height}
+  lastGeometry = {padding, plotWidth, plotHeight, xMin, xMax, minValue, maxValue, yAxisMode: yAxisMode.value,
+    normalizedRanges, width, height}
   drawHoverOverlay()
   perfCounter.draws += 1
   perfCounter.lastDrawMs = performance.now() - drawStart
@@ -3214,8 +3768,8 @@ function drawHoverOverlay(): void {
   for (const item of drawnSeriesList.value) {
     const values = seriesValues.get(item.id)
     if (!values || slotSeq[slot] < item.startSeq) continue
-    const value = values[slot]
-    if (!Number.isFinite(value)) continue
+    const value = transformYValue(item, values[slot], geometry.normalizedRanges)
+    if (value === null) continue
     const y = geometry.padding.top + (1 - (value - geometry.minValue) / (geometry.maxValue - geometry.minValue)) * geometry.plotHeight
     context.fillStyle = seriesDisplayColor(item.color)
     context.beginPath()
@@ -3248,9 +3802,11 @@ function processCanvasMove(event: MouseEvent): void {
     }
     return
   }
-  const lastTime = timestamps[ringSlot(ringCount - 1)]
-  const xMax = Math.max(lastTime, 5)
-  const xMin = Math.max(0, xMax - WINDOW_SECONDS)
+  const lastTime = lastDataTimestamp()
+  const geometry = lastGeometry
+  const fallback = currentXRange(lastTime)
+  const xMin = geometry?.xMin ?? fallback.xMin
+  const xMax = geometry?.xMax ?? fallback.xMax
   const time = xMin + ((x - padding.left) / plotWidth) * (xMax - xMin)
   const startOrder = lowerBoundTime(xMin)
   const order = Math.min(Math.max(lowerBoundTime(time), startOrder), ringCount - 1)
@@ -3290,6 +3846,99 @@ function onCanvasLeave(): void {
   scheduleHoverDraw()
 }
 
+// ---- X 时间轴交互：滚轮缩放 / 拖拽平移 / 双击复位 / 跟随最新 ---------------
+let panning = false
+let panStartX = 0
+let panStartEnd = 0
+let activePointerId: number | null = null
+
+function clampViewEnd(value: number): number {
+  const win = timeWindowSeconds.value
+  const first = ringCount > 0 ? timestamps[ringSlot(0)] : 0
+  const last = lastDataTimestamp()
+  const minEnd = Math.max(first + win, win)
+  const maxEnd = Math.max(last, minEnd)
+  return Math.min(Math.max(value, minEnd), maxEnd)
+}
+
+function onCanvasWheel(event: WheelEvent): void {
+  if (ringCount === 0) return
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const currentIndex = TIME_WINDOW_OPTIONS.indexOf(timeWindowSeconds.value)
+  const direction = event.deltaY > 0 ? 1 : -1
+  const nextIndex = Math.min(TIME_WINDOW_OPTIONS.length - 1, Math.max(0, currentIndex + direction))
+  if (nextIndex === currentIndex) return
+  const nextWindow = TIME_WINDOW_OPTIONS[nextIndex]
+  const rect = canvas.getBoundingClientRect()
+  const paddingLeft = 58
+  const paddingRight = 14
+  const plotWidth = Math.max(1, rect.width - paddingLeft - paddingRight)
+  const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left - paddingLeft) / plotWidth))
+  const before = currentXRange(lastDataTimestamp())
+  const centerTime = before.xMin + fraction * (before.xMax - before.xMin)
+  if (!followLatest.value) {
+    // 以鼠标位置为中心缩放；若在跟随时则保持跟随最新。
+    followLatest.value = false
+    viewEndTime.value = clampViewEnd(centerTime + nextWindow * (1 - fraction))
+  }
+  timeWindowSeconds.value = nextWindow
+  scheduleDraw()
+}
+
+function resetTimeView(): void {
+  followLatest.value = true
+  timeWindowSeconds.value = 20
+  viewEndTime.value = 0
+  invalidateYRange()
+  scheduleDraw()
+}
+
+function onCanvasPointerDown(event: PointerEvent): void {
+  if (event.button !== 0 || ringCount === 0) return
+  const canvas = canvasRef.value
+  if (!canvas) return
+  panning = true
+  panStartX = event.clientX
+  panStartEnd = currentXRange(lastDataTimestamp()).xMax
+  activePointerId = event.pointerId
+  try { canvas.setPointerCapture(event.pointerId) } catch { /* ignore */ }
+  event.preventDefault()
+}
+
+function onCanvasPointerMove(event: PointerEvent): void {
+  if (panning) {
+    const canvas = canvasRef.value
+    if (!canvas) return
+    const dx = event.clientX - panStartX
+    if (Math.abs(dx) > 2) {
+      const rect = canvas.getBoundingClientRect()
+      const plotWidth = Math.max(1, rect.width - 58 - 14)
+      const secondsPerPixel = timeWindowSeconds.value / plotWidth
+      followLatest.value = false
+      viewEndTime.value = clampViewEnd(panStartEnd - dx * secondsPerPixel)
+      if (hover.value) {
+        hover.value = null
+        scheduleHoverDraw()
+      }
+      scheduleDraw()
+    }
+    return
+  }
+  onCanvasMove(event)
+}
+
+function onCanvasPointerUp(event: PointerEvent): void {
+  if (!panning) return
+  panning = false
+  const canvas = canvasRef.value
+  if (canvas && activePointerId !== null) {
+    try { canvas.releasePointerCapture(activePointerId) } catch { /* ignore */ }
+  }
+  activePointerId = null
+  event.preventDefault()
+}
+
 const hoverStyle = computed(() => {
   const state = hover.value
   const wrap = chartWrapRef.value
@@ -3321,11 +3970,18 @@ function csvEscape(text: string): string {
 
 function exportCsv(): void {
   if (ringCount === 0) return
-  const header = ['time_s', ...seriesList.value.map((item) => csvEscape(legendLabel(item)))]
+  // 导出当前 X 视图范围（冻结/缩放/平移后所见即所得）；始终带 group 列。
+  const lastTime = lastDataTimestamp()
+  const view = lastGeometry
+    ? {xMin: lastGeometry.xMin, xMax: lastGeometry.xMax}
+    : currentXRange(lastTime)
+  const startOrder = Math.max(0, lowerBoundTime(view.xMin))
+  const endOrder = Math.max(startOrder, lowerBoundTime(view.xMax + 1e-9))
+  const header = ['time_s', 'group', ...seriesList.value.map((item) => csvEscape(legendLabel(item)))]
   const lines: string[] = [header.join(',')]
-  for (let order = 0; order < ringCount; order++) {
+  for (let order = startOrder; order < endOrder; order++) {
     const slot = ringSlot(order)
-    const cells: string[] = [(timestamps[slot] as number).toFixed(4)]
+    const cells: string[] = [(timestamps[slot] as number).toFixed(4), String(slotGroup[slot])]
     for (const item of seriesList.value) {
       const loBuffer = seriesLo.get(item.id)
       const hiBuffer = seriesHi.get(item.id)
@@ -3381,6 +4037,9 @@ function onVisibilityChange(): void {
 function installDebugSnapshot(): void {
   ;(window as unknown as {__curveDebug?: () => Record<string, unknown>}).__curveDebug = () => ({
     draws: perfCounter.draws,
+    pollsPerSecond: Math.round(pollCounterState.pollsPerSecond * 10) / 10,
+    pollsInFlight: localPollsInFlightCount,
+    drawIntervalMs: adaptiveDrawIntervalMs(),
     lastDrawMs: Math.round(perfCounter.lastDrawMs * 100) / 100,
     avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
     drawn: drawnSeriesList.value.length,
@@ -3398,6 +4057,7 @@ function installDebugSnapshot(): void {
 }
 
 onMounted(() => {
+  loadValueScale()
   resizeObserver = new ResizeObserver(() => scheduleDraw())
   if (chartWrapRef.value) resizeObserver.observe(chartWrapRef.value)
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -3432,6 +4092,9 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.jump-source { cursor: pointer; }
+.jump-source:hover { color: var(--bb-accent, #2563eb); text-decoration: underline; }
+
 /* ==========================================================================
  * 曲线页视觉：全部颜色走 design-tokens.css（深色优先，浅色自动切回）。
  * 布局/尺寸/交互逻辑保持原样（本文件只做视觉迁移）。
@@ -3652,6 +4315,11 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   pointer-events: none;
+}
+
+.chart-wrap canvas:first-child {
+  touch-action: none;
+  cursor: crosshair;
 }
 
 .render-bar {

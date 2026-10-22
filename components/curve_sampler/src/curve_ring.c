@@ -35,6 +35,9 @@ uint32_t curve_ring_capacity_for(uint32_t frame_bytes)
         return 0U;
     }
     stride = CURVE_FRAME_META_BYTES + frame_bytes;
+    /* Budget first: large payloads get fewer slots instead of a larger heap
+     * allocation.  The 16-frame floor is only a sanity guard (at 256 B/frame
+     * the 8 KiB budget still allows 30 frames). */
     capacity = CURVE_RING_BYTES_BUDGET / stride;
     if (capacity < CURVE_RING_FRAMES_MIN) {
         capacity = CURVE_RING_FRAMES_MIN;

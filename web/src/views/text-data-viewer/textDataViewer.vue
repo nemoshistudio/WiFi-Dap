@@ -60,7 +60,7 @@
     </div>
   </div>
 
-  <div class="flex flex-grow overflow-hidden border-2 rounded scroll-m-2">
+  <div class="bb-message-area flex flex-grow overflow-hidden scroll-m-2">
     <v-virtual-scroll
         v-if="store.showVirtualScroll"
         :items="store.dataFiltered"
@@ -72,11 +72,11 @@
       <template v-slot:default="{ item, }">
         <div class="">
           <div class="flex" :class="[store.enableLineWrap ? 'whitespace-pre-wrap' : 'whitespace-pre']">
-            <p class="text-nowrap text-sm text-lime-500" v-if="item.isRX" type="success" v-show="store.showTimestamp">
+            <p class="text-nowrap text-sm bb-rx-time" v-if="item.isRX" type="success" v-show="store.showTimestamp">
               <span>{{ item.time }}</span>◄-RX|</p>
-            <p class="text-nowrap text-sm text-sky-500" v-else-if="item.type === 0" type="primary" v-show="store.showTimestamp">
+            <p class="text-nowrap text-sm bb-tx-time" v-else-if="item.type === 0" type="primary" v-show="store.showTimestamp">
               <span>{{ item.time }}</span>TX-►|</p>
-            <p class="text-nowrap text-sm text-amber-800" v-else type="primary" v-show="store.showTimestamp">
+            <p class="text-nowrap text-sm bb-ns-time" v-else type="primary" v-show="store.showTimestamp">
               <span>{{ item.time }}</span>NS-►|</p>
 
             <p v-show="store.showText"
@@ -106,11 +106,11 @@
       <template v-slot:default="{ item, }">
         <div>
           <div class="flex" :class="[store.enableLineWrap ? 'whitespace-pre-wrap' : 'whitespace-pre']">
-            <p class="text-nowrap text-sm text-lime-500" v-if="item.isRX" type="success" v-show="store.showTimestamp">
+            <p class="text-nowrap text-sm bb-rx-time" v-if="item.isRX" type="success" v-show="store.showTimestamp">
               <span>{{ item.time }}</span>◄-RX|</p>
-            <p class="text-nowrap text-sm text-sky-500" v-else-if="item.type === 0" type="primary" v-show="store.showTimestamp">
+            <p class="text-nowrap text-sm bb-tx-time" v-else-if="item.type === 0" type="primary" v-show="store.showTimestamp">
               <span>{{ item.time }}</span>TX-►|</p>
-            <p class="text-nowrap text-sm text-amber-800" v-else type="primary" v-show="store.showTimestamp">
+            <p class="text-nowrap text-sm bb-ns-time" v-else type="primary" v-show="store.showTimestamp">
                 <span>{{ item.time }}</span>NS-►|</p>
             <p v-show="store.showText"
                v-html="item.str"></p>
@@ -133,11 +133,11 @@
   <div class="shrink-0 flex h-8 mt-0.5 text-xs">
     <div class="flex shrink-0">
       <el-tooltip :content="translate('uart.tempDisplayTooltip')" effect="light">
-        <InlineSvg name="help" class="w-3.5 h-3.5 text-gray-500 cursor-help"></InlineSvg>
+        <InlineSvg name="help" class="w-3.5 h-3.5 bb-muted cursor-help"></InlineSvg>
       </el-tooltip>
       <p>►</p>
     </div>
-    <div ref="RxHexDumpRef" class="p-0.5 border-2 rounded w-full overflow-y-scroll font-mono text-nowrap">
+    <div ref="RxHexDumpRef" class="bb-hexdump p-0.5 w-full overflow-y-scroll font-mono text-nowrap">
       <p v-html="store.RxRemainHexdump"></p>
     </div>
   </div>
@@ -457,3 +457,32 @@ function onSendClick() {
 }
 
 </script>
+
+<style scoped>
+/* Terminal message surface + timestamp colors are themed so they stay readable
+ * on both the dark and light app shells. */
+.bb-message-area {
+  min-height: 0;
+  border: 1px solid var(--bb-border);
+  border-radius: var(--bb-radius-sm);
+  background: var(--bb-surface-inset);
+}
+
+.bb-hexdump {
+  border: 1px solid var(--bb-border);
+  border-radius: var(--bb-radius-xs);
+  background: var(--bb-surface-inset);
+}
+
+.bb-rx-time {
+  color: var(--bb-success);
+}
+
+.bb-tx-time {
+  color: var(--bb-accent);
+}
+
+.bb-ns-time {
+  color: var(--bb-warning);
+}
+</style>
