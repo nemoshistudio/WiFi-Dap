@@ -226,3 +226,20 @@ Phase 1：
 注意：入口处局部变量可能尚未初始化；实际使用时把断点放在初始化之后的指令地址，
 并在 UI 中手动填写该地址；FPB 与其他调试器互斥。
 
+## 7. Phase 3 快照采样真机结果（2026-10-22）
+
+在 reference 固件中新增 BMI088 调试快照全局结构（`src/component/comp_debug_snapshot.*`，
+`PraseAccel/PraseGyro` 末尾 seqlock 写入），固件编译并烧录后：
+
+- 快照符号：`g_bmi088_debug_snapshot` @ **0x20002270**，60 B；
+  字段 `raw_accel[3]/raw_gyro[3]/raw_temp/accel[3]/gyro[3]/temp/accel_count/gyro_count`。
+- Web 上传 `reference-debug-O0-snapshot/firmware.elf`，本地模式 Periodic + 5 ms：
+  **201 Hz、Invalid 0、Overwritten 0、Halt OFF**；
+  选择 `raw_accel[0..2]` 时曲线持续更新（示例 -4912/-2292/648），无需 halt 目标。
+- 目标固件运行正常（`g_assert_count=0`，`target_debug_handle` 初始化，tick 递增）。
+- 产物：`firmware/reference-board/reference-debug-O0-snapshot/`（ELF sha256
+  `c92df21b4dee763dd77af4f9cfe4b67c9de863f03b4fceacd20e0bbcc5706f32`，
+  Windows `C:\Users\reference firmware\ozone-test\25mo​ni-debug-O0-snapshot\`）。
+- 注意：快照源码在 reference firmware 工作树（未 commit）；构建用的 `-O0`/cap cutoff/
+  timer stack 补丁只在手工固件中，原始构建配置已恢复。
+
