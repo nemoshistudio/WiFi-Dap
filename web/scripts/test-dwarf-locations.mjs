@@ -34,10 +34,13 @@ const bundle = (entry, out) => {
 }
 const parserOut = path.join(os.tmpdir(), `dwarf-loc-parser-${process.pid}.mjs`)
 const evalOut = path.join(os.tmpdir(), `dwarf-loc-eval-${process.pid}.mjs`)
+const dwarfOut = path.join(os.tmpdir(), `dwarf-loc-core-${process.pid}.mjs`)
 bundle(path.join(root, 'src/utils/elfSymbols.ts'), parserOut)
 bundle(path.join(root, 'src/utils/dwarfLocation.ts'), evalOut)
+bundle(path.join(root, 'src/utils/elfDwarf.ts'), dwarfOut)
 const {parseElfVariables} = await import(parserOut)
 const {addressExprIsLive, addressExprRegisters, addressExprText, evaluateAddress} = await import(evalOut)
+const {selectLocationListEntry} = await import(dwarfOut)
 
 let failures = 0
 const check = (name, cond, detail = '') => {
@@ -72,6 +75,27 @@ check('addressExprText formats', addressExprText({kind: 'deref', inner: {kind: '
 check('missing register throws', (() => {
   try { evaluateAddress({kind: 'reg', reg: 5, offset: 0}, registers, readWord); return false } catch { return true }
 })())
+
+// ---------- D：loclist 条目选择（synthetic 单 entry/default/multi） ----------
+console.log('loclist: entry selection (synthetic)')
+const exprBytes = Uint8Array.from([0x91, 0x00]) // DW_OP_fbreg 0（仅用于选择逻辑）
+const entry = (index, kind, lowPc, highPc) => ({
+  index, kind, lowPc, highPc, expr: exprBytes, entryOffset: index * 10,
+})
+const single = selectLocationListEntry([entry(0, 'address_range', 0x08001000, 0x08002000)])
+check('loclist: single entry selected directly', !!single && single.multi === false
+  && single.entry.lowPc === 0x08001000 && single.rangedCount === 1 && single.total === 1, single)
+const defaultValue = selectLocationListEntry([entry(0, 'default_location', undefined, undefined)])
+check('loclist: default_location used when no ranged entry', !!defaultValue && defaultValue.multi === false
+  && defaultValue.entry.kind === 'default_location', defaultValue)
+const multi = selectLocationListEntry([
+  entry(0, 'address_range', 0x08001000, 0x08002000),
+  entry(1, 'address_range', 0x08003000, 0x08004000),
+  entry(2, 'default_location', undefined, undefined),
+])
+check('loclist: multi entry -> first range + multi flag', !!multi && multi.multi === true
+  && multi.rangedCount === 2 && multi.total === 3 && multi.entry.lowPc === 0x08001000, multi)
+check('loclist: empty entries -> null', selectLocationListEntry([]) === null)
 
 // ---------- 调试 ELF：帧/寄存器位置 + 指针展开 ----------
 console.log(`\ndebug ELF: ${debugElf}`)
@@ -115,6 +139,33 @@ check('debug: nested pointer->struct->array element path', !!nestedArrayPath && 
 const sampleLocLeaf = debugRoots.find((node) => node.sample?.location && node.sampleable)
 check('debug: halt leaf has evaluable AddressExpr', !!sampleLocLeaf)
 
+// ---------- A：DWARF subprogram PC 范围（pcLow/pcHigh） ----------
+console.log('pc scope: DWARF subprogram ranges')
+const isFlashPc = (node) => typeof node.pcLow === 'number' && typeof node.pcHigh === 'number'
+  && node.pcLow >= 0x08000000 && node.pcHigh <= 0x09000000 && node.pcHigh > node.pcLow
+const debugPcRoots = debugRoots.filter(isFlashPc)
+check('debug: root variables carry Flash PC ranges', debugPcRoots.length >= 500, debugPcRoots.length)
+for (const name of ['gyro', 'delay', 'bmi088']) {
+  const node = findRoot(name)
+  check(`debug: ${name} has valid PC range`, !!node && isFlashPc(node), node ? `0x${node.pcLow?.toString(16)}-0x${node.pcHigh?.toString(16)}` : 'MISSING')
+}
+const bmiPc = findRoot('bmi088')
+const childWithPc = bmiPc?.children?.find((child) => isFlashPc(child))
+check('debug: children inherit parent PC range', !!childWithPc && childWithPc.pcLow === bmiPc.pcLow && childWithPc.pcHigh === bmiPc.pcHigh,
+  childWithPc ? `${childWithPc.name}` : 'MISSING')
+const globalSn = findRoot('sn_tools')
+check('debug: file-scope global has no PC range', !!globalSn && globalSn.pcLow === undefined && globalSn.pcHigh === undefined)
+check('debug: all PC ranges are within Flash', debugPcRoots.every((node) => isFlashPc(node)))
+
+// ---------- D：debug-O0 的真实 loclist 变量（printf/comp_utils） ----------
+const debugLoclist = debugRoots.filter((node) => node.loclistEntries !== undefined)
+console.log(`  loclist variables: ${debugLoclist.length} (multi=${debugLoclist.filter((node) => node.loclistMulti).length})`)
+check('debug: loclist variables become sampleable', debugLoclist.length >= 1 && debugLoclist.every((node) => node.sampleable),
+  debugLoclist.slice(0, 4).map((node) => `${node.shortName}:${node.loclistEntries}`))
+check('debug: multi-range loclist flagged + variants recorded', debugLoclist.some((node) => node.loclistMulti
+  && (node.locationVariants?.length ?? 0) > 0), debugLoclist.slice(0, 3).map((node) => `${node.shortName}/${node.locationVariants?.length ?? 0}`))
+check('debug: no unsampleable loclist variable left unsupported', debugLoclist.every((node) => node.sampleable))
+
 // ---------- Release ELF：旧 live 路径不变 + 固定地址指针可展开 ----------
 console.log(`\nrelease ELF: ${releaseElf}`)
 const release = parseElfVariables(fs.readFileSync(releaseElf))
@@ -125,11 +176,26 @@ check('release: original 255-live root sampling path preserved', release.dwarfLi
 check('release: live roots still have concrete addresses', liveRoots.length >= 255 && liveRoots.every((node) => node.sample?.address || node.liveSamplable))
 const livePointer = release.variables.find((node) => node.children?.some((child) => child.liveSamplable && child.pointerDepth > 0))
 check('release: fixed-address pointer members expand for live two-phase read', !!livePointer, livePointer ? livePointer.shortName : 'MISSING')
+const releasePcRoots = release.variables.filter(isFlashPc)
+check('release: PC ranges parsed for optimized local variables', releasePcRoots.length >= 100, releasePcRoots.length)
+const releaseGlobal = release.variables.find((node) => node.shortName === 'sn_tools')
+check('release: global variable has no PC range', !!releaseGlobal && releaseGlobal.pcLow === undefined)
 const selfVar = release.variables.find((node) => node.mangledName === '_ZN6System5Timer5self_E')
 check('release: spec-chain source names unchanged', !!selfVar && selfVar.name === 'System::Timer::self_')
 
+// ---------- D：优化 ELF loclist 集成统计 ----------
+const releaseLoclist = release.variables.filter((node) => node.loclistEntries !== undefined)
+const releaseMulti = releaseLoclist.filter((node) => node.loclistMulti)
+console.log(`  loclist variables: ${releaseLoclist.length} (multi=${releaseMulti.length})`)
+check('release: many loclist variables resolved (previously unsupported)', releaseLoclist.length >= 1000, releaseLoclist.length)
+check('release: multi-range loclist flagged with variants', releaseMulti.length >= 100
+  && releaseMulti.some((node) => (node.locationVariants?.length ?? 0) > 0), releaseMulti.length)
+check('release: all loclist variables sampleable (none dropped as unsupported)', releaseLoclist.every((node) => node.sampleable))
+check('release: loclist examples keep source name/file:line', releaseLoclist.some((node) => node.shortName === 'reg_value' && node.loclistMulti && node.relativeFile), releaseLoclist.slice(0, 2).map((node) => node.shortName))
+
 fs.rmSync(parserOut, {force: true})
 fs.rmSync(evalOut, {force: true})
+fs.rmSync(dwarfOut, {force: true})
 console.log('')
 if (failures) { console.error(`A2 DWARF location test FAILED: ${failures} check(s)`); process.exit(1) }
 console.log('A2 DWARF location test PASSED')

@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 440
+const EXPECTED_TOTAL = 446
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 292
+const EXPECTED_ADDED = 298
 
 const errors = []
 const warnings = []
@@ -167,6 +167,10 @@ const ADDED_KEYS = [
         // 断点函数符号选择/Offset
         'localFunction', 'localFunctionPlaceholder', 'localFunctionEmpty', 'localFunctionHint',
         'localOffset', 'localOffsetInvalid',
+        // PC 作用域 / 多系列上限（Phase 2.5）
+        'localSeries', 'localOutOfScope', 'localOutOfScopeHint', 'localGroupingHint',
+        // D：loclist 多段位置限制
+        'loclistMultiShort', 'loclistMultiHint',
     ]),
     ...keys('page', ['debugCurve']),
 ]

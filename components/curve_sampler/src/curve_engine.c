@@ -105,6 +105,7 @@ static struct {
 
     /* statistics reported by GET /api/curve/status */
     uint32_t stat_invalid;
+    uint32_t stat_out_of_scope;
     uint32_t stat_errors;
     uint32_t stat_consecutive;
     uint32_t stat_last_tick_us;
@@ -311,18 +312,36 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
         ESP_LOGI(CURVE_TAG, "reusing ring (%u frames x %u B)",
                  (unsigned)capacity, (unsigned)frame_bytes);
     } else {
-        seq_bytes = sizeof(uint32_t) * (size_t)capacity;
-        ts_bytes = sizeof(uint64_t) * (size_t)capacity;
-        payload_bytes = (size_t)frame_bytes * (size_t)capacity;
-        total_bytes = seq_bytes + ts_bytes + payload_bytes;
-        block = (uint8_t *)malloc(total_bytes);
+        /* Large payloads (32 series) can exceed the fragmented WiFi heap even
+         * though the nominal 32 KiB budget looks fine. Free the old ring first
+         * and, on allocation failure, halve the frame count down to 32 frames
+         * instead of failing the whole start request. */
+        free(s_engine.ring_block);
+        s_engine.ring_block = NULL;
+        s_engine.ring_seq = NULL;
+        s_engine.ring_ts = NULL;
+        s_engine.ring_payload = NULL;
+        s_engine.ring_frame_bytes = 0U;
+        s_engine.ring_capacity = 0U;
+        block = NULL;
+        uint32_t attempt_capacity = capacity;
+        while (attempt_capacity >= 32U) {
+            seq_bytes = sizeof(uint32_t) * (size_t)attempt_capacity;
+            ts_bytes = sizeof(uint64_t) * (size_t)attempt_capacity;
+            payload_bytes = (size_t)frame_bytes * (size_t)attempt_capacity;
+            total_bytes = seq_bytes + ts_bytes + payload_bytes;
+            block = (uint8_t *)malloc(total_bytes);
+            if (block != NULL) {
+                capacity = attempt_capacity;
+                break;
+            }
+            attempt_capacity /= 2U;
+        }
         if (block == NULL) {
-            ESP_LOGE(CURVE_TAG, "ring allocation failed (%u frames x %u B, "
-                     "%u bytes)", (unsigned)capacity, (unsigned)frame_bytes,
-                     (unsigned)total_bytes);
+            ESP_LOGE(CURVE_TAG, "ring allocation failed (%u frames x %u B)",
+                     (unsigned)capacity, (unsigned)frame_bytes);
             return ESP_ERR_NO_MEM;
         }
-        free(s_engine.ring_block);
         s_engine.ring_block = block;
         s_engine.ring_seq = (uint32_t *)block;
         offset = seq_bytes;
@@ -337,6 +356,7 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
 
     curve_ring_reset(&s_engine.ring, s_engine.ring_capacity);
     s_engine.stat_invalid = 0U;
+    s_engine.stat_out_of_scope = 0U;
     s_engine.stat_errors = 0U;
     s_engine.stat_consecutive = 0U;
     s_engine.stat_last_tick_us = 0U;
@@ -348,7 +368,8 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
 }
 
 static void engine_record_frame(const uint8_t *payload, uint64_t timestamp_us,
-                                uint32_t invalid, bool tick_ok, uint32_t tick_us,
+                                uint32_t invalid, uint32_t out_of_scope,
+                                bool tick_ok, uint32_t tick_us,
                                 esp_err_t tick_err)
 {
     uint32_t slot = 0U;
@@ -367,6 +388,7 @@ static void engine_record_frame(const uint8_t *payload, uint64_t timestamp_us,
             curve_ring_commit_write(&s_engine.ring);
         }
         s_engine.stat_invalid += invalid;
+        s_engine.stat_out_of_scope += out_of_scope;
         s_engine.stat_last_tick_us = tick_us;
         if (tick_ok) {
             s_engine.stat_consecutive = 0U;
@@ -447,17 +469,29 @@ static esp_err_t curve_ensure_core_running(void)
  *        and the core is halted), evaluate every series expression and read the
  *        target memory.
  *
+ * Phase 2.5 PC scope: when `cfg->pc_gate_count > 0`, the caller reads r15 once
+ * per tick and passes it here.  `pc_state` is:
+ *   0 = PC not available (no-halt periodic mode: the core is running and DCRSR
+ *       cannot be read) -> gated series are zeroed and counted out_of_scope;
+ *   1 = PC valid -> gated series outside [pc_low, pc_high) are zeroed and
+ *       counted out_of_scope;
+ *   2 = PC read failed -> gated series are zeroed and counted invalid (a real
+ *       read failure, like an unreadable target address).
  * `payload` must have room for cfg->sample_bytes and is zero-filled first, so
- * invalid/unreadable series stay 0 in the frame.  Errors are reported through
- * ok_out/err_out; *invalid_out counts series that could not be read.
+ * gated/invalid/unreadable series stay 0 in the frame.  *invalid_out counts
+ * address/read failures and *out_of_scope_out counts series skipped by the PC
+ * gate; neither aborts the session.
  */
 static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
+                                 uint8_t pc_state, uint32_t pc_value,
                                  uint8_t *payload, uint32_t *invalid_out,
+                                 uint32_t *out_of_scope_out,
                                  bool *ok_out, esp_err_t *err_out)
 {
     uint32_t reg_values[CURVE_MAX_CORE_REGS];
     bool reg_valid[CURVE_MAX_CORE_REGS];
     uint32_t invalid = 0U;
+    uint32_t out_of_scope = 0U;
     uint16_t offset = 0U;
     bool ok = true;
     esp_err_t tick_err = ESP_OK;
@@ -465,12 +499,23 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
     memset(reg_valid, 0, sizeof(reg_valid));
     memset(payload, 0, cfg->sample_bytes);
 
+    /* Reuse the PC read done for the scope gate if an expression also needs
+     * r15 (one DCRSR read per tick). */
+    if (pc_state == 1U) {
+        reg_values[15] = pc_value;
+        reg_valid[15] = true;
+    }
+
     if (core_halted && cfg->reg_count > 0U) {
         for (uint8_t i = 0U; i < cfg->reg_count; i++) {
             uint8_t reg = cfg->regs[i];
             uint32_t value = 0U;
-            esp_err_t err = tf_swd_read_reg(reg, &value);
+            esp_err_t err;
 
+            if (reg_valid[reg]) {
+                continue;
+            }
+            err = tf_swd_read_reg(reg, &value);
             if (err == ESP_OK) {
                 reg_values[reg] = value;
                 reg_valid[reg] = true;
@@ -484,9 +529,29 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
     for (uint8_t i = 0U; i < cfg->series_count; i++) {
         const curve_series_t *series = &cfg->series[i];
         uint32_t address = 0U;
-        curve_eval_result_t res =
-            curve_expr_eval(cfg, series->expr, reg_values, reg_valid, &address);
+        curve_eval_result_t res;
 
+        if (series->pc_gate) {
+            if (pc_state == 1U) {
+                if (!curve_pc_in_scope(series->pc_low, series->pc_high, pc_value)) {
+                    out_of_scope++;
+                    offset += series->size;
+                    continue;
+                }
+            } else if (pc_state == 2U) {
+                invalid++;
+                offset += series->size;
+                continue;
+            } else {
+                /* No PC while the target runs: a stack-frame variable cannot be
+                 * safely attributed to this tick, so gate it out. */
+                out_of_scope++;
+                offset += series->size;
+                continue;
+            }
+        }
+
+        res = curve_expr_eval(cfg, series->expr, reg_values, reg_valid, &address);
         if (res == CURVE_EVAL_OK && curve_addr_range_ok(address, series->size)) {
             esp_err_t err = tf_swd_read_mem(address, payload + offset, series->size);
 
@@ -510,6 +575,7 @@ static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
     }
 
     *invalid_out = invalid;
+    *out_of_scope_out = out_of_scope;
     *ok_out = ok;
     *err_out = tick_err;
 }
@@ -548,6 +614,9 @@ static void curve_periodic_loop(void)
         bool tick_ok = true;
         esp_err_t tick_err = ESP_OK;
         uint32_t invalid = 0U;
+        uint32_t out_of_scope = 0U;
+        uint8_t pc_state = 0U;
+        uint32_t pc_value = 0U;
 
         if (cfg->halt) {
             esp_err_t err = tf_swd_halt();
@@ -559,11 +628,27 @@ static void curve_periodic_loop(void)
             }
         }
 
+        /* Phase 2.5: one PC read per tick for PC-scoped series.  DCRSR is only
+         * readable while the core is halted (no-halt mode keeps pc_state=0). */
+        if (cfg->pc_gate_count > 0U && halted) {
+            esp_err_t err = tf_swd_read_reg(15U, &pc_value);
+            if (err == ESP_OK) {
+                pc_state = 1U;
+            } else {
+                pc_state = 2U;
+                tick_ok = false;
+                if (tick_err == ESP_OK) {
+                    tick_err = err;
+                }
+            }
+        }
+
         {
             bool collect_ok = true;
             esp_err_t collect_err = ESP_OK;
 
-            curve_collect_sample(cfg, halted, payload, &invalid, &collect_ok,
+            curve_collect_sample(cfg, halted, pc_state, pc_value, payload,
+                                 &invalid, &out_of_scope, &collect_ok,
                                  &collect_err);
             if (!collect_ok) {
                 tick_ok = false;
@@ -584,8 +669,8 @@ static void curve_periodic_loop(void)
         }
 
         int64_t t_end = esp_timer_get_time();
-        engine_record_frame(payload, (uint64_t)t_start, invalid, tick_ok,
-                            (uint32_t)(t_end - t_start), tick_err);
+        engine_record_frame(payload, (uint64_t)t_start, invalid, out_of_scope,
+                            tick_ok, (uint32_t)(t_end - t_start), tick_err);
 
         if (tick_ok) {
             consecutive_errors = 0U;
@@ -791,17 +876,35 @@ static void curve_breakpoint_loop(void)
             bool collect_ok = true;
             esp_err_t collect_err = ESP_OK;
             uint32_t invalid = 0U;
+            uint32_t out_of_scope = 0U;
             uint32_t sample_us;
+            uint8_t pc_state = 0U;
+            uint32_t pc_value = 0U;
 
             engine_lock();
             s_engine.stat_hits++;
             engine_unlock();
 
-            curve_collect_sample(cfg, true, payload, &invalid, &collect_ok,
+            /* Phase 2.5: one PC read for PC-scoped series (the core is halted
+             * by the FPB hit, so DCRSR works exactly like periodic halt). */
+            if (cfg->pc_gate_count > 0U) {
+                esp_err_t perr = tf_swd_read_reg(15U, &pc_value);
+
+                if (perr == ESP_OK) {
+                    pc_state = 1U;
+                } else {
+                    pc_state = 2U;
+                    collect_ok = false;
+                    collect_err = perr;
+                }
+            }
+
+            curve_collect_sample(cfg, true, pc_state, pc_value, payload,
+                                 &invalid, &out_of_scope, &collect_ok,
                                  &collect_err);
             sample_us = (uint32_t)(esp_timer_get_time() - t_hit);
-            engine_record_frame(payload, (uint64_t)t_hit, invalid, collect_ok,
-                                sample_us, collect_err);
+            engine_record_frame(payload, (uint64_t)t_hit, invalid, out_of_scope,
+                                collect_ok, sample_us, collect_err);
             engine_lock();
             s_engine.stat_sampled++;
             engine_unlock();
@@ -1402,6 +1505,7 @@ void curve_engine_status(curve_status_t *out)
     out->ring_capacity = s_engine.ring.capacity;
     out->served_seq = s_engine.ring.served_seq;
     out->invalid = s_engine.stat_invalid;
+    out->out_of_scope = s_engine.stat_out_of_scope;
     out->errors = s_engine.stat_errors;
     out->consecutive_errors = s_engine.stat_consecutive;
     out->link_hz = s_engine.link_hz;

@@ -20,7 +20,7 @@ export const CURVE_LOCAL_FRAMES_PATH = '/api/curve/frames'
 
 /** 固件契约限制（docs §1.1）。 */
 export const CURVE_LOCAL_MIN_SERIES = 1
-export const CURVE_LOCAL_MAX_SERIES = 16
+export const CURVE_LOCAL_MAX_SERIES = 32
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
 export const CURVE_LOCAL_MIN_INTERVAL_US = 1000
@@ -62,6 +62,9 @@ export interface CurveLocalSeriesSpec {
     id: number
     size: number
     expr: AddressExpr
+    /** DWARF subprogram PC 范围（可选；仅周期/断点模式都下发，用于固件 PC 门控）。 */
+    pcLow?: number
+    pcHigh?: number
 }
 
 export interface StartLocalCurveOptions {
@@ -96,6 +99,8 @@ export interface LocalCurveStatus {
     sampled?: number
     /** 因节流丢弃的次数（breakpoint 触发）。 */
     throttled?: number
+    /** PC 不在变量所属函数范围而被固件填 0 的累计次数（PC 门控）。 */
+    outOfScope?: number
     intervalUs: number
     frames: number
     overwritten: number
@@ -212,6 +217,18 @@ export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
         if (addressExprDepth(item.expr) > CURVE_LOCAL_MAX_EXPR_DEPTH) {
             throw new CurveLocalError(`series[${item.id}] expr depth > ${CURVE_LOCAL_MAX_EXPR_DEPTH}`)
         }
+        if (item.pcLow !== undefined || item.pcHigh !== undefined) {
+            const pcLow = item.pcLow
+            const pcHigh = item.pcHigh
+            if (typeof pcLow !== 'number' || typeof pcHigh !== 'number'
+                || !Number.isInteger(pcLow) || !Number.isInteger(pcHigh)
+                || pcLow < CURVE_LOCAL_FLASH_START || pcHigh > CURVE_LOCAL_FLASH_END
+                || pcLow >= pcHigh) {
+                throw new CurveLocalError(
+                    `series[${item.id}] pc_low/pc_high must be a valid Flash range (0x${CURVE_LOCAL_FLASH_START.toString(16)}..0x${CURVE_LOCAL_FLASH_END.toString(16)}, low<high)`,
+                )
+            }
+        }
         sampleBytes += item.size
     }
     if (sampleBytes > CURVE_LOCAL_MAX_SAMPLE_BYTES) {
@@ -274,7 +291,15 @@ export async function startLocalCurve(options: StartLocalCurveOptions): Promise<
     const payload: Record<string, unknown> = {
         trigger,
         interval_us: options.intervalUs,
-        series: options.series.map((item) => ({id: item.id, size: item.size, expr: item.expr})),
+        series: options.series.map((item) => {
+            const spec: Record<string, unknown> = {id: item.id, size: item.size, expr: item.expr}
+            // PC 门控：仅当范围有效时下发（缺省字段 = 不门控）。
+            if (item.pcLow !== undefined && item.pcHigh !== undefined) {
+                spec.pc_low = item.pcLow >>> 0
+                spec.pc_high = item.pcHigh >>> 0
+            }
+            return spec
+        }),
     }
     if (trigger === 'breakpoint') {
         // 断点命中时核心已暂停，halt 字段无意义且契约要求忽略；不下发避免冲突。
@@ -330,6 +355,7 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
         hits: optionalFiniteNumber(body.hits),
         sampled: optionalFiniteNumber(body.sampled),
         throttled: optionalFiniteNumber(body.throttled),
+        outOfScope: optionalFiniteNumber(body.out_of_scope),
         intervalUs: finiteNumber(body.interval_us, 0),
         frames: finiteNumber(body.frames, 0),
         overwritten: finiteNumber(body.overwritten, 0),

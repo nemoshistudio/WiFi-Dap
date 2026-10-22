@@ -24,7 +24,10 @@ extern "C" {
 #define CURVE_TAG "curve_sampler"
 
 /* ---- contract limits (docs/curve-local-sampler.md §1.1) ------------------ */
-#define CURVE_MAX_SERIES            16U
+/* Phase 2.5: up to 32 series (sum(size)<=256).  Config is static (not on a
+ * task stack); the HTTP parser, CVF1 frame header (u16 frame_bytes) and the
+ * frame ring all handle this size. */
+#define CURVE_MAX_SERIES            32U
 #define CURVE_MAX_EXPR_DEPTH        8U
 #define CURVE_MAX_SAMPLE_BYTES      256U
 #define CURVE_MIN_INTERVAL_US       1000U
@@ -35,13 +38,16 @@ extern "C" {
 #define CURVE_MAX_FRAMES_PER_REQ    64U
 
 /* Frame ring.  The contract recommends >= 256 frames; the sampler uses up to
- * 512 when the per-frame payload is small and clamps down to 256 when the
- * payload is large so the heap cost stays bounded:
- *   capacity = clamp(CURVE_RING_BYTES_BUDGET / (12 + frame_bytes), 256, 512)
- *   16 series x 8 B  (128 B/frame) -> 256 frames / ~35 KiB
- *   4 series x 4 B   ( 16 B/frame) -> 512 frames / ~14 KiB
+ * 512 when the per-frame payload is small and clamps down for large payloads
+ * so the heap cost stays bounded.  Phase 2.5 allows 32 series (up to 256 B
+ * payload) and the minimum was lowered to 128 frames to keep the worst-case
+ * allocation at ~34 KiB:
+ *   capacity = clamp(CURVE_RING_BYTES_BUDGET / (12 + frame_bytes), 128, 512)
+ *   <= 116 B/frame -> >= 256 frames (e.g. 32 x 4 B: 292 frames / ~33 KiB)
+ *   128 B/frame    -> 234 frames / ~33 KiB
+ *   256 B/frame    -> 128 frames / ~34 KiB
  * Allocated lazily on the first start and reused across sessions. */
-#define CURVE_RING_FRAMES_MIN       256U
+#define CURVE_RING_FRAMES_MIN       128U
 #define CURVE_RING_FRAMES_MAX       512U
 #define CURVE_RING_BYTES_BUDGET     (32U * 1024U)
 /* Per-frame ring metadata: seq (u32) + timestamp_us (u64). */
@@ -82,6 +88,16 @@ uint32_t curve_breakpoint_compare_value(uint32_t address);
 
 /** "periodic"/"breakpoint" (unknown values fall back to "periodic"). */
 const char *curve_trigger_name(uint8_t trigger);
+
+/**
+ * @brief PC scope test for a PC-gated series.
+ *
+ * `pc_low`/`pc_high` are the parser-normalized (bit0 cleared) bounds, high is
+ * exclusive.  `pc` is the raw DCRSR PC value (Thumb bit0 may be set or clear);
+ * it is normalized here, so the range check is independent of the Thumb-bit
+ * convention used by the Web/DWARF side.
+ */
+bool curve_pc_in_scope(uint32_t pc_low, uint32_t pc_high, uint32_t pc);
 
 /* Phase 0 selftest: N halt -> regs -> mem -> resume iterations. */
 #define CURVE_SELFTEST_ITERATIONS   20U
@@ -153,6 +169,13 @@ typedef struct {
     uint32_t id;      /* echoed back by callers; frames are ordered by index */
     uint8_t size;     /* 1..8 bytes read from the evaluated address */
     uint16_t expr;    /* index into curve_config_t.pool */
+    /* Phase 2.5 PC scope gate: enabled only when the request carried a valid
+     * Flash [pc_low, pc_high) range (see parser).  Both bounds are normalized
+     * (bit0 cleared) and pc_high is exclusive; the sampled series is zeroed
+     * + out_of_scope++ when the halted core's PC is outside. */
+    bool pc_gate;
+    uint32_t pc_low;
+    uint32_t pc_high;
 } curve_series_t;
 
 /** Immutable sampling configuration (parsed before the worker is started). */
@@ -166,8 +189,9 @@ typedef struct {
     bool needs_regs;                /* any expr depends on a core register */
     uint8_t reg_count;              /* unique core registers to read per tick */
     uint8_t regs[CURVE_MAX_CORE_REGS];
+    uint8_t pc_gate_count;          /* series with an active PC scope gate */
     curve_series_t series[CURVE_MAX_SERIES];
-    /* One linear chain per series, depth <= 8 -> 16 * 8 nodes worst case. */
+    /* One linear chain per series, depth <= 8 -> 32 * 8 nodes worst case. */
     curve_expr_t pool[CURVE_MAX_SERIES * CURVE_MAX_EXPR_DEPTH];
     uint16_t pool_used;
 } curve_config_t;
@@ -189,6 +213,7 @@ typedef struct {
     uint32_t sampled;            /* breakpoint hits actually written to ring */
     uint32_t throttled;          /* hits dropped by interval throttling */
     uint32_t invalid;            /* invalid series values, bytes zeroed */
+    uint32_t out_of_scope;       /* PC-gated series skipped outside [low,high) */
     uint32_t errors;             /* failed sample ticks */
     uint32_t consecutive_errors;
     uint32_t link_hz;

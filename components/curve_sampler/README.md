@@ -14,7 +14,7 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 | Method | URI | Notes |
 | --- | --- | --- |
 | POST | `/api/curve/selftest` | Phase 0 diagnostic, optional `{}` body |
-| POST | `/api/curve/start` | JSON body <= 4096 B, 1..16 series |
+| POST | `/api/curve/start` | JSON body <= 4096 B, 1..32 series |
 | POST | `/api/curve/stop` | idempotent, optional body |
 | GET | `/api/curve/status` | sampler status JSON |
 | GET | `/api/curve/frames?since=&max=` | binary CVF1, `application/octet-stream` |
@@ -38,7 +38,7 @@ Phase 2 breakpoint trigger (FPB hardware breakpoint, see below):
 
 Limits enforced by the parser (`src/curve_json.c`): `trigger` is `periodic`
 (default) or `breakpoint`; `interval_us` is 5000..200000 for periodic and the
-throttle floor 5000..1000000 for breakpoint (default 20000); `series` 1..16,
+throttle floor 5000..1000000 for breakpoint (default 20000); `series` 1..32,
 `size` 1..8, `sum(size)` <= 256, expression depth <= 8; expression kinds
 `addr`/`reg`/`cfa`/`add`/`deref`.  `halt=false` rejects `reg`/`cfa`
 expressions in periodic mode (no register can be read while the core runs);
@@ -51,9 +51,12 @@ breakpoint mode ignores `halt` because the FPB hit already halted the core.
 `since`.  `since` is the last `seq` received (0 = oldest retained frame), `max`
 1..64 (default 32).
 
-Ring: dynamically 256..512 frames, clamped to a ~32 KiB budget
-(`capacity = clamp(32768 / (12 + payload_bytes), 256, 512)`: 16 B payload -> 512
-frames, 128 B payload -> 256 frames).  `overwritten` counts **frames that were
+Ring: dynamically 128..512 frames, clamped to a ~32 KiB budget
+(`capacity = clamp(32768 / (12 + payload_bytes), 128, 512)`: 16 B payload -> 512
+frames, 64 B -> 431, 128 B -> 234, 256 B (32 x 8 B) -> 128 frames / ~34 KiB
+heap).  The 128-frame floor keeps the worst-case allocation bounded while still
+covering >2.5 s of history at 50 Hz (`ring_frames` in status reports the
+actual capacity).  `overwritten` counts **frames that were
 evicted before any `frames?since=...` response delivered them** (a served
 cursor advances on every non-204 batch, including `since=0`); a client that
 keeps polling at the sampling rate therefore stays at `overwritten=0` even
@@ -64,7 +67,9 @@ frame, so the batch starts at the oldest retained frame.
 `GET /api/curve/status` also exposes the diagnostics `ring_frames` (capacity)
 and `served_seq` (highest seq handed to a client in this session), plus the
 Phase 2 fields `trigger` (`"periodic"`/`"breakpoint"`), `breakpoint_address`,
-`hits`, `sampled`, `throttled`.
+`hits`, `sampled`, `throttled`, and the Phase 2.5 field `out_of_scope` (number of
+PC-gated series values skipped because the halted core's PC was outside the
+series' `[pc_low, pc_high)` function range).
 
 ### curl examples
 
@@ -120,6 +125,41 @@ Breakpoint limitations:
 * `hits` counts observed `S_HALT` events; a non-breakpoint halt (e.g. target
   lockup) would also be sampled.  `sampled` counts frames written to the ring.
 
+## Phase 2.5: PC scope gating (stack-frame variables)
+
+A stack-frame local read while the sampled function is *not* on the current
+call stack returns unrelated stack data.  Series entries may carry an optional
+function PC range:
+
+```json
+{"id":0,"size":4,"pc_low":134348800,"pc_high":134352896,
+ "expr":{"kind":"reg","reg":13,"offset":244}}
+```
+
+* `pc_low`/`pc_high` are optional; the gate is enabled only when both are
+  present, both are target-flash addresses (0x08000000..0x08FFFFFF) and
+  `pc_low < pc_high`.  Missing/zero/invalid pairs leave the series ungated
+  (the field is backward compatible: 16-series clients without it are
+  unaffected).
+* The sampler reads r15 **once per tick** with the existing DCRSR path:
+  after the per-tick halt in periodic mode, and at the FPB hit in breakpoint
+  mode.  A series is sampled only when `(pc & ~1)` is inside the normalized
+  `[pc_low & ~1, pc_high & ~1)` range; otherwise its payload bytes stay 0 and
+  the cumulative `out_of_scope` status counter (not `invalid`) is incremented.
+  The session keeps running.
+* Both range bounds are normalized (Thumb bit0 cleared) at parse time and the
+  PC is normalized at runtime, so either Thumb-bit convention from the
+  ELF/DWARF side works (DWARF addresses are usually even; ELF symbols may set
+  bit0).
+* `out_of_scope` and `invalid` are distinct: `invalid` still counts
+  address/range/read failures and PC-read failures; `out_of_scope` only counts
+  "function not on stack" skips.
+* PC gating needs the core halted to read r15: periodic mode requires
+  `halt=true` for gated data (in no-halt mode gated series are always
+  out_of_scope, never garbage); breakpoint mode is always halted at the hit.
+* The 1 ms no-halt floor and the periodic/breakpoint/frames/overwritten
+  semantics are unchanged.
+
 ## Implementation notes
 
 * `src/curve_http.c` - registers **two independent URI modules** through
@@ -172,13 +212,18 @@ Breakpoint limitations:
   capacity clamp and the `overwritten`/`gap` semantics (prompt consumer ->
   `overwritten=0` after many ring wraps; stalled consumer -> real losses
   counted once; served-then-evicted frames are not counted), Phase 2 trigger
-  config/limits, breakpoint address window validation and the status JSON
-  field set.
+  config/limits, breakpoint address window validation, Phase 2.5 PC-scope
+  parsing/normalization/scope test, 32-series config/pool/ring boundaries and
+  the status JSON field set.
 
 ## Known limitations / behaviour to be aware of
 
 * Breakpoint mode requires the breakpoint address to be in flash; RAM
   breakpoints (needing FPB literal comparators / DWT) are not implemented.
+* PC-gated series in periodic no-halt mode cannot be checked (r15 is only
+  readable in debug state); they are reported as out_of_scope instead of
+  reading potentially stale stack data.  Use periodic halt or breakpoint mode
+  for stack-frame variables.
 * The session bring-up reuses `tf_swd_link_init()`, which pulses nRESET before
   the SWD switch sequence (same as the target-flash probe).  **Starting a local
   sampling session therefore resets the target once**; the sampler then keeps

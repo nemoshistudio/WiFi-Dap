@@ -30,8 +30,9 @@
  *  - 展开深度 3、每节点最多 64 个子项，防止巨型结构体爆 UI；
  *  - 64-bit 值以两个 32-bit word 读取，>64-bit 聚合只读前 8 字节。
  */
-import type {AddressExpr, DisplayFormat, ElfSectionInfo, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
-import {isPlausibleTargetAddress} from './elfTypes'
+import type {AddressExpr, DisplayFormat, ElfSectionInfo, LocationVariant, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
+import {decodeLocationList, type LocationListEntry} from './dwarfLocList'
+import {isPlausibleTargetAddress, TARGET_FLASH_RANGE} from './elfTypes'
 import {addressExprIsLive} from './dwarfLocation'
 
 export class DwarfParseError extends Error {
@@ -76,6 +77,9 @@ const AT_NAME = 0x03
 const AT_LOCATION = 0x02
 const AT_FRAME_BASE = 0x40
 const AT_BYTE_SIZE = 0x0b
+const AT_LOW_PC = 0x11
+const AT_HIGH_PC = 0x12
+const AT_LOCLISTS_BASE = 0x74
 const AT_BIT_SIZE = 0x0d
 const AT_BIT_OFFSET = 0x0c
 const AT_DATA_MEMBER_LOCATION = 0x38
@@ -310,6 +314,10 @@ interface DwarfSections {
     strOffsets: Uint8Array | null
     addr: Uint8Array | null
     line: Uint8Array | null
+    /** DWARF2/3/4 位置列表节 */
+    loc: Uint8Array | null
+    /** DWARF5 位置列表节 */
+    loclists: Uint8Array | null
 }
 
 function sectionBytes(bytes: Uint8Array, sections: readonly ElfSectionInfo[], name: string): Uint8Array | null {
@@ -369,6 +377,12 @@ interface Unit {
     lineFiles: string[] | null
     lineFilesLoaded: boolean
     declFileCache: Map<number, string>
+    /** CU 的 DW_AT_low_pc（.debug_loc base 初值） */
+    lowPc: number
+    /** DWARF5 DW_AT_loclists_base（offset table 起始） */
+    loclistsBase: number
+    /** DWARF32=4 / DWARF64=8（loclistx offset 表项宽度） */
+    offsetSize: number
 }
 
 interface Ctx {
@@ -541,9 +555,8 @@ function attrAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined): number 
 }
 
 /** 解析 DW_AT_location 中的固定地址：DW_OP_addr / DW_OP_addrx / GNU_addr_index。 */
-function locationFixedAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined): number | null {
-    if (!attr || !attr.block || attr.block.length === 0) return null
-    const block = attr.block
+function fixedAddressFromBlock(ctx: Ctx, unit: Unit, block: Uint8Array | undefined): number | null {
+    if (!block || block.length === 0) return null
     const opcode = block[0]
     if (opcode === OP_ADDR) {
         if (block.length < 1 + unit.addrSize) return null
@@ -562,6 +575,10 @@ function locationFixedAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined)
         }
     }
     return null
+}
+
+function locationFixedAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined): number | null {
+    return fixedAddressFromBlock(ctx, unit, attr?.block)
 }
 
 
@@ -643,18 +660,20 @@ interface ParsedLocation {
     expr?: AddressExpr
     register?: number
     reason?: string
+    /** loclist 多段变体（仅 multi 时提供；首段同时作为 expr/address） */
+    variants?: LocationVariant[]
+    /** loclist 条目数（含 default；undefined = 非 loclist） */
+    loclistEntries?: number
+    /** 位置列表有多个段：当前仅使用第一段 */
+    loclistMulti?: boolean
 }
 
 /** 解析 DW_AT_location：固定地址 / 帧+寄存器内存位置 / 寄存器值。 */
-function parseLocationExpr(ctx: Ctx, die: Die, attr: AttrValue | undefined): ParsedLocation {
-    if (!attr) return {kind: 'none'}
-    if (!attr.block || attr.block.length === 0) {
-        if (attr.number !== undefined) return {kind: 'unsupported', reason: 'location list'}
-        return {kind: 'none'}
-    }
-    const fixed = locationFixedAddress(ctx, die.unit, attr)
+/** 解析 DWARF 表达式字节（非 loclist 递归：expr 内不会再出现 loclist offset）。 */
+function parseLocationBlock(ctx: Ctx, die: Die, block: Uint8Array): ParsedLocation {
+    const fixed = fixedAddressFromBlock(ctx, die.unit, block)
     if (fixed !== null) return {kind: 'fixed', address: fixed >>> 0}
-    const reader = new ByteReader(attr.block)
+    const reader = new ByteReader(block)
     try {
         const opcode = reader.u8()
         if (opcode === OP_FBREG) {
@@ -683,6 +702,116 @@ function parseLocationExpr(ctx: Ctx, die: Die, attr: AttrValue | undefined): Par
     } catch {
         return {kind: 'unsupported', reason: 'malformed location expression'}
     }
+}
+
+/** 解析 DW_AT_location 的 loclist offset（DWARF4 .debug_loc / DWARF5 .debug_loclists）。 */
+function locationListTarget(ctx: Ctx, unit: Unit, attr: AttrValue): {kind: 'debug_loc' | 'debug_loclists'; offset: number} | null {
+    if (attr.number === undefined) return null
+    if (attr.form === FORM_LOCLISTX) {
+        const section = ctx.sections.loclists
+        if (!section || unit.loclistsBase <= 0) return null
+        const entrySize = unit.offsetSize
+        const tableOffset = unit.loclistsBase + attr.number * entrySize
+        if (tableOffset + entrySize > section.length) return null
+        const relative = readUint(section, tableOffset, entrySize)
+        return {kind: 'debug_loclists', offset: (unit.loclistsBase + relative) >>> 0}
+    }
+    if (unit.version >= 5 && ctx.sections.loclists) {
+        return {kind: 'debug_loclists', offset: attr.number >>> 0}
+    }
+    if (ctx.sections.loc) return {kind: 'debug_loc', offset: attr.number >>> 0}
+    if (ctx.sections.loclists) return {kind: 'debug_loclists', offset: attr.number >>> 0}
+    return null
+}
+
+export interface LocationListSelection {
+    /** 选中的条目：优先第一个 ranged entry，否则 default_location。 */
+    entry: LocationListEntry
+    /** ranged entry 数量 > 1（当前只使用第一段）。 */
+    multi: boolean
+    /** 有效条目总数（含 default）。 */
+    total: number
+    rangedCount: number
+}
+
+/**
+ * loclist 条目选择规则（纯函数，便于 synthetic 单测）：
+ *  - 只考虑 expr 非空的条目；
+ *  - 优先第一个 address_range/offset_pair entry，否则 default_location；
+ *  - ranged entry 多于 1 个时 multi=true（当前实现只使用第一段，Phase 1）。
+ */
+export function selectLocationListEntry(entries: readonly LocationListEntry[]): LocationListSelection | null {
+    const usable = entries.filter((entry) => entry.expr.length > 0)
+    const ranged = usable.filter((entry) => entry.kind !== 'default_location'
+        && typeof entry.lowPc === 'number' && typeof entry.highPc === 'number')
+    const defaults = usable.filter((entry) => entry.kind === 'default_location')
+    const entry = ranged[0] ?? defaults[0]
+    if (!entry) return null
+    return {entry, multi: ranged.length > 1, total: usable.length, rangedCount: ranged.length}
+}
+
+/**
+ * D 第一阶段 loclist 集成：解码 location list，单 entry/default 直接使用；
+ * 多 entry 时记录 locationVariants（每段可解析的 AddressExpr），采样仍用第一段，
+ * 并标 loclistMulti/ loclistEntries 供 UI 提示限制。
+ */
+function decodeListLocation(ctx: Ctx, die: Die, attr: AttrValue): ParsedLocation {
+    const target = locationListTarget(ctx, die.unit, attr)
+    if (!target) return {kind: 'unsupported', reason: 'location list (missing .debug_loc/.debug_loclists)'}
+    const data = target.kind === 'debug_loc' ? ctx.sections.loc : ctx.sections.loclists
+    if (!data) return {kind: 'unsupported', reason: 'location list (missing section)'}
+    let decoded
+    try {
+        decoded = decodeLocationList({
+            kind: target.kind,
+            data,
+            offset: target.offset,
+            addrSize: die.unit.addrSize,
+            addr: ctx.sections.addr,
+            addrBase: die.unit.addrBase,
+            baseAddress: die.unit.lowPc,
+        })
+    } catch {
+        return {kind: 'unsupported', reason: 'location list decode failed'}
+    }
+    const selection = selectLocationListEntry(decoded.entries)
+    if (!selection) return {kind: 'unsupported', reason: 'location list has no entries'}
+    const entries = decoded.entries.filter((entry) => entry.expr.length > 0)
+    const ranged = entries.filter((entry) => entry.kind !== 'default_location'
+        && typeof entry.lowPc === 'number' && typeof entry.highPc === 'number')
+    const candidates = ranged.length > 0 ? ranged : [selection.entry]
+    const parsed: Array<{entry: typeof candidates[number]; location: ParsedLocation; variant?: LocationVariant}> = []
+    for (const entry of candidates) {
+        const location = parseLocationBlock(ctx, die, entry.expr)
+        if (location.kind !== 'fixed' && location.kind !== 'memory' && location.kind !== 'register') continue
+        const variant = typeof entry.lowPc === 'number' && typeof entry.highPc === 'number'
+            ? {pcLow: entry.lowPc >>> 0, pcHigh: entry.highPc >>> 0, expr: location.kind === 'fixed'
+                ? {kind: 'addr' as const, address: location.address!}
+                : location.expr!}
+            : undefined
+        parsed.push({entry, location, variant})
+    }
+    if (parsed.length === 0) return {kind: 'unsupported', reason: 'location list expressions unsupported'}
+    const chosen = parsed.find((item) => item.entry === selection.entry) ?? parsed[0]
+    const result: ParsedLocation = {
+        ...chosen.location,
+        loclistEntries: selection.total,
+        loclistMulti: selection.multi,
+    }
+    if (selection.multi) {
+        result.variants = parsed
+            .filter((item) => item.variant !== undefined && item.entry.kind !== 'default_location')
+            .map((item) => item.variant as LocationVariant)
+    }
+    return result
+}
+
+/** 解析 DW_AT_location：普通 block / 固定地址 / 帧+寄存器位置 / loclist offset。 */
+function parseLocationExpr(ctx: Ctx, die: Die, attr: AttrValue | undefined): ParsedLocation {
+    if (!attr) return {kind: 'none'}
+    if (attr.block && attr.block.length > 0) return parseLocationBlock(ctx, die, attr.block)
+    if (attr.number !== undefined) return decodeListLocation(ctx, die, attr)
+    return {kind: 'none'}
 }
 
 /** 沿 spec/origin 链找第一个可用 location（定义缺失时继承声明位置）。 */
@@ -763,6 +892,7 @@ interface UnitHeader {
     addrSize: number
     abbrevOffset: number
     dieOffset: number
+    offsetSize: number
 }
 
 function parseUnitHeader(bytes: Uint8Array, offset: number): UnitHeader {
@@ -793,7 +923,7 @@ function parseUnitHeader(bytes: Uint8Array, offset: number): UnitHeader {
     }
     const end = start + (offsetSize === 8 ? 12 : 4) + length
     if (end > bytes.length || end < start) throw new DwarfParseError('DWARF: unit length out of range')
-    return {start, end, version, addrSize, abbrevOffset, dieOffset: reader.offset}
+    return {start, end, version, addrSize, abbrevOffset, dieOffset: reader.offset, offsetSize}
 }
 
 function walkUnit(
@@ -817,6 +947,9 @@ function walkUnit(
         lineFiles: null,
         lineFilesLoaded: false,
         declFileCache: new Map(),
+        lowPc: 0,
+        loclistsBase: 0,
+        offsetSize: header.offsetSize,
     }
     let table = abbrevCache.get(header.abbrevOffset)
     if (!table) {
@@ -865,6 +998,10 @@ function walkUnit(
             if (strBase !== null) unit.strOffsetsBase = strBase
             const addrBase = numericAttr(die, AT_ADDR_BASE)
             if (addrBase !== null) unit.addrBase = addrBase
+            const loclistsBase = numericAttr(die, AT_LOCLISTS_BASE)
+            if (loclistsBase !== null) unit.loclistsBase = loclistsBase
+            const lowPc = attrAddress(ctx, unit, die.attrs.get(AT_LOW_PC))
+            if (lowPc !== null) unit.lowPc = lowPc >>> 0
         }
         ctx.dies.set(die.offset, die)
         unit.dies.push(die)
@@ -1560,6 +1697,82 @@ function makeLeaf(type: TypeInfo, address: number, bitOffset = 0, bitSize = 0): 
     return leaf
 }
 
+// ---------------------------------------------------------------------------
+// PC 作用域：变量所属 subprogram 的 DW_AT_low_pc/high_pc（high 可为地址或长度）
+// ---------------------------------------------------------------------------
+interface PcRange {
+    pcLow: number
+    pcHigh: number
+}
+
+function parseSubprogramRange(ctx: Ctx, subprogram: Die, visited: Set<number>): PcRange | null {
+    if (visited.has(subprogram.offset)) return null
+    visited.add(subprogram.offset)
+    const low = attrAddress(ctx, subprogram.unit, subprogram.attrs.get(AT_LOW_PC))
+    if (low !== null) {
+        const highAttr = subprogram.attrs.get(AT_HIGH_PC)
+        let high: number | null = null
+        if (highAttr) {
+            // DWARF2/3：high_pc 可能是绝对地址；DWARF4+：常见为 code length 常量。
+            const absolute = attrAddress(ctx, subprogram.unit, highAttr)
+            if (absolute !== null) high = absolute >>> 0
+            else if (highAttr.number !== undefined) high = (low + highAttr.number) >>> 0
+        }
+        if (high !== null && high > low) {
+            const pcLow = low >>> 0
+            const pcHigh = high >>> 0
+            // 只接受 Flash 内的有效范围（函数代码段）。
+            if (pcLow >= TARGET_FLASH_RANGE[0] && pcHigh <= TARGET_FLASH_RANGE[1]) {
+                return {pcLow, pcHigh}
+            }
+        }
+    }
+    // 声明/定义分离：subprogram 的 spec/origin 可能才有 low_pc/high_pc。
+    for (const attr of [AT_SPECIFICATION, AT_ABSTRACT_ORIGIN]) {
+        const target = resolveReference(ctx, subprogram.unit, subprogram.attrs.get(attr))
+        if (target && target.tag === TAG_SUBPROGRAM) {
+            const inherited = parseSubprogramRange(ctx, target, visited)
+            if (inherited) return inherited
+        }
+    }
+    return null
+}
+
+function enclosingSubprogramRange(ctx: Ctx, die: Die): PcRange | null {
+    let parent = die.parent
+    let guard = 0
+    while (parent && guard++ < 32) {
+        if (parent.tag === TAG_SUBPROGRAM) {
+            const range = parseSubprogramRange(ctx, parent, new Set())
+            if (range) return range
+        }
+        parent = parent.parent
+    }
+    return null
+}
+
+/**
+ * 变量的 PC 作用域：优先沿 DIE parent 链找 subprogram；若定义 DIE 处于内联/
+ * 声明链中，再沿 spec/origin 链的候选 DIE 找其 subprogram 范围。
+ */
+function subprogramRangeForDIE(ctx: Ctx, die: Die): PcRange | null {
+    const direct = enclosingSubprogramRange(ctx, die)
+    if (direct) return direct
+    const seen = new Set<number>([die.offset])
+    for (const candidate of referenceChain(ctx, die)) {
+        if (seen.has(candidate.offset)) continue
+        seen.add(candidate.offset)
+        if (candidate.tag === TAG_SUBPROGRAM) {
+            const range = parseSubprogramRange(ctx, candidate, new Set())
+            if (range) return range
+            continue
+        }
+        const inherited = enclosingSubprogramRange(ctx, candidate)
+        if (inherited) return inherited
+    }
+    return null
+}
+
 let nodeBudget = 0
 
 /**
@@ -1603,6 +1816,9 @@ function buildNode(
     bitOffset = 0,
     bitSize = 0,
     pointerDepth = 0,
+    pcLow?: number,
+    pcHigh?: number,
+    loclistMulti?: boolean,
 ): VariableNode {
     const node: VariableNode = {
         name,
@@ -1610,6 +1826,11 @@ function buildNode(
         address: base.address !== null ? base.address >>> 0 : 0,
         size: type.size,
     }
+    if (pcLow !== undefined && pcHigh !== undefined) {
+        node.pcLow = pcLow
+        node.pcHigh = pcHigh
+    }
+    if (loclistMulti) node.loclistMulti = true
     if (base.address !== null) {
         node.sample = bitOffset > 0 || bitSize > 0
             ? makeLeaf(type, base.address, bitOffset, bitSize)
@@ -1634,14 +1855,14 @@ function buildNode(
     if (pointerDepth > 0) node.pointerDepth = pointerDepth
     const resolved = unwrapType(type)
     if (resolved.kind === 'struct' || resolved.kind === 'union' || resolved.kind === 'array') {
-        node.children = buildChildren(resolved, base, depth + 1)
+        node.children = buildChildren(resolved, base, depth + 1, pcLow, pcHigh, loclistMulti)
     } else if (resolved.kind === 'pointer' && resolved.element) {
-        node.children = buildPointeeChildren(resolved, base, depth + 1)
+        node.children = buildPointeeChildren(resolved, base, depth + 1, 1, pcLow, pcHigh, loclistMulti)
     }
     return node
 }
 
-function buildChildren(type: TypeInfo, base: BaseLocation, depth: number): VariableNode[] | undefined {
+function buildChildren(type: TypeInfo, base: BaseLocation, depth: number, pcLow?: number, pcHigh?: number, loclistMulti?: boolean): VariableNode[] | undefined {
     type = unwrapType(type)
     if (depth > MAX_EXPAND_DEPTH || nodeBudget <= 0) return undefined
     const children: VariableNode[] = []
@@ -1650,7 +1871,7 @@ function buildChildren(type: TypeInfo, base: BaseLocation, depth: number): Varia
             if (children.length >= MAX_CHILDREN || nodeBudget <= 0) break
             const memberBase = offsetBase(base, member.byteOffset)
             if (member.anonymous) {
-                const nested = buildChildren(member.type, memberBase, depth)
+                const nested = buildChildren(member.type, memberBase, depth, pcLow, pcHigh, loclistMulti)
                 if (nested) {
                     for (const child of nested) {
                         if (children.length >= MAX_CHILDREN) break
@@ -1660,7 +1881,7 @@ function buildChildren(type: TypeInfo, base: BaseLocation, depth: number): Varia
                 }
                 continue
             }
-            children.push(buildNode(`.${member.name}`, member.type, memberBase, depth, member.bitOffset, member.bitSize))
+            children.push(buildNode(`.${member.name}`, member.type, memberBase, depth, member.bitOffset, member.bitSize, 0, pcLow, pcHigh, loclistMulti))
             nodeBudget -= 1
         }
         return children.length > 0 ? children : undefined
@@ -1673,7 +1894,7 @@ function buildChildren(type: TypeInfo, base: BaseLocation, depth: number): Varia
         const limit = Math.min(count, MAX_CHILDREN)
         for (let i = 0; i < limit; i++) {
             if (nodeBudget <= 0) break
-            children.push(buildNode(`[${i}]`, element, offsetBase(base, i * stride), depth))
+            children.push(buildNode(`[${i}]`, element, offsetBase(base, i * stride), depth, 0, 0, 0, pcLow, pcHigh, loclistMulti))
             nodeBudget -= 1
         }
         return children.length > 0 ? children : undefined
@@ -1682,7 +1903,7 @@ function buildChildren(type: TypeInfo, base: BaseLocation, depth: number): Varia
 }
 
 /** 指针节点：展开被指向的 struct/union 成员或数组元素（名字 `->member` / `->[i]`）。 */
-function buildPointeeChildren(pointerType: TypeInfo, base: BaseLocation, depth: number, pointerDepth = 1): VariableNode[] | undefined {
+function buildPointeeChildren(pointerType: TypeInfo, base: BaseLocation, depth: number, pointerDepth = 1, pcLow?: number, pcHigh?: number, loclistMulti?: boolean): VariableNode[] | undefined {
     if (depth > MAX_EXPAND_DEPTH + 1 || nodeBudget <= 0) return undefined
     const pointee = unwrapType(pointerType.element ?? UNKNOWN_TYPE)
     if (pointee.kind !== 'struct' && pointee.kind !== 'union' && pointee.kind !== 'array') return undefined
@@ -1691,7 +1912,7 @@ function buildPointeeChildren(pointerType: TypeInfo, base: BaseLocation, depth: 
         for (const member of pointee.members ?? []) {
             if (children.length >= MAX_CHILDREN || nodeBudget <= 0) break
             if (member.anonymous) {
-                const nested = buildChildren(member.type, pointeeBase(base, member.byteOffset), depth)
+                const nested = buildChildren(member.type, pointeeBase(base, member.byteOffset), depth, pcLow, pcHigh, loclistMulti)
                 if (nested) {
                     for (const child of nested) {
                         if (children.length >= MAX_CHILDREN) break
@@ -1701,7 +1922,7 @@ function buildPointeeChildren(pointerType: TypeInfo, base: BaseLocation, depth: 
                 }
                 continue
             }
-            children.push(buildNode(`->${member.name}`, member.type, pointeeBase(base, member.byteOffset), depth, 0, 0, pointerDepth))
+            children.push(buildNode(`->${member.name}`, member.type, pointeeBase(base, member.byteOffset), depth, 0, 0, pointerDepth, pcLow, pcHigh, loclistMulti))
             nodeBudget -= 1
         }
         return children.length > 0 ? children : undefined
@@ -1712,7 +1933,7 @@ function buildPointeeChildren(pointerType: TypeInfo, base: BaseLocation, depth: 
     if (!element || count === null || count === undefined || count <= 0 || stride <= 0) return undefined
     for (let i = 0; i < Math.min(count, MAX_CHILDREN); i++) {
         if (nodeBudget <= 0) break
-        children.push(buildNode(`->[${i}]`, element, pointeeBase(base, i * stride), depth, 0, 0, pointerDepth))
+        children.push(buildNode(`->[${i}]`, element, pointeeBase(base, i * stride), depth, 0, 0, pointerDepth, pcLow, pcHigh, loclistMulti))
         nodeBudget -= 1
     }
     return children.length > 0 ? children : undefined
@@ -1975,6 +2196,8 @@ export function extractDwarfVariables(
             strOffsets: sectionBytes(bytes, sections, '.debug_str_offsets'),
             addr: sectionBytes(bytes, sections, '.debug_addr'),
             line: sectionBytes(bytes, sections, '.debug_line'),
+            loc: sectionBytes(bytes, sections, '.debug_loc'),
+            loclists: sectionBytes(bytes, sections, '.debug_loclists'),
         },
         units: [],
         dies: new Map(),
@@ -2082,10 +2305,11 @@ export function extractDwarfVariables(
             } else if (location.kind === 'register' && location.register !== undefined) {
                 base = {address: null, expr: {kind: 'reg', reg: location.register, offset: 0}, payloadInRegister: true}
             }
+            const pcRange = subprogramRangeForDIE(ctx, die)
             let node: VariableNode
             if (base) {
                 nodeBudget = MAX_NODES_PER_VARIABLE
-                node = buildNode(identity.qualifiedName, type, base, 0)
+                node = buildNode(identity.qualifiedName, type, base, 0, 0, 0, 0, pcRange?.pcLow, pcRange?.pcHigh, location.loclistMulti)
                 nodeBudget = 0
             } else {
                 node = {
@@ -2094,8 +2318,13 @@ export function extractDwarfVariables(
                     address: 0,
                     size: type.size,
                     sampleable: false,
+                    pcLow: pcRange?.pcLow,
+                    pcHigh: pcRange?.pcHigh,
+                    loclistMulti: location.loclistMulti,
                 }
             }
+            node.locationVariants = location.variants
+            node.loclistEntries = location.loclistEntries
             node.shortName = identity.shortName
             node.qualifiedName = identity.qualifiedName
             node.mangledName = identity.mangledName || undefined

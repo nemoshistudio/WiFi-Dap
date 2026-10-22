@@ -251,3 +251,18 @@ Phase 1：
 overwritten=0。因此 Web UI 仍只暴露 5/10/20/50 ms 本地间隔，1 ms 仅供 API/后续
 流式传输优化使用。
 
+## 8. Phase 2.5 实现补充（2026-10-22）
+
+- `POST /api/curve/start` 的每个 series 支持可选 `pc_low`/`pc_high`（Flash，
+  半开区间 [low,high)，Thumb bit0 归一化）；仅表达式依赖寄存器时启用门控。
+  当前 PC 不在范围 → 该 series 本拍填 0、`out_of_scope++`，不停止采样；
+  `invalid` 仅表示地址/读取失败。
+- 每拍只读一次 PC（periodic halt 后 / breakpoint 命中时）；no-halt 模式下
+  带门控 series 一律 out_of_scope（不读过期栈）。
+- `CURVE_MAX_SERIES` 提升到 32（sum(size)≤256）；ring 动态容量在 heap 不足时
+  自动从 32 KiB budget 二分降到 ≥32 帧，避免 32 系列 start 失败。
+- 状态新增 `out_of_scope`、`ring_frames`、`served_seq`；Web 端 PC 范围来自
+  DWARF subprogram low_pc/high_pc，仅对栈帧/寄存器表达式下发。
+- 真机：固定/全局 20 ms Halt OFF ≈50 Hz；栈帧变量 20 ms ≈50 Hz，
+  不在栈时 out_of_scope 增长、invalid 0；32×4B 系列 ring_frames=117 可运行。
+

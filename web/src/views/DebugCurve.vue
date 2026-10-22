@@ -158,7 +158,9 @@
           <span v-if="localTrigger === 'breakpoint'">{{ translate('curve.localSampled') }}: <b>{{ localStatusInfo?.sampled ?? localSampled ?? '-' }}</b></span>
           <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
           <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
+          <span>{{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b></span>
           <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
+          <span>{{ translate('curve.localSeries') }}: <b>{{ seriesList.length }}/{{ seriesLimit }}</b></span>
         </template>
         <template v-else>
           <label class="flex items-center gap-2">
@@ -205,6 +207,12 @@
       </div>
       <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs" style="color: #dc2626">
         {{ localBreakpointError }}
+      </div>
+      <div v-if="isLocalSource && localOutOfScopeCount > 0" class="mt-1 text-xs opacity-70">
+        {{ translate('curve.localOutOfScopeHint') }}
+      </div>
+      <div v-if="isLocalSource" class="mt-1 text-xs opacity-70">
+        {{ translate('curve.localGroupingHint') }}
       </div>
     </section>
 
@@ -311,6 +319,11 @@
                   >{{ row.expanded ? '▾' : '▸' }}</button>
                   <span v-else class="tree-arrow-spacer"></span>
                   <span class="truncate">{{ row.node.name }}</span>
+                  <span
+                      v-if="row.node.loclistMulti"
+                      class="mode-badge loclist-badge"
+                      :title="translate('curve.loclistMultiHint')"
+                  >{{ translate('curve.loclistMultiShort') }}</span>
                 </span>
                 <span class="var-type truncate" :title="row.node.typeName">{{ row.node.typeName || translate('curve.unknownType') }}</span>
                 <span v-if="isLocalSource && isLocalRegisterValue(row.node)" class="var-addr unsampleable-text" :title="translate('curve.localRegisterUnsupported')">
@@ -349,7 +362,7 @@
 
     <!-- 已选曲线 -->
     <section v-if="seriesList.length > 0" class="curve-card">
-      <div class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }} / {{ MAX_CURVE_SERIES }}</div>
+      <div class="text-xs opacity-70">{{ translate('curve.selected') }}: {{ seriesList.length }} / {{ seriesLimit }}</div>
       <div class="selected-list mt-1">
         <div v-for="item in seriesList" :key="item.id" class="selected-row">
           <span class="series-dot" :style="{background: item.color}"></span>
@@ -439,6 +452,8 @@ import {
   type FunctionSymbol,
 } from '@/utils/elfFunctionSymbols'
 import {
+  CURVE_LOCAL_FLASH_END,
+  CURVE_LOCAL_FLASH_START,
   CURVE_LOCAL_MAX_SERIES,
   CurveLocalError,
   getLocalCurveFrames,
@@ -509,6 +524,11 @@ interface CurveSeries {
   location?: AddressExpr
   /** 值直接在核心寄存器里（DW_OP_reg） */
   register?: number
+  /** 所属函数的 DWARF PC 范围（本地采样下发 pc_low/pc_high，用于固件 PC 门控） */
+  pcLow?: number
+  pcHigh?: number
+  /** loclist 多段位置：当前仅第一段（UI 标注限制） */
+  loclistMulti?: boolean
 }
 
 interface CurveNotice {
@@ -544,6 +564,8 @@ const isDebugMode = computed(() => samplingMode.value === 'debug')
 const samplingSource = ref<SamplingSource>('web')
 const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
+/** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
+const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_SERIES : MAX_CURVE_SERIES))
 /** Phase 2 触发方式：periodic（周期）或 breakpoint（FPB 命中触发）。 */
 const localTrigger = ref<CurveLocalTrigger>('periodic')
 /** 断点地址输入（十六进制，可带/不带 0x；Thumb bit0 忽略）。 */
@@ -584,6 +606,8 @@ const localStatusInfo = shallowRef<LocalCurveStatus | null>(null)
 const localFramesReceived = ref(0)
 const localInvalidCount = ref(0)
 const localOverwrittenCount = ref(0)
+/** PC 门控：当前函数不在栈上、固件填 0 的累计次数（status.out_of_scope）。 */
+const localOutOfScopeCount = ref(0)
 const localGap = ref(false)
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
@@ -1255,6 +1279,7 @@ async function refreshLocalStatus(): Promise<void> {
   localOverwrittenCount.value = status.overwritten
   localHits.value = status.hits ?? null
   localSampled.value = status.sampled ?? null
+  localOutOfScopeCount.value = status.outOfScope ?? 0
   if (status.running !== true && status.error > 0) {
     localGap.value = true
   }
@@ -1307,7 +1332,17 @@ async function startLocalSampling(): Promise<void> {
       return
     }
     entries.push({item, expr, size: Math.max(1, Math.min(8, item.sample.size))})
-    specs.push({id: index, size: Math.max(1, Math.min(8, item.sample.size)), expr})
+    // 只有依赖寄存器的栈帧/指针表达式才需要 PC 门控。函数内 static 局部变量
+    // 在 DWARF 里挂在 subprogram 下、但地址固定（如 target_debug_handle），
+    // 用 PC 门控会把始终有效的全局对象错误清零，必须仅在 halt 表达式上启用。
+    const exprNeedsRegisters = addressExprRegisters(expr).size > 0
+    const pcRange = exprNeedsRegisters ? validPcRange(item.pcLow, item.pcHigh) : null
+    specs.push({
+      id: index,
+      size: Math.max(1, Math.min(8, item.sample.size)),
+      expr,
+      ...(pcRange ?? {}),
+    })
   }
   statusError.value = false
   notice.value = null
@@ -1356,6 +1391,7 @@ async function startLocalSampling(): Promise<void> {
   localOverwrittenCount.value = 0
   localHits.value = null
   localSampled.value = null
+  localOutOfScopeCount.value = 0
   localGap.value = false
   localStatusInfo.value = null
   localActive.value = true
@@ -1448,6 +1484,7 @@ async function onSamplingSourceChange(): Promise<void> {
     localOverwrittenCount.value = 0
     localHits.value = null
     localSampled.value = null
+    localOutOfScopeCount.value = 0
     localGap.value = false
   }
   scheduleDraw()
@@ -1831,6 +1868,16 @@ function localExprForNode(node: VariableNode): AddressExpr | null {
   return null
 }
 
+/** 变量所属函数的 PC 范围是否有效且落在目标 Flash（用于下发 PC 门控）。 */
+function validPcRange(low?: number, high?: number): {pcLow: number; pcHigh: number} | null {
+  if (typeof low !== 'number' || typeof high !== 'number') return null
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return null
+  const pcLow = low >>> 0
+  const pcHigh = high >>> 0
+  if (pcLow < CURVE_LOCAL_FLASH_START || pcHigh > CURVE_LOCAL_FLASH_END || pcHigh <= pcLow) return null
+  return {pcLow, pcHigh}
+}
+
 /** 寄存器值变量（DW_OP_reg）暂不支持设备本地采样。 */
 function isLocalRegisterValue(node: VariableNode): boolean {
   return node.sample?.register !== undefined
@@ -1956,6 +2003,10 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
     mode: samplingMode.value === 'debug' ? 'halt' : 'live',
     location,
     register,
+    loclistMulti: node.loclistMulti === true,
+    ...(node.locationVariants && node.locationVariants.length > 0
+      ? {pcLow: node.locationVariants[0].pcLow, pcHigh: node.locationVariants[0].pcHigh}
+      : (validPcRange(node.pcLow, node.pcHigh) ?? {})),
   }
   seriesLo.set(series.id, new Uint32Array(MAX_POINTS))
   seriesHi.set(series.id, new Uint32Array(MAX_POINTS))
@@ -2605,6 +2656,11 @@ onBeforeUnmount(() => {
 
 .breakpoint-input.is-invalid :deep(.el-input__wrapper) {
   box-shadow: 0 0 0 1px #dc2626 inset;
+}
+
+.loclist-badge {
+  background-color: #fef3c7;
+  color: #92400e;
 }
 
 .mode-badge {

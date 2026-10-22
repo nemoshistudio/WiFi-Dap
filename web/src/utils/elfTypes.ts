@@ -54,6 +54,13 @@ export interface SampleLeaf {
     register?: number
 }
 
+/** DWARF loclist 多段位置中的一个变体（Phase 1：仅记录，采样仍用第一段）。 */
+export interface LocationVariant {
+    pcLow: number
+    pcHigh: number
+    expr: AddressExpr
+}
+
 /** 变量浏览树的一个节点（根变量或 struct 成员 / 数组成员）。 */
 export interface VariableNode {
     /** 节点名；根为限定名（Namespace::Class::var），成员为 `.member`，数组元素为 `[i]` */
@@ -82,6 +89,15 @@ export interface VariableNode {
     liveSamplable?: boolean
     /** 指针解引用层数（0/undefined = 非指针链节点） */
     pointerDepth?: number
+    /** 所属 subprogram 的 PC 范围（DW_AT_low_pc/high_pc；成员/子节点继承） */
+    pcLow?: number
+    pcHigh?: number
+    /** loclist 解码出的变体（多段位置；Phase 1 仅首段用于采样/expr） */
+    locationVariants?: LocationVariant[]
+    /** 该变量 DWARF 位置列表条目数（含 default；undefined = 非 loclist） */
+    loclistEntries?: number
+    /** loclist 有多个可用段：当前仅使用第一段（UI 标注限制） */
+    loclistMulti?: boolean
     /** 可采样叶子；聚合节点（struct/array）没有 */
     sample?: SampleLeaf
     /** struct/union 成员或数组成员（展开深度有限） */

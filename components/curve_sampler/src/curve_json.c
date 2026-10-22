@@ -193,6 +193,48 @@ static void collect_expr_regs(const curve_config_t *cfg, uint16_t index,
     }
 }
 
+/**
+ * Parse the optional per-series PC scope [pc_low, pc_high).
+ *
+ * The gate is only enabled when both values are present, both are target flash
+ * addresses (0x08000000..0x08FFFFFF) and low < high.  Missing/zero or invalid
+ * pairs silently leave the series ungated (the contract makes them optional;
+ * DWARF-derived ranges are the intended source).  Both bounds are normalized
+ * (bit0 cleared) for the runtime comparison so either Thumb-bit convention
+ * from the ELF/DWARF side works.
+ */
+static void parse_pc_scope(const cJSON *series_item, curve_series_t *dst)
+{
+    uint32_t pc_low = 0U;
+    uint32_t pc_high = 0U;
+    uint32_t low_norm;
+    uint32_t high_norm;
+
+    if (!json_u32(cJSON_GetObjectItemCaseSensitive(series_item, "pc_low"), 0.0,
+                  4294967295.0, &pc_low) ||
+        !json_u32(cJSON_GetObjectItemCaseSensitive(series_item, "pc_high"), 0.0,
+                  4294967295.0, &pc_high)) {
+        return;
+    }
+    if (pc_low == 0U || pc_high == 0U || pc_low >= pc_high) {
+        return;
+    }
+    if (pc_low < CURVE_BP_FLASH_START || pc_low > CURVE_BP_FLASH_END ||
+        pc_high < CURVE_BP_FLASH_START || pc_high > CURVE_BP_FLASH_END) {
+        return;
+    }
+    low_norm = pc_low & ~0x01U;
+    high_norm = pc_high & ~0x01U;
+    if (high_norm <= low_norm) {
+        /* Degenerate range after clearing the Thumb bits (e.g. size < 2):
+         * still scope to the single instruction at low_norm. */
+        high_norm = low_norm + 2U;
+    }
+    dst->pc_gate = true;
+    dst->pc_low = low_norm;
+    dst->pc_high = high_norm;
+}
+
 esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
                              char *err, size_t err_len)
 {
@@ -336,6 +378,7 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         }
         dst->id = id;
         dst->size = (uint8_t)size;
+        parse_pc_scope(item, dst);
         result = parse_expr(expr_item, cfg, &dst->expr, 1U, err, err_len);
         if (result != ESP_OK) {
             goto out;
@@ -351,6 +394,11 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
 
     cfg->sample_bytes = (uint16_t)sample_bytes;
     cfg->needs_regs = false;
+    for (uint8_t i = 0U; i < cfg->series_count; i++) {
+        if (cfg->series[i].pc_gate) {
+            cfg->pc_gate_count++;
+        }
+    }
     for (uint8_t i = 0U; i < cfg->series_count; i++) {
         collect_expr_regs(cfg, cfg->series[i].expr, cfg);
     }

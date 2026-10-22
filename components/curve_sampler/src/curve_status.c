@@ -26,7 +26,8 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     "{\"ok\":true,\"running\":%s,\"trigger\":\"%s\","
                     "\"breakpoint_address\":%u,\"hits\":%u,\"sampled\":%u,"
                     "\"throttled\":%u,\"interval_us\":%u,\"frames\":%u,"
-                    "\"overwritten\":%u,\"invalid\":%u,\"error\":%u,"
+                    "\"overwritten\":%u,\"invalid\":%u,\"out_of_scope\":%u,"
+                    "\"error\":%u,"
                     "\"sample_bytes\":%u,\"series_count\":%u,\"halt\":%s,"
                     "\"link_hz\":%u,\"consecutive_errors\":%u,"
                     "\"ring_frames\":%u,\"served_seq\":%u,\"last_tick_us\":%u,"
@@ -37,7 +38,8 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     (unsigned)status->sampled, (unsigned)status->throttled,
                     (unsigned)status->interval_us, (unsigned)status->frames,
                     (unsigned)status->overwritten, (unsigned)status->invalid,
-                    (unsigned)status->errors, (unsigned)status->sample_bytes,
+                    (unsigned)status->out_of_scope, (unsigned)status->errors,
+                    (unsigned)status->sample_bytes,
                     (unsigned)status->series_count,
                     status->halt ? "true" : "false", (unsigned)status->link_hz,
                     (unsigned)status->consecutive_errors,

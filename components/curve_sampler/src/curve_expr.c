@@ -139,6 +139,13 @@ const char *curve_trigger_name(uint8_t trigger)
     return (trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) ? "breakpoint" : "periodic";
 }
 
+bool curve_pc_in_scope(uint32_t pc_low, uint32_t pc_high, uint32_t pc)
+{
+    uint32_t pc_norm = pc & ~0x01U;
+
+    return pc_norm >= pc_low && pc_norm < pc_high;
+}
+
 curve_eval_result_t curve_expr_eval(const curve_config_t *cfg, uint16_t expr_index,
                                     const uint32_t *reg_values,
                                     const bool *reg_valid,
