@@ -48,6 +48,41 @@ extern "C" {
 #define CURVE_FRAME_META_BYTES      12U
 #define CURVE_FRAME_HEADER_BYTES    16U
 
+/* ---- Phase 2: breakpoint trigger (FPB) ------------------------------------
+ * trigger=breakpoint installs one Cortex-M7 FPB code comparator on a target
+ * flash instruction address.  The core stops itself on the breakpoint, the
+ * sampler reads the frame while it is halted, then disables the comparator,
+ * resumes the core, waits `interval_us` (throttle) and re-enables it.  Only one
+ * comparator is used; FPB_CTRL/FP_COMP0 original values are saved and restored
+ * on stop/error. */
+#define CURVE_BP_INTERVAL_MIN_US     5000U
+#define CURVE_BP_INTERVAL_MAX_US     1000000U
+#define CURVE_BP_INTERVAL_DEFAULT_US 20000U
+/* DHCSR.S_HALT polling period while waiting for the breakpoint hit. */
+#define CURVE_BP_POLL_INTERVAL_US    1000U
+/* Target flash window allowed for breakpoint addresses (Thumb bit0 ignored). */
+#define CURVE_BP_FLASH_START         0x08000000U
+#define CURVE_BP_FLASH_END           0x08FFFFFFU
+/* Cortex-M7 FPB (flash patch and breakpoint unit) PPB registers. */
+#define CURVE_FPB_CTRL               0xE0002000U
+#define CURVE_FPB_COMP0              0xE0002008U
+#define CURVE_FPB_CTRL_ENABLE        0x00000001U
+#define CURVE_FPB_CTRL_KEY           0x00000002U
+
+typedef enum {
+    CURVE_TRIGGER_PERIODIC = 0,
+    CURVE_TRIGGER_BREAKPOINT = 1,
+} curve_trigger_t;
+
+/** True when the breakpoint address (Thumb bit0 ignored) is in target flash. */
+bool curve_breakpoint_addr_ok(uint32_t address);
+
+/** FPB comparator value: address with Thumb bit0 ignored, low bit set. */
+uint32_t curve_breakpoint_compare_value(uint32_t address);
+
+/** "periodic"/"breakpoint" (unknown values fall back to "periodic"). */
+const char *curve_trigger_name(uint8_t trigger);
+
 /* Phase 0 selftest: N halt -> regs -> mem -> resume iterations. */
 #define CURVE_SELFTEST_ITERATIONS   20U
 
@@ -122,7 +157,9 @@ typedef struct {
 
 /** Immutable sampling configuration (parsed before the worker is started). */
 typedef struct {
-    uint32_t interval_us;
+    uint8_t trigger;                /* curve_trigger_t */
+    uint32_t breakpoint_address;    /* CURVE_TRIGGER_BREAKPOINT: raw Thumb addr */
+    uint32_t interval_us;           /* periodic period / breakpoint throttle */
     bool halt;
     uint8_t series_count;
     uint16_t sample_bytes;          /* sum(series[].size) */
@@ -146,6 +183,11 @@ typedef struct {
     uint32_t overwritten;        /* frames dropped before a client read them */
     uint32_t ring_capacity;      /* ring slots (256..512, see above) */
     uint32_t served_seq;         /* highest seq handed to a client (0=none) */
+    uint8_t trigger;             /* curve_trigger_t */
+    uint32_t breakpoint_address; /* breakpoint trigger: FPB address */
+    uint32_t hits;               /* FPB breakpoint hits */
+    uint32_t sampled;            /* breakpoint hits actually written to ring */
+    uint32_t throttled;          /* hits dropped by interval throttling */
     uint32_t invalid;            /* invalid series values, bytes zeroed */
     uint32_t errors;             /* failed sample ticks */
     uint32_t consecutive_errors;
@@ -153,6 +195,7 @@ typedef struct {
     uint32_t dpidr;
     uint32_t last_tick_us;
     uint32_t last_error;         /* esp_err_t of the last failed operation */
+    char last_err[24];           /* esp_err_to_name(last_error), "" = none */
     char message[64];            /* diagnostic / last stop reason */
 } curve_status_t;
 
@@ -225,6 +268,13 @@ uint32_t curve_ring_plan_read(const curve_ring_t *ring, uint32_t since,
 
 /** Advance the served cursor after [first_seq, first_seq+count-1] was sent. */
 void curve_ring_mark_served(curve_ring_t *ring, uint32_t first_seq, uint32_t count);
+
+/**
+ * @brief Format the GET /api/curve/status JSON body (without HTTP framing).
+ *
+ * @return snprintf() result (number of bytes that would be written).
+ */
+int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf_len);
 
 /* ---- JSON config parser (curve_json.c) ----------------------------------- */
 esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,

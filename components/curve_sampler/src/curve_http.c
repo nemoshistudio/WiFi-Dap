@@ -268,11 +268,14 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
     curve_engine_status(&status);
     (void)snprintf(s_json, sizeof(s_json),
                    "{\"ok\":true,\"series_count\":%u,\"sample_bytes\":%u,"
-                   "\"interval_us\":%u,\"halt\":%s,\"link_hz\":%u,"
+                   "\"interval_us\":%u,\"trigger\":\"%s\","
+                   "\"breakpoint_address\":%u,\"halt\":%s,\"link_hz\":%u,"
                    "\"dpidr\":\"0x%08X\"}",
                    (unsigned)s_http_cfg.series_count,
                    (unsigned)s_http_cfg.sample_bytes,
                    (unsigned)s_http_cfg.interval_us,
+                   curve_trigger_name(s_http_cfg.trigger),
+                   (unsigned)s_http_cfg.breakpoint_address,
                    s_http_cfg.halt ? "true" : "false", (unsigned)status.link_hz,
                    (unsigned)status.dpidr);
     return curve_send_json(req, "200 OK", s_json);
@@ -300,25 +303,7 @@ static esp_err_t curve_handle_status(httpd_req_t *req)
     curve_status_t status;
 
     curve_engine_status(&status);
-    (void)snprintf(s_json, sizeof(s_json),
-                   "{\"ok\":true,\"running\":%s,\"interval_us\":%u,"
-                   "\"frames\":%u,\"overwritten\":%u,\"invalid\":%u,"
-                   "\"error\":%u,\"sample_bytes\":%u,\"series_count\":%u,"
-                   "\"halt\":%s,\"link_hz\":%u,\"consecutive_errors\":%u,"
-                   "\"ring_frames\":%u,\"served_seq\":%u,"
-                   "\"last_tick_us\":%u,\"last_err\":\"%s\",\"message\":\"%s\"}",
-                   status.running ? "true" : "false",
-                   (unsigned)status.interval_us, (unsigned)status.frames,
-                   (unsigned)status.overwritten, (unsigned)status.invalid,
-                   (unsigned)status.errors, (unsigned)status.sample_bytes,
-                   (unsigned)status.series_count, status.halt ? "true" : "false",
-                   (unsigned)status.link_hz,
-                   (unsigned)status.consecutive_errors,
-                   (unsigned)status.ring_capacity,
-                   (unsigned)status.served_seq,
-                   (unsigned)status.last_tick_us,
-                   (status.last_error != 0U) ? esp_err_to_name((esp_err_t)status.last_error) : "",
-                   status.message);
+    (void)curve_status_format_json(&status, s_json, sizeof(s_json));
     return curve_send_json(req, "200 OK", s_json);
 }
 

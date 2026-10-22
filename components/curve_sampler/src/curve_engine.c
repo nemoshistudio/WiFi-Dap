@@ -97,12 +97,21 @@ static struct {
     uint8_t *ring_payload;
     curve_ring_t ring;           /* seq/count/served/overwritten bookkeeping */
 
+    /* Phase 2: FPB breakpoint state (worker task only) */
+    bool fpb_active;
+    uint32_t fpb_orig_ctrl;
+    uint32_t fpb_orig_comp0;
+    uint32_t fpb_compare;
+
     /* statistics reported by GET /api/curve/status */
     uint32_t stat_invalid;
     uint32_t stat_errors;
     uint32_t stat_consecutive;
     uint32_t stat_last_tick_us;
     uint32_t stat_last_error;
+    uint32_t stat_hits;        /* FPB breakpoint hits */
+    uint32_t stat_sampled;     /* frames written for breakpoint hits */
+    uint32_t stat_throttled;   /* hits dropped by throttle (reserved: always 0) */
 
     curve_selftest_t selftest;
 } s_engine;
@@ -332,6 +341,9 @@ static esp_err_t engine_ring_prepare(uint16_t frame_bytes)
     s_engine.stat_consecutive = 0U;
     s_engine.stat_last_tick_us = 0U;
     s_engine.stat_last_error = 0U;
+    s_engine.stat_hits = 0U;
+    s_engine.stat_sampled = 0U;
+    s_engine.stat_throttled = 0U;
     return ESP_OK;
 }
 
@@ -368,22 +380,152 @@ static void engine_record_frame(const uint8_t *payload, uint64_t timestamp_us,
 }
 
 /* ------------------------------------------------------------------------- */
-/* sampling loop (worker task)                                               */
+/* shared sample collection (periodic / breakpoint trigger)                  */
 /* ------------------------------------------------------------------------- */
 
-static void curve_sample_loop(void)
+/** Sleep up to `us`, waking early on a stop request (esp_timer one-shot plus a
+ *  worker notification; the timeout is only a failsafe).  Returns false when a
+ *  stop was requested. */
+static bool curve_sleep_us(uint32_t us)
 {
-    uint8_t payload[CURVE_MAX_SAMPLE_BYTES];
+    TickType_t safety;
+
+    if (us == 0U) {
+        return !s_engine.stop_req;
+    }
+    safety = pdMS_TO_TICKS(us / 1000U) + pdMS_TO_TICKS(100U);
+    if (esp_timer_start_once(s_engine.tick_timer, us) != ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS((us + 999U) / 1000U));
+        return !s_engine.stop_req;
+    }
+    (void)ulTaskNotifyTake(pdTRUE, safety);
+    (void)esp_timer_stop(s_engine.tick_timer);
+    return !s_engine.stop_req;
+}
+
+/** DHCSR.S_HALT must clear a few cycles after a resume write. */
+static esp_err_t curve_wait_core_running(void)
+{
+    for (int i = 0; i < 10; i++) {
+        uint32_t dhcsr = 0U;
+        esp_err_t err = tf_swd_read_u32(CURVE_REG_DHCSR, &dhcsr);
+
+        if (err != ESP_OK) {
+            return err;
+        }
+        if ((dhcsr & CURVE_DHCSR_S_HALT) == 0U) {
+            return ESP_OK;
+        }
+        esp_rom_delay_us(200U);
+    }
+    return ESP_ERR_INVALID_STATE;
+}
+
+/** Make sure the core runs before installing the comparator (a previous probe
+ *  or debug session may have left it halted). */
+static esp_err_t curve_ensure_core_running(void)
+{
+    bool halted = false;
+    esp_err_t err = tf_swd_is_halted(&halted);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (!halted) {
+        return ESP_OK;
+    }
+    ESP_LOGW(CURVE_TAG, "breakpoint: target was halted, resuming it");
+    err = curve_resume_core();
+    if (err != ESP_OK) {
+        return err;
+    }
+    return curve_wait_core_running();
+}
+
+/**
+ * @brief Read one sample: core registers (only when the expressions need them
+ *        and the core is halted), evaluate every series expression and read the
+ *        target memory.
+ *
+ * `payload` must have room for cfg->sample_bytes and is zero-filled first, so
+ * invalid/unreadable series stay 0 in the frame.  Errors are reported through
+ * ok_out/err_out; *invalid_out counts series that could not be read.
+ */
+static void curve_collect_sample(const curve_config_t *cfg, bool core_halted,
+                                 uint8_t *payload, uint32_t *invalid_out,
+                                 bool *ok_out, esp_err_t *err_out)
+{
     uint32_t reg_values[CURVE_MAX_CORE_REGS];
     bool reg_valid[CURVE_MAX_CORE_REGS];
+    uint32_t invalid = 0U;
+    uint16_t offset = 0U;
+    bool ok = true;
+    esp_err_t tick_err = ESP_OK;
+
+    memset(reg_valid, 0, sizeof(reg_valid));
+    memset(payload, 0, cfg->sample_bytes);
+
+    if (core_halted && cfg->reg_count > 0U) {
+        for (uint8_t i = 0U; i < cfg->reg_count; i++) {
+            uint8_t reg = cfg->regs[i];
+            uint32_t value = 0U;
+            esp_err_t err = tf_swd_read_reg(reg, &value);
+
+            if (err == ESP_OK) {
+                reg_values[reg] = value;
+                reg_valid[reg] = true;
+            } else {
+                ok = false;
+                tick_err = err;
+            }
+        }
+    }
+
+    for (uint8_t i = 0U; i < cfg->series_count; i++) {
+        const curve_series_t *series = &cfg->series[i];
+        uint32_t address = 0U;
+        curve_eval_result_t res =
+            curve_expr_eval(cfg, series->expr, reg_values, reg_valid, &address);
+
+        if (res == CURVE_EVAL_OK && curve_addr_range_ok(address, series->size)) {
+            esp_err_t err = tf_swd_read_mem(address, payload + offset, series->size);
+
+            if (err != ESP_OK) {
+                invalid++;
+                ok = false;
+                tick_err = err;
+                (void)tf_swd_recover_bus();
+            }
+        } else {
+            /* Not readable / not evaluable: zero-fill this series and keep
+             * sampling (contract: invalid++, never abort the session). */
+            invalid++;
+            if (res == CURVE_EVAL_BUS) {
+                ok = false;
+                tick_err = ESP_FAIL;
+                (void)tf_swd_recover_bus();
+            }
+        }
+        offset += series->size;
+    }
+
+    *invalid_out = invalid;
+    *ok_out = ok;
+    *err_out = tick_err;
+}
+
+/* ------------------------------------------------------------------------- */
+/* periodic trigger (Phase 1): halt -> sample -> resume every interval_us    */
+/* ------------------------------------------------------------------------- */
+
+static void curve_periodic_loop(void)
+{
+    uint8_t payload[CURVE_MAX_SAMPLE_BYTES];
     const curve_config_t *cfg = &s_engine.cfg;
     bool halted = false;
     uint32_t consecutive_errors = 0U;
     TickType_t tick_wait = pdMS_TO_TICKS(cfg->interval_us / 1000U) * 2U +
-                          pdMS_TO_TICKS(1000U);
-
-    memset(reg_valid, 0, sizeof(reg_valid));
-    memset(payload, 0, sizeof(payload));
+                           pdMS_TO_TICKS(1000U);
 
     if (esp_timer_start_periodic(s_engine.tick_timer, cfg->interval_us) != ESP_OK) {
         engine_set_message("stopped: tick timer start failed");
@@ -406,10 +548,6 @@ static void curve_sample_loop(void)
         bool tick_ok = true;
         esp_err_t tick_err = ESP_OK;
         uint32_t invalid = 0U;
-        uint16_t offset = 0U;
-
-        memset(payload, 0, cfg->sample_bytes);
-        memset(reg_valid, 0, sizeof(reg_valid));
 
         if (cfg->halt) {
             esp_err_t err = tf_swd_halt();
@@ -421,47 +559,18 @@ static void curve_sample_loop(void)
             }
         }
 
-        if (halted && cfg->reg_count > 0U) {
-            for (uint8_t i = 0U; i < cfg->reg_count; i++) {
-                uint8_t reg = cfg->regs[i];
-                uint32_t value = 0U;
-                esp_err_t err = tf_swd_read_reg(reg, &value);
+        {
+            bool collect_ok = true;
+            esp_err_t collect_err = ESP_OK;
 
-                if (err == ESP_OK) {
-                    reg_values[reg] = value;
-                    reg_valid[reg] = true;
-                } else {
-                    tick_ok = false;
-                    tick_err = err;
+            curve_collect_sample(cfg, halted, payload, &invalid, &collect_ok,
+                                 &collect_err);
+            if (!collect_ok) {
+                tick_ok = false;
+                if (tick_err == ESP_OK) {
+                    tick_err = collect_err;
                 }
             }
-        }
-
-        for (uint8_t i = 0U; i < cfg->series_count; i++) {
-            const curve_series_t *series = &cfg->series[i];
-            uint32_t address = 0U;
-            curve_eval_result_t res =
-                curve_expr_eval(cfg, series->expr, reg_values, reg_valid, &address);
-
-            if (res == CURVE_EVAL_OK && curve_addr_range_ok(address, series->size)) {
-                esp_err_t err = tf_swd_read_mem(address, payload + offset, series->size);
-                if (err != ESP_OK) {
-                    invalid++;
-                    tick_ok = false;
-                    tick_err = err;
-                    (void)tf_swd_recover_bus();
-                }
-            } else {
-                /* Not readable / not evaluable: zero-fill this series and keep
-                 * sampling (contract: invalid++, never abort the session). */
-                invalid++;
-                if (res == CURVE_EVAL_BUS) {
-                    tick_ok = false;
-                    tick_err = ESP_FAIL;
-                    (void)tf_swd_recover_bus();
-                }
-            }
-            offset += series->size;
         }
 
         if (halted) {
@@ -499,6 +608,256 @@ static void curve_sample_loop(void)
         curve_release_core();
         halted = false;
     }
+    if (s_engine.stop_req) {
+        engine_set_message("stopped");
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Phase 2: FPB breakpoint trigger                                           */
+/* ------------------------------------------------------------------------- */
+
+static esp_err_t curve_fpb_enable(uint32_t compare_value)
+{
+    /* FPB writes require the KEY bit in FP_CTRL; comparator bit0 = enable. */
+    esp_err_t err = tf_swd_write_u32(CURVE_FPB_CTRL,
+                                     CURVE_FPB_CTRL_KEY | CURVE_FPB_CTRL_ENABLE);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    return tf_swd_write_u32(CURVE_FPB_COMP0, compare_value);
+}
+
+static esp_err_t curve_fpb_disable(void)
+{
+    esp_err_t err = tf_swd_write_u32(CURVE_FPB_CTRL,
+                                     CURVE_FPB_CTRL_KEY | CURVE_FPB_CTRL_ENABLE);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = tf_swd_write_u32(CURVE_FPB_COMP0, 0U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* Gate the whole FPB unit off while throttling: the core runs unrestricted
+     * and cannot retrigger on the same comparator. */
+    return tf_swd_write_u32(CURVE_FPB_CTRL, CURVE_FPB_CTRL_KEY);
+}
+
+/** Save the current FPB_CTRL/FP_COMP0 and arm comparator 0. */
+static esp_err_t curve_fpb_begin(uint32_t compare_value)
+{
+    esp_err_t err;
+    uint32_t ctrl = 0U;
+    uint32_t comp0 = 0U;
+
+    err = tf_swd_read_u32(CURVE_FPB_CTRL, &ctrl);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (ctrl == 0xFFFFFFFFU) {
+        ESP_LOGE(CURVE_TAG, "breakpoint: FPB not available (FP_CTRL=0x%08X)",
+                 (unsigned)ctrl);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    err = tf_swd_read_u32(CURVE_FPB_COMP0, &comp0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    s_engine.fpb_orig_ctrl = ctrl;
+    s_engine.fpb_orig_comp0 = comp0;
+    s_engine.fpb_compare = compare_value;
+    /* Mark active before arming: a partially failed arm must still be restored
+     * on the session error path. */
+    s_engine.fpb_active = true;
+
+    err = curve_fpb_enable(compare_value);
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGI(CURVE_TAG, "FPB armed: FP_CTRL=0x%08X FP_COMP0=0x%08X -> 0x%08X",
+             (unsigned)ctrl, (unsigned)comp0, (unsigned)compare_value);
+    return ESP_OK;
+}
+
+/** Restore the FPB_CTRL/FP_COMP0 values captured at session start. */
+static void curve_fpb_restore(void)
+{
+    if (!s_engine.fpb_active) {
+        return;
+    }
+    (void)tf_swd_write_u32(CURVE_FPB_CTRL,
+                           CURVE_FPB_CTRL_KEY | CURVE_FPB_CTRL_ENABLE);
+    (void)tf_swd_write_u32(CURVE_FPB_COMP0, s_engine.fpb_orig_comp0);
+    (void)tf_swd_write_u32(CURVE_FPB_CTRL,
+                           CURVE_FPB_CTRL_KEY |
+                               (s_engine.fpb_orig_ctrl & CURVE_FPB_CTRL_ENABLE));
+    s_engine.fpb_active = false;
+    ESP_LOGI(CURVE_TAG, "FPB restored (FP_CTRL=0x%08X FP_COMP0=0x%08X)",
+             (unsigned)s_engine.fpb_orig_ctrl, (unsigned)s_engine.fpb_orig_comp0);
+}
+
+/**
+ * Breakpoint trigger loop: FPB comparator stops the core itself, the sampler
+ * reads the halted frame, then disables the comparator, resumes the core,
+ * waits the throttle interval and re-arms.  All FPB state is restored on exit.
+ */
+static void curve_breakpoint_loop(void)
+{
+    uint8_t payload[CURVE_MAX_SAMPLE_BYTES];
+    const curve_config_t *cfg = &s_engine.cfg;
+    const uint32_t compare_value =
+        curve_breakpoint_compare_value(cfg->breakpoint_address);
+    uint32_t consecutive_errors = 0U;
+    bool core_halted = false;
+    bool fpb_active = false;
+    bool armed = false;
+    esp_err_t err;
+
+    (void)esp_timer_stop(s_engine.tick_timer);
+
+    err = curve_ensure_core_running();
+    if (err != ESP_OK) {
+        engine_set_message("breakpoint: target does not run: %s",
+                           esp_err_to_name(err));
+        goto out;
+    }
+    err = curve_fpb_begin(compare_value);
+    if (err != ESP_OK) {
+        engine_set_message("breakpoint: FPB setup failed: %s",
+                           esp_err_to_name(err));
+        goto out;
+    }
+    fpb_active = true;
+    armed = true;
+
+    while (!s_engine.stop_req) {
+        uint32_t dhcsr = 0U;
+
+        if (engine_target_flash_busy()) {
+            engine_set_message("stopped: target flash session is active");
+            break;
+        }
+        if (!armed) {
+            /* Re-arm after the throttle (or retry a failed arm). */
+            err = curve_fpb_enable(compare_value);
+            if (err != ESP_OK) {
+                consecutive_errors++;
+                (void)tf_swd_recover_bus();
+                ESP_LOGW(CURVE_TAG, "breakpoint re-arm failed (%s), consecutive=%u",
+                         esp_err_to_name(err), (unsigned)consecutive_errors);
+                if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+                    engine_set_message("stopped: %u consecutive SWD errors",
+                                       (unsigned)consecutive_errors);
+                    break;
+                }
+                if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                    break;
+                }
+                continue;
+            }
+            armed = true;
+        }
+        err = tf_swd_read_u32(CURVE_REG_DHCSR, &dhcsr);
+        if (err != ESP_OK) {
+            consecutive_errors++;
+            (void)tf_swd_recover_bus();
+            ESP_LOGW(CURVE_TAG, "breakpoint poll failed (%s), consecutive=%u",
+                     esp_err_to_name(err), (unsigned)consecutive_errors);
+            if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+                engine_set_message("stopped: %u consecutive SWD errors",
+                                   (unsigned)consecutive_errors);
+                break;
+            }
+            if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                break;
+            }
+            continue;
+        }
+        if ((dhcsr & CURVE_DHCSR_S_HALT) == 0U) {
+            /* No hit yet: poll DHCSR every ~1 ms without blocking httpd. */
+            if (!curve_sleep_us(CURVE_BP_POLL_INTERVAL_US)) {
+                break;
+            }
+            continue;
+        }
+
+        /* Breakpoint hit: the core is halted.  Timestamp close to the hit. */
+        core_halted = true;
+        {
+            int64_t t_hit = esp_timer_get_time();
+            bool collect_ok = true;
+            esp_err_t collect_err = ESP_OK;
+            uint32_t invalid = 0U;
+            uint32_t sample_us;
+
+            engine_lock();
+            s_engine.stat_hits++;
+            engine_unlock();
+
+            curve_collect_sample(cfg, true, payload, &invalid, &collect_ok,
+                                 &collect_err);
+            sample_us = (uint32_t)(esp_timer_get_time() - t_hit);
+            engine_record_frame(payload, (uint64_t)t_hit, invalid, collect_ok,
+                                sample_us, collect_err);
+            engine_lock();
+            s_engine.stat_sampled++;
+            engine_unlock();
+            if (!collect_ok) {
+                ESP_LOGW(CURVE_TAG, "breakpoint sample failed (%s)",
+                         esp_err_to_name(collect_err));
+            }
+        }
+
+        /* Disable the comparator before resuming, then throttle.  The loop
+         * top re-arms it after the throttle wait. */
+        armed = false;
+        err = curve_fpb_disable();
+        if (err != ESP_OK) {
+            consecutive_errors++;
+            (void)tf_swd_recover_bus();
+            ESP_LOGW(CURVE_TAG, "breakpoint disarm failed (%s), consecutive=%u",
+                     esp_err_to_name(err), (unsigned)consecutive_errors);
+        }
+        err = curve_resume_core();
+        if (err == ESP_OK) {
+            core_halted = false;
+            err = curve_wait_core_running();
+        }
+        if (err != ESP_OK) {
+            consecutive_errors++;
+            (void)tf_swd_recover_bus();
+            ESP_LOGW(CURVE_TAG, "breakpoint resume failed (%s), consecutive=%u",
+                     esp_err_to_name(err), (unsigned)consecutive_errors);
+        } else {
+            consecutive_errors = 0U;
+        }
+        if (consecutive_errors >= CURVE_MAX_CONSECUTIVE_ERRORS) {
+            engine_set_message("stopped: %u consecutive SWD errors",
+                               (unsigned)consecutive_errors);
+            break;
+        }
+
+        /* Throttle: minimum time between two sampled hits.  The comparator is
+         * re-armed at the top of the next loop iteration. */
+        if (!curve_sleep_us(cfg->interval_us)) {
+            break;
+        }
+    }
+
+out:
+    /* stop/error path: restore FPB first, then make sure the target runs. */
+    if (fpb_active) {
+        curve_fpb_restore();
+        fpb_active = false;
+    }
+    if (core_halted) {
+        curve_release_core();
+        core_halted = false;
+    }
+    (void)esp_timer_stop(s_engine.tick_timer);
     if (s_engine.stop_req) {
         engine_set_message("stopped");
     }
@@ -722,8 +1081,15 @@ static void curve_worker_start_cmd(void)
     if (!aborted) {
         s_engine.running = true;
         s_engine.cmd_result = ESP_OK;
-        (void)snprintf(s_engine.message, sizeof(s_engine.message),
-                       "sampling @%u us", (unsigned)s_engine.cfg.interval_us);
+        if (s_engine.cfg.trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+            (void)snprintf(s_engine.message, sizeof(s_engine.message),
+                           "breakpoint sampling @0x%08X (throttle %u us)",
+                           (unsigned)s_engine.cfg.breakpoint_address,
+                           (unsigned)s_engine.cfg.interval_us);
+        } else {
+            (void)snprintf(s_engine.message, sizeof(s_engine.message),
+                           "sampling @%u us", (unsigned)s_engine.cfg.interval_us);
+        }
     }
     engine_unlock();
 
@@ -734,7 +1100,11 @@ static void curve_worker_start_cmd(void)
         return;
     }
 
-    curve_sample_loop();
+    if (s_engine.cfg.trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+        curve_breakpoint_loop();
+    } else {
+        curve_periodic_loop();
+    }
 
     curve_dap_release();
     engine_lock();
@@ -1038,6 +1408,15 @@ void curve_engine_status(curve_status_t *out)
     out->dpidr = s_engine.dpidr;
     out->last_tick_us = s_engine.stat_last_tick_us;
     out->last_error = s_engine.stat_last_error;
+    out->trigger = s_engine.cfg.trigger;
+    out->breakpoint_address = s_engine.cfg.breakpoint_address;
+    out->hits = s_engine.stat_hits;
+    out->sampled = s_engine.stat_sampled;
+    out->throttled = s_engine.stat_throttled;
+    if (s_engine.stat_last_error != 0U) {
+        (void)snprintf(out->last_err, sizeof(out->last_err), "%s",
+                       esp_err_to_name((esp_err_t)s_engine.stat_last_error));
+    }
     (void)snprintf(out->message, sizeof(out->message), "%s", s_engine.message);
     engine_unlock();
 }

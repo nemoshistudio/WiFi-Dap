@@ -121,6 +121,24 @@ static curve_eval_result_t eval_index(const curve_config_t *cfg, uint16_t index,
     }
 }
 
+bool curve_breakpoint_addr_ok(uint32_t address)
+{
+    uint32_t normalized = address & ~0x01U; /* Thumb bit0 is ignored */
+
+    return normalized >= CURVE_BP_FLASH_START && normalized <= CURVE_BP_FLASH_END;
+}
+
+uint32_t curve_breakpoint_compare_value(uint32_t address)
+{
+    /* FPB code comparator: address bits [31:1] plus the enable bit (bit0). */
+    return (address & ~0x01U) | 0x01U;
+}
+
+const char *curve_trigger_name(uint8_t trigger)
+{
+    return (trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) ? "breakpoint" : "periodic";
+}
+
 curve_eval_result_t curve_expr_eval(const curve_config_t *cfg, uint16_t expr_index,
                                     const uint32_t *reg_values,
                                     const bool *reg_valid,

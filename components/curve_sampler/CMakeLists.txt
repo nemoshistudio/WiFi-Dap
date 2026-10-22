@@ -20,6 +20,7 @@ set(srcs
     "src/curve_expr.c"
     "src/curve_json.c"
     "src/curve_ring.c"
+    "src/curve_status.c"
     "src/curve_http.c"
 )
 

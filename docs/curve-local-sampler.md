@@ -151,3 +151,78 @@ Phase 1：
 - 寄存器值变量（`DW_OP_reg` 无 location）暂不支持；`.debug_loc` 仍未解析。
 - seq 每次 start 从 1 开始，Web 客户端 start 后重置 `since=0`（已实现）。
 
+
+## 5. Phase 2（实施中）：断点触发采样
+
+周期性 halt 对控制环仍有干扰，且栈帧变量只在函数执行时有效。Phase 2 增加
+`trigger=breakpoint`：ESP32 在目标函数/PC 地址配置 FPB 硬件断点，目标命中后
+读取当前帧/指针，再恢复运行；`interval_us` 变为两次采样之间的最小间隔
+（节流，避免高频函数把目标反复停住）。
+
+### 5.1 API 扩展
+
+`POST /api/curve/start` 增加字段：
+```json
+{
+  "trigger": "periodic",              // "periodic" | "breakpoint"
+  "breakpoint_address": 134356037,    // 仅 breakpoint；Thumb 指令地址，bit0 忽略
+  "interval_us": 20000,               // periodic=采样周期；breakpoint=最小采样间隔
+  "halt": true,
+  "series": [...]
+}
+```
+- `trigger=breakpoint` 时 `halt` 字段忽略（命中时核心已被 FPB 暂停）。
+- `breakpoint_address` 必须落在目标 Flash（0x08000000..0x08FFFFFF）且半字对齐；
+  非法 → 400 `{"ok":false,"err":"bad breakpoint address"}`。
+- `interval_us` 对 breakpoint 为节流下限，范围 5000..1000000 µs；默认 20000。
+- 采样任务行为：
+  1. 保存并配置 FPB comparator（FPB_CTRL/FPB_COMP0），使能断点；
+  2. 等待 DHCSR.S_HALT（命中）；
+  3. 读所需寄存器、求值表达式、读内存、写 ring（时间戳为命中时刻近旁）；
+  4. 关闭 comparator，resume 目标；等待 `interval_us` 后再使能，等待下一次命中；
+  5. stop/错误：关闭并恢复原 comparator，resume，释放 DAP。
+- 命中时 PC 位于 `breakpoint_address` 之后/附近的指令；若选择函数入口，局部变量
+  可能尚未初始化，建议把断点放在初始化之后的指令地址（用户可手工填地址）。
+
+`GET /api/curve/status` 增加：
+```json
+{"trigger":"breakpoint","breakpoint_address":134356037,"hits":N,"sampled":N,
+ "throttled":N}
+```
+`hits` 为 FPB 命中次数，`sampled` 为实际写入 ring 的次数，`throttled` 为节流丢弃次数
+（当前实现命中后总是采样并节流等待，字段保留给后续多断点/跳过策略）。
+
+### 5.2 Web 扩展
+
+- 本地模式新增 `Trigger: Periodic / Breakpoint`；
+- Breakpoint 模式显示十六进制地址输入（必填）、`Min interval`（5/10/20/50 ms）、
+  hits/sampled 状态；Start 时带 `trigger`/`breakpoint_address`；
+- 其余选变量/曲线/CSV/stop 逻辑复用；地址可从 ELF 符号/反汇编获得，UI 先提供
+  手工输入，后续可加函数符号下拉。
+
+### 5.3 真机验收
+
+- 在 `Device::BMI088` 的某个高频函数上设断点，确认 hits/sampled 增长、帧时间戳
+  符合函数调用频率且不超过节流上限；
+- stop 后 comparator 关闭、目标恢复运行、FPB 原值恢复；
+- 与 periodic 模式、Web-DAP 模式互不干扰；长跑无目标卡死。
+
+## 6. Phase 2 真机结果（2026-10-22）
+
+- 目标：reference `-O0` 调试固件，SWD 1 MHz，FPB comparator0。
+- Breakpoint 地址：`Device::BMI088::PraseAccel` 入口 `0x08029244`
+  （Thumb 地址 `0x08029245` 也可，固件按 bit0 掩码；status 保留原始值）。
+- 固定地址 `xTickCount` + `trigger=breakpoint`、`interval_us=20000`：
+  **Hits/Sampled 155/155**（约 3.4 s）、**45 Hz**、Invalid 0、Overwritten 0；
+  帧时间戳间隔约 20–21 ms，符合节流下限。
+- `reg13` 帧表达式（`{kind:'reg',reg:13,offset:0}`）breakpoint 模式：
+  Hits/Sampled 135/135，Invalid 0，说明命中时寄存器/内存路径正常。
+- 非法地址 `0x1234` → HTTP 400 `{"ok":false,"err":"bad breakpoint address"}`；
+  Thumb bit 地址被接受。
+- stop 后目标运行恢复，随后 Web-DAP debug 回归 16 Hz/Failures 0；
+  periodic 本地无 halt 回归 200 Hz（5 ms）正常。
+- 截图：`docs/images/web-curve-local-breakpoint.png`。
+
+注意：入口处局部变量可能尚未初始化；实际使用时把断点放在初始化之后的指令地址，
+并在 UI 中手动填写该地址；FPB 与其他调试器互斥。
+

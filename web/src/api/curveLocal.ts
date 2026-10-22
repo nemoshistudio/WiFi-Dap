@@ -2,7 +2,7 @@
  * 设备本地采样（ESP32 SWD 闭环）HTTP API 与 CVF1 帧解码。
  *
  * 契约：docs/curve-local-sampler.md §1.1 / §2。
- * - POST /api/curve/start  {interval_us,halt,series:[{id,size,expr}]}
+ * - POST /api/curve/start  {trigger,breakpoint_address,interval_us,halt,series}
  * - POST /api/curve/stop
  * - GET  /api/curve/status
  * - GET  /api/curve/frames?since=&max=  -> CVF1 二进制（204/空 = 无新帧）
@@ -25,6 +25,13 @@ export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
 export const CURVE_LOCAL_MIN_INTERVAL_US = 5000
 export const CURVE_LOCAL_MAX_INTERVAL_US = 200000
+/** breakpoint 触发时 interval_us 是节流下限，契约允许 5 ms..1 s。 */
+export const CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT = 1000000
+/** Cortex-M FPB 断点地址范围：目标 Flash。 */
+export const CURVE_LOCAL_FLASH_START = 0x08000000
+export const CURVE_LOCAL_FLASH_END = 0x08ffffff
+
+export type CurveLocalTrigger = 'periodic' | 'breakpoint'
 export const CURVE_LOCAL_MAX_EXPR_DEPTH = 8
 export const CURVE_LOCAL_FRAMES_MAX = 64
 export const CURVE_LOCAL_FRAMES_DEFAULT = 32
@@ -59,7 +66,11 @@ export interface CurveLocalSeriesSpec {
 
 export interface StartLocalCurveOptions {
     intervalUs: number
-    /** 固件每拍 halt 读取（默认 true，Phase 1 只支持 halt 闭环）。 */
+    /** periodic（默认）或 breakpoint（FPB 命中触发）。 */
+    trigger?: CurveLocalTrigger
+    /** breakpoint 触发地址；Thumb bit0 忽略，范围 Flash 且半字对齐。 */
+    breakpointAddress?: number
+    /** periodic 是否每拍 halt；breakpoint 时忽略且不下发（命中时核心已暂停）。 */
     halt?: boolean
     series: readonly CurveLocalSeriesSpec[]
 }
@@ -75,6 +86,16 @@ export interface LocalCurveStatus {
     running: boolean
     /** 固件当前是否每拍 halt（false = 纯固定地址/指针的免暂停模式）。 */
     halt?: boolean
+    /** 当前触发方式（Phase 2）。 */
+    trigger?: CurveLocalTrigger
+    /** breakpoint 触发地址（固件回读）。 */
+    breakpointAddress?: number
+    /** FPB 命中次数（breakpoint 触发）。 */
+    hits?: number
+    /** 实际写入 ring 的采样次数（breakpoint 触发）。 */
+    sampled?: number
+    /** 因节流丢弃的次数（breakpoint 触发）。 */
+    throttled?: number
     intervalUs: number
     frames: number
     overwritten: number
@@ -135,11 +156,49 @@ export function addressExprDepth(expr: AddressExpr): number {
     }
 }
 
+/** 规范化 FPB 断点地址：Thumb 地址 bit0 忽略（契约 §5.1）。 */
+export function normalizeBreakpointAddress(address: number): number {
+    return (Math.floor(address) & 0xfffffffe) >>> 0
+}
+
+/** 断点地址是否落在目标 Flash 且半字对齐（规范化后）。 */
+export function isValidBreakpointAddress(address: number): boolean {
+    if (!Number.isFinite(address)) return false
+    const normalized = normalizeBreakpointAddress(address)
+    return normalized >= CURVE_LOCAL_FLASH_START && normalized <= CURVE_LOCAL_FLASH_END
+}
+
+/**
+ * 解析 Web UI 的十六进制断点地址输入：允许可选的 0x/0X 前缀与下划线，
+ * 自动忽略 Thumb bit0；范围/格式错误返回 null。
+ */
+export function parseBreakpointAddressInput(text: string): number | null {
+    let value = String(text ?? '').trim()
+    if (/^0[xX]/.test(value)) value = value.slice(2)
+    value = value.replace(/_/g, '')
+    if (!/^[0-9a-fA-F]{1,8}$/.test(value)) return null
+    const address = Number.parseInt(value, 16) >>> 0
+    if (!isValidBreakpointAddress(address)) return null
+    return normalizeBreakpointAddress(address)
+}
+
 /** 下发前做本地校验，尽早给出可读错误（避免固件返回模糊失败）。 */
 export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
     const {intervalUs, series} = options
-    if (!Number.isInteger(intervalUs) || intervalUs < CURVE_LOCAL_MIN_INTERVAL_US || intervalUs > CURVE_LOCAL_MAX_INTERVAL_US) {
-        throw new CurveLocalError(`interval_us must be ${CURVE_LOCAL_MIN_INTERVAL_US}..${CURVE_LOCAL_MAX_INTERVAL_US}`)
+    const trigger = options.trigger ?? 'periodic'
+    const maxInterval = trigger === 'breakpoint' ? CURVE_LOCAL_MAX_INTERVAL_US_BREAKPOINT : CURVE_LOCAL_MAX_INTERVAL_US
+    if (!Number.isInteger(intervalUs) || intervalUs < CURVE_LOCAL_MIN_INTERVAL_US || intervalUs > maxInterval) {
+        throw new CurveLocalError(`interval_us must be ${CURVE_LOCAL_MIN_INTERVAL_US}..${maxInterval} for trigger=${trigger}`)
+    }
+    if (trigger === 'breakpoint') {
+        if (typeof options.breakpointAddress !== 'number' || !Number.isInteger(options.breakpointAddress)) {
+            throw new CurveLocalError('breakpoint_address required for breakpoint trigger')
+        }
+        if (!isValidBreakpointAddress(options.breakpointAddress)) {
+            throw new CurveLocalError(
+                `breakpoint address must be in Flash 0x${CURVE_LOCAL_FLASH_START.toString(16)}..0x${CURVE_LOCAL_FLASH_END.toString(16)} and halfword aligned`,
+            )
+        }
     }
     if (series.length < CURVE_LOCAL_MIN_SERIES || series.length > CURVE_LOCAL_MAX_SERIES) {
         throw new CurveLocalError(`series count must be ${CURVE_LOCAL_MIN_SERIES}..${CURVE_LOCAL_MAX_SERIES}`)
@@ -203,17 +262,29 @@ function finiteNumber(value: unknown, fallback: number): number {
     return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
+function optionalFiniteNumber(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
 /** 启动设备本地采样。 */
 export async function startLocalCurve(options: StartLocalCurveOptions): Promise<StartLocalCurveResult> {
     validateStartLocalCurve(options)
+    const trigger = options.trigger ?? 'periodic'
+    const payload: Record<string, unknown> = {
+        trigger,
+        interval_us: options.intervalUs,
+        series: options.series.map((item) => ({id: item.id, size: item.size, expr: item.expr})),
+    }
+    if (trigger === 'breakpoint') {
+        // 断点命中时核心已暂停，halt 字段无意义且契约要求忽略；不下发避免冲突。
+        payload.breakpoint_address = normalizeBreakpointAddress(options.breakpointAddress ?? 0)
+    } else {
+        payload.halt = options.halt !== false
+    }
     const body = await requestJson(CURVE_LOCAL_START_PATH, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            interval_us: options.intervalUs,
-            halt: options.halt !== false,
-            series: options.series.map((item) => ({id: item.id, size: item.size, expr: item.expr})),
-        }),
+        body: JSON.stringify(payload),
     })
     const seriesCount = finiteNumber(body.series_count, options.series.length)
     const sampleBytes = finiteNumber(body.sample_bytes, options.series.reduce((sum, item) => sum + item.size, 0))
@@ -253,6 +324,11 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
         ok: body.ok !== false,
         running: body.running === true,
         halt: body.halt === true ? true : body.halt === false ? false : undefined,
+        trigger: body.trigger === 'breakpoint' ? 'breakpoint' : body.trigger === 'periodic' ? 'periodic' : undefined,
+        breakpointAddress: optionalFiniteNumber(body.breakpoint_address),
+        hits: optionalFiniteNumber(body.hits),
+        sampled: optionalFiniteNumber(body.sampled),
+        throttled: optionalFiniteNumber(body.throttled),
         intervalUs: finiteNumber(body.interval_us, 0),
         frames: finiteNumber(body.frames, 0),
         overwritten: finiteNumber(body.overwritten, 0),

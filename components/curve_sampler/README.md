@@ -1,4 +1,4 @@
-# WiFi Dap - curve page device-local sampler (Phase 0/1)
+# WiFi Dap - curve page device-local sampler (Phase 0/1/2)
 
 Firmware half of `docs/curve-local-sampler.md`: the Web curve page sends its
 `AddressExpr` series configuration over HTTP, this component samples the STM32
@@ -22,16 +22,30 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 `POST /api/curve/start` body (schema identical to the Web `AddressExpr`):
 
 ```json
-{"interval_us":20000,"halt":true,
+{"trigger":"periodic",
+ "interval_us":20000,"halt":true,
  "series":[
    {"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}},
    {"id":1,"size":4,"expr":{"kind":"deref","inner":{"kind":"addr","address":603991984},"offset":220}}]}
 ```
 
-Limits enforced by the parser (`src/curve_json.c`): `interval_us` 5000..200000,
-`series` 1..16, `size` 1..8, `sum(size)` <= 256, expression depth <= 8; expression
-kinds `addr`/`reg`/`cfa`/`add`/`deref`; `halt=false` rejects `reg`/`cfa`
-expressions (no register can be read while the core runs).
+Phase 2 breakpoint trigger (FPB hardware breakpoint, see below):
+
+```json
+{"trigger":"breakpoint","breakpoint_address":134356037,"interval_us":20000,
+ "series":[{"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}}]}
+```
+
+Limits enforced by the parser (`src/curve_json.c`): `trigger` is `periodic`
+(default) or `breakpoint`; `interval_us` is 5000..200000 for periodic and the
+throttle floor 5000..1000000 for breakpoint (default 20000); `series` 1..16,
+`size` 1..8, `sum(size)` <= 256, expression depth <= 8; expression kinds
+`addr`/`reg`/`cfa`/`add`/`deref`.  `halt=false` rejects `reg`/`cfa`
+expressions in periodic mode (no register can be read while the core runs);
+breakpoint mode ignores `halt` because the FPB hit already halted the core.
+`breakpoint_address` must be a Thumb instruction address in target flash
+(0x08000000..0x08FFFFFF, bit0 ignored); anything else returns HTTP 400
+`{"ok":false,"err":"bad breakpoint address"}`.
 
 `GET /api/curve/frames` returns HTTP 204 when there is no frame newer than
 `since`.  `since` is the last `seq` received (0 = oldest retained frame), `max`
@@ -48,7 +62,9 @@ though the ring physically recycles slots every tick.  `gap` (CVF1
 frame, so the batch starts at the oldest retained frame.
 
 `GET /api/curve/status` also exposes the diagnostics `ring_frames` (capacity)
-and `served_seq` (highest seq handed to a client in this session).
+and `served_seq` (highest seq handed to a client in this session), plus the
+Phase 2 fields `trigger` (`"periodic"`/`"breakpoint"`), `breakpoint_address`,
+`hits`, `sampled`, `throttled`.
 
 ### curl examples
 
@@ -66,6 +82,44 @@ curl -s -o frames.bin 'http://<device-ip>/api/curve/frames?since=0&max=32'
 curl -s -X POST http://<device-ip>/api/curve/stop -d '{}'
 ```
 
+## Phase 2: breakpoint trigger (FPB)
+
+`trigger=breakpoint` turns the session into an event-driven sampler:
+
+1. Bring-up + DAP hand-off are identical to Phase 1; the target is first made
+   to run (resumed if a previous session left it halted).
+2. The sampler saves `FP_CTRL`/`FP_COMP0` (Cortex-M7 FPB at 0xE0002000) and
+   arms comparator 0 with `FP_COMP0 = (address & ~1) | 1`
+   (`FP_CTRL = KEY | ENABLE`).  Only one comparator is used; no DWT dependency.
+3. The worker task polls `DHCSR.S_HALT` over local SWD every ~1 ms (esp_timer
+   one-shot + task notification; the httpd task is never involved).  On a hit
+   the target is already halted by the FPB, so the frame is read directly:
+   `hits++`, read required core registers / evaluate expressions / read target
+   memory / append a CVF1 frame (`sampled++`), with the timestamp taken at hit
+   detection.
+4. Before resuming, comparator 0 is disabled and the FPB unit is gated off
+   (`FP_CTRL = KEY`); the target is resumed and verified running
+   (`DHCSR.S_HALT` cleared).  After the `interval_us` throttle wait the
+   comparator is re-armed (`FP_CTRL = KEY|ENABLE`, `FP_COMP0 = compare`).
+5. `stop`/error: restore the original `FP_CTRL`/`FP_COMP0`, make sure the core
+   runs, release the DAP (`RESET_HANDLE`).  `throttled` is reserved and stays 0
+   in this implementation (every hit is sampled; the throttle only limits how
+   often the comparator is armed).
+
+Breakpoint limitations:
+
+* If the breakpoint is placed at a function entry, its locals may not be
+  initialized yet; put the address on an instruction after initialization
+  (the Web UI allows entering the Thumb address manually / from disassembly).
+* FPB resources are shared with other debug probes/RTOS: while a local
+  breakpoint session owns the DAP no debugger may attach, and `FP_COMP0` is
+  saved/restored to avoid clobbering another tool's comparator.
+* Polling detects the halt within about 1 ms; the effective sample rate is
+  limited by the throttled function call rate, the 1 ms poll interval and the
+  `interval_us` floor.
+* `hits` counts observed `S_HALT` events; a non-breakpoint halt (e.g. target
+  lockup) would also be sampled.  `sampled` counts frames written to the ring.
+
 ## Implementation notes
 
 * `src/curve_http.c` - registers **two independent URI modules** through
@@ -76,6 +130,8 @@ curl -s -X POST http://<device-ip>/api/curve/stop -d '{}'
   (priority 0x72/0x73 vs 0x90).  The generic `/api` handler and its 2 KiB
   memory pool are untouched; request bodies use a dedicated 4 KiB static
   buffer on the (single) httpd task.
+* `src/curve_status.c` - pure-C `GET /api/curve/status` JSON formatter (host
+  tested together with the ring/config code).
 * `src/curve_ring.c` - pure-C ring bookkeeping (capacity clamp, write
   slot/seq, overwritten accounting against the served cursor, read planning,
   gap flag).  No RTOS/ESP dependencies, exercised by the host regression test.
@@ -115,10 +171,14 @@ curl -s -X POST http://<device-ip>/api/curve/stop -d '{}'
   `addr`/`reg`/`cfa`/`add`/`deref` evaluation, pointer-read filtering, ring
   capacity clamp and the `overwritten`/`gap` semantics (prompt consumer ->
   `overwritten=0` after many ring wraps; stalled consumer -> real losses
-  counted once; served-then-evicted frames are not counted).
+  counted once; served-then-evicted frames are not counted), Phase 2 trigger
+  config/limits, breakpoint address window validation and the status JSON
+  field set.
 
 ## Known limitations / behaviour to be aware of
 
+* Breakpoint mode requires the breakpoint address to be in flash; RAM
+  breakpoints (needing FPB literal comparators / DWT) are not implemented.
 * The session bring-up reuses `tf_swd_link_init()`, which pulses nRESET before
   the SWD switch sequence (same as the target-flash probe).  **Starting a local
   sampling session therefore resets the target once**; the sampler then keeps

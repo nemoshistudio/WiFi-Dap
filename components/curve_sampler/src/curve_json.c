@@ -220,15 +220,61 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         return curve_parse_fail(err, err_len, "invalid JSON object");
     }
 
-    if (!json_u32(cJSON_GetObjectItemCaseSensitive(root, "interval_us"),
-                  (double)CURVE_MIN_INTERVAL_US, (double)CURVE_MAX_INTERVAL_US,
-                  &interval_us)) {
-        result = curve_parse_fail(err, err_len, "interval_us must be %u..%u",
-                                  (unsigned)CURVE_MIN_INTERVAL_US,
-                                  (unsigned)CURVE_MAX_INTERVAL_US);
-        goto out;
+    /* Phase 2 trigger selector: "periodic" (default) or "breakpoint". */
+    item = cJSON_GetObjectItemCaseSensitive(root, "trigger");
+    if (item != NULL) {
+        if (!cJSON_IsString(item) || item->valuestring == NULL) {
+            result = curve_parse_fail(err, err_len,
+                                      "trigger must be \"periodic\" or \"breakpoint\"");
+            goto out;
+        }
+        if (strcmp(item->valuestring, "breakpoint") == 0) {
+            cfg->trigger = (uint8_t)CURVE_TRIGGER_BREAKPOINT;
+        } else if (strcmp(item->valuestring, "periodic") == 0) {
+            cfg->trigger = (uint8_t)CURVE_TRIGGER_PERIODIC;
+        } else {
+            result = curve_parse_fail(err, err_len,
+                                      "trigger must be \"periodic\" or \"breakpoint\"");
+            goto out;
+        }
     }
-    cfg->interval_us = interval_us;
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "interval_us");
+    if (cfg->trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+        const cJSON *bp_item =
+            cJSON_GetObjectItemCaseSensitive(root, "breakpoint_address");
+        uint32_t bp_address = 0U;
+
+        if (!json_u32(bp_item, 0.0, 4294967295.0, &bp_address) ||
+            !curve_breakpoint_addr_ok(bp_address)) {
+            result = curve_parse_fail(err, err_len, "bad breakpoint address");
+            goto out;
+        }
+        cfg->breakpoint_address = bp_address;
+        /* interval_us is the throttle floor; optional, 5 ms..1 s. */
+        if (item == NULL) {
+            cfg->interval_us = CURVE_BP_INTERVAL_DEFAULT_US;
+        } else if (!json_u32(item, (double)CURVE_BP_INTERVAL_MIN_US,
+                             (double)CURVE_BP_INTERVAL_MAX_US, &interval_us)) {
+            result = curve_parse_fail(err, err_len,
+                                      "interval_us must be %u..%u for breakpoint",
+                                      (unsigned)CURVE_BP_INTERVAL_MIN_US,
+                                      (unsigned)CURVE_BP_INTERVAL_MAX_US);
+            goto out;
+        } else {
+            cfg->interval_us = interval_us;
+        }
+    } else {
+        if (!json_u32(item, (double)CURVE_MIN_INTERVAL_US,
+                      (double)CURVE_MAX_INTERVAL_US, &interval_us)) {
+            result = curve_parse_fail(err, err_len, "interval_us must be %u..%u",
+                                      (unsigned)CURVE_MIN_INTERVAL_US,
+                                      (unsigned)CURVE_MAX_INTERVAL_US);
+            goto out;
+        }
+        cfg->interval_us = interval_us;
+        /* breakpoint_address is ignored for periodic sampling. */
+    }
 
     item = cJSON_GetObjectItemCaseSensitive(root, "halt");
     if (item != NULL) {
@@ -301,7 +347,11 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
     }
     cfg->needs_regs = (cfg->reg_count != 0U);
 
-    if (!cfg->halt && cfg->needs_regs) {
+    /* Breakpoint sampling always happens with the core halted by the FPB hit,
+     * so reg/cfa expressions are fine there.  Periodic mode must halt per tick
+     * to read core registers. */
+    if (cfg->trigger == (uint8_t)CURVE_TRIGGER_PERIODIC && !cfg->halt &&
+        cfg->needs_regs) {
         result = curve_parse_fail(err, err_len,
                                   "halt=false cannot sample reg/cfa expressions");
         goto out;

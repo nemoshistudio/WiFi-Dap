@@ -453,6 +453,184 @@ static void test_ring_real_losses_after_served(void)
     CHECK(gap);
 }
 
+
+static void test_breakpoint_addr(void)
+{
+    /* The contract example address 134356037 (0x08021C45) is a Thumb address:
+     * bit0 is ignored, halfword alignment applies to the masked address. */
+    CHECK(curve_breakpoint_addr_ok(0x08000000U));
+    CHECK(curve_breakpoint_addr_ok(0x08000001U));
+    CHECK(curve_breakpoint_addr_ok(134356037U));
+    CHECK(curve_breakpoint_addr_ok(0x08FFFFFEU));
+    CHECK(curve_breakpoint_addr_ok(0x08FFFFFFU)); /* masks to 0x08FFFFFE */
+    CHECK(!curve_breakpoint_addr_ok(0x07FFFFFEU));
+    CHECK(!curve_breakpoint_addr_ok(0x09000000U));
+    CHECK(!curve_breakpoint_addr_ok(0x20000000U));
+    CHECK(!curve_breakpoint_addr_ok(0x00000000U));
+    CHECK(curve_breakpoint_compare_value(0x08021C44U) == 0x08021C45U);
+    CHECK(curve_breakpoint_compare_value(0x08021C45U) == 0x08021C45U);
+    CHECK(strcmp(curve_trigger_name(0U), "periodic") == 0);
+    CHECK(strcmp(curve_trigger_name(1U), "breakpoint") == 0);
+    CHECK(strcmp(curve_trigger_name(9U), "periodic") == 0);
+}
+
+static void test_parse_trigger(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+    char json[768];
+
+    /* Default trigger is periodic; interval_us keeps the Phase 1 limits. */
+    (void)snprintf(json, sizeof(json),
+                   "{\"interval_us\":20000,\"series\":[{\"size\":4,"
+                   "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.trigger == (uint8_t)CURVE_TRIGGER_PERIODIC);
+    CHECK(cfg.breakpoint_address == 0U);
+    CHECK(cfg.interval_us == 20000U);
+
+    /* Explicit periodic with a 1 s period is out of the periodic range. */
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"periodic\",\"interval_us\":1000000,"
+                   "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+                   "\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+
+    /* Breakpoint trigger with the contract example address; interval_us is
+     * optional and defaults to 20 ms.  reg/cfa expressions are allowed
+     * (halt=false is irrelevant: the FPB hit already halted the core). */
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+                   "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"reg\","
+                   "\"reg\":13,\"offset\":244}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.trigger == (uint8_t)CURVE_TRIGGER_BREAKPOINT);
+    CHECK(cfg.breakpoint_address == 134356037U);
+    CHECK(cfg.interval_us == CURVE_BP_INTERVAL_DEFAULT_US);
+    CHECK(cfg.needs_regs == true);
+
+    /* Same with halt=false: breakpoint mode ignores halt. */
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"halt\":false,"
+                   "\"breakpoint_address\":134356038,\"interval_us\":5000,"
+                   "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"cfa\","
+                   "\"offset\":0}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.interval_us == 5000U);
+    CHECK(cfg.breakpoint_address == 134356038U);
+    CHECK(cfg.needs_regs == true);
+
+    /* Breakpoint throttle range: 5000..1000000. */
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+                   "\"interval_us\":1000000,\"series\":[{\"size\":4,"
+                   "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+                   "\"interval_us\":1000001,\"series\":[{\"size\":4,"
+                   "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+                   "\"interval_us\":4999,\"series\":[{\"size\":4,"
+                   "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+
+    /* Missing / out-of-flash / misaligned-out breakpoint address -> exact
+     * contract error string. */
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"series\":[{\"size\":4,"
+                   "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(strcmp(err, "bad breakpoint address") == 0);
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"breakpoint\",\"breakpoint_address\":603979776,"
+                   "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+                   "\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(strcmp(err, "bad breakpoint address") == 0);
+
+    /* Unknown trigger string is rejected. */
+    (void)snprintf(json, sizeof(json),
+                   "{\"trigger\":\"dwt\",\"interval_us\":20000,\"series\":[{\"size\":4,"
+                   "\"expr\":{\"kind\":\"addr\",\"address\":536870912}}]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+}
+
+static void test_status_json(void)
+{
+    static curve_status_t st;
+    char buf[1024];
+    int len;
+
+    memset(&st, 0, sizeof(st));
+    st.running = true;
+    st.trigger = (uint8_t)CURVE_TRIGGER_BREAKPOINT;
+    st.breakpoint_address = 134356037U;
+    st.hits = 12U;
+    st.sampled = 11U;
+    st.throttled = 0U;
+    st.interval_us = 20000U;
+    st.frames = 11U;
+    st.overwritten = 1U;
+    st.invalid = 2U;
+    st.errors = 0U;
+    st.sample_bytes = 8U;
+    st.series_count = 2U;
+    st.halt = true;
+    st.link_hz = 2000000U;
+    st.consecutive_errors = 0U;
+    st.ring_capacity = 512U;
+    st.served_seq = 11U;
+    st.last_tick_us = 800U;
+    (void)snprintf(st.last_err, sizeof(st.last_err), "%s", "");
+    (void)snprintf(st.message, sizeof(st.message), "%s", "breakpoint sampling");
+    len = curve_status_format_json(&st, buf, sizeof(buf));
+    CHECK(len > 0);
+    CHECK(len < (int)sizeof(buf));
+    CHECK(strstr(buf, "\"ok\":true") != NULL);
+    CHECK(strstr(buf, "\"running\":true") != NULL);
+    CHECK(strstr(buf, "\"trigger\":\"breakpoint\"") != NULL);
+    CHECK(strstr(buf, "\"breakpoint_address\":134356037") != NULL);
+    CHECK(strstr(buf, "\"hits\":12") != NULL);
+    CHECK(strstr(buf, "\"sampled\":11") != NULL);
+    CHECK(strstr(buf, "\"throttled\":0") != NULL);
+    CHECK(strstr(buf, "\"interval_us\":20000") != NULL);
+    CHECK(strstr(buf, "\"frames\":11") != NULL);
+    CHECK(strstr(buf, "\"ring_frames\":512") != NULL);
+    CHECK(strstr(buf, "\"served_seq\":11") != NULL);
+
+    /* Worst-case field widths still fit the httpd JSON buffer. */
+    memset(&st, 0, sizeof(st));
+    st.trigger = (uint8_t)CURVE_TRIGGER_PERIODIC;
+    st.interval_us = 4294967295U;
+    st.frames = 4294967295U;
+    st.overwritten = 4294967295U;
+    st.invalid = 4294967295U;
+    st.errors = 4294967295U;
+    st.sample_bytes = 65535U;
+    st.series_count = 255U;
+    st.link_hz = 4294967295U;
+    st.consecutive_errors = 4294967295U;
+    st.ring_capacity = 4294967295U;
+    st.served_seq = 4294967295U;
+    st.last_tick_us = 4294967295U;
+    (void)snprintf(st.last_err, sizeof(st.last_err), "%s", "ESP_ERR_INVALID_STATE");
+    memset(st.message, 'x', sizeof(st.message) - 1U);
+    st.message[sizeof(st.message) - 1U] = '\0';
+    len = curve_status_format_json(&st, buf, sizeof(buf));
+    CHECK(len > 0);
+    CHECK(len < 768); /* httpd s_json size in curve_http.c */
+    CHECK(strstr(buf, "\"trigger\":\"periodic\"") != NULL);
+}
+
 int main(void)
 {
     test_addr_filter();
@@ -465,6 +643,9 @@ int main(void)
     test_ring_steady_consumer();
     test_ring_slow_consumer();
     test_ring_real_losses_after_served();
+    test_breakpoint_addr();
+    test_parse_trigger();
+    test_status_json();
 
     if (g_failures == 0) {
         printf("OK: %d checks passed\n", g_checks);

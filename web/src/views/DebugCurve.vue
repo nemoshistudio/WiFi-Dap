@@ -48,7 +48,7 @@
         <span class="flex-1"></span>
 
         <template v-if="isLocalSource">
-          <el-button v-if="!sampling" type="primary" :disabled="seriesList.length === 0" @click="startSampling">
+          <el-button v-if="!sampling" type="primary" :disabled="localStartDisabled" @click="startSampling">
             {{ translate('curve.start') }}
           </el-button>
           <el-button v-else type="warning" @click="stopSampling">
@@ -90,7 +90,26 @@
         </label>
         <template v-if="isLocalSource">
           <label class="flex items-center gap-2">
-            <span class="whitespace-nowrap">{{ translate('curve.localInterval') }}</span>
+            <span class="whitespace-nowrap">{{ translate('curve.localTrigger') }}</span>
+            <el-select v-model="localTrigger" size="small" style="width: 8rem" :disabled="sampling" @change="onLocalTriggerChange">
+              <el-option value="periodic" :label="translate('curve.localTriggerPeriodic')"/>
+              <el-option value="breakpoint" :label="translate('curve.localTriggerBreakpoint')"/>
+            </el-select>
+          </label>
+          <label v-if="localTrigger === 'breakpoint'" class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ translate('curve.localBreakpoint') }}</span>
+            <el-input
+                v-model="localBreakpointInput"
+                size="small"
+                style="width: 9.5rem"
+                :disabled="sampling"
+                placeholder="0x08001234"
+                class="breakpoint-input"
+                :class="{'is-invalid': !!localBreakpointError}"
+            />
+          </label>
+          <label class="flex items-center gap-2">
+            <span class="whitespace-nowrap">{{ localTrigger === 'breakpoint' ? translate('curve.localMinInterval') : translate('curve.localInterval') }}</span>
             <el-select v-model="localIntervalMs" size="small" style="width: 6rem" :disabled="sampling">
               <el-option v-for="interval in LOCAL_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
             </el-select>
@@ -98,7 +117,9 @@
           <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
           <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
           <span>{{ translate('curve.localStatus') }}: <b>{{ (sampling && localStatusInfo?.running !== false) ? translate('curve.localRunning') : translate('curve.localStopped') }}</b></span>
-          <span>Halt: <b>{{ localStatusInfo?.halt === false ? 'OFF' : (localStatusInfo?.halt === true ? 'ON' : '-') }}</b></span>
+          <span v-if="localTrigger === 'periodic'">Halt: <b>{{ localStatusInfo?.halt === false ? 'OFF' : (localStatusInfo?.halt === true ? 'ON' : '-') }}</b></span>
+          <span v-else>{{ translate('curve.localHits') }}: <b>{{ localStatusInfo?.hits ?? localHits ?? '-' }}</b></span>
+          <span v-if="localTrigger === 'breakpoint'">{{ translate('curve.localSampled') }}: <b>{{ localStatusInfo?.sampled ?? localSampled ?? '-' }}</b></span>
           <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
           <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
           <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
@@ -142,7 +163,12 @@
         </label>
       </div>
       <div class="mt-1 text-xs opacity-70">
-        {{ isLocalSource ? translate('curve.localModeHint') : (isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint')) }}
+        {{ isLocalSource
+          ? (localTrigger === 'breakpoint' ? translate('curve.localBreakpointHint') : translate('curve.localModeHint'))
+          : (isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint')) }}
+      </div>
+      <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs" style="color: #dc2626">
+        {{ localBreakpointError }}
       </div>
     </section>
 
@@ -372,8 +398,10 @@ import {
   CurveLocalError,
   getLocalCurveFrames,
   getLocalCurveStatus,
+  parseBreakpointAddressInput,
   startLocalCurve,
   stopLocalCurve,
+  type CurveLocalTrigger,
   type LocalCurveStatus,
 } from '@/api/curveLocal'
 
@@ -471,6 +499,26 @@ const isDebugMode = computed(() => samplingMode.value === 'debug')
 const samplingSource = ref<SamplingSource>('web')
 const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
+/** Phase 2 触发方式：periodic（周期）或 breakpoint（FPB 命中触发）。 */
+const localTrigger = ref<CurveLocalTrigger>('periodic')
+/** 断点地址输入（十六进制，可带/不带 0x；Thumb bit0 忽略）。 */
+const localBreakpointInput = ref('')
+const localHits = ref<number | null>(null)
+const localSampled = ref<number | null>(null)
+const parsedBreakpointAddress = computed(() => (localTrigger.value === 'breakpoint'
+  ? parseBreakpointAddressInput(localBreakpointInput.value)
+  : null))
+const localBreakpointError = computed(() => {
+  if (!isLocalSource.value || localTrigger.value !== 'breakpoint') return ''
+  if (!localBreakpointInput.value.trim()) return translate('curve.localBreakpointRequired')
+  if (parsedBreakpointAddress.value === null) return translate('curve.localBreakpointInvalid')
+  return ''
+})
+const localStartDisabled = computed(() => {
+  if (seriesList.value.length === 0) return true
+  if (!isLocalSource.value) return false
+  return localTrigger.value === 'breakpoint' && parsedBreakpointAddress.value === null
+})
 /** 本地采样器是否已 start（用于保证 stop/卸载时 POST /api/curve/stop）。 */
 const localActive = ref(false)
 const localStatusInfo = shallowRef<LocalCurveStatus | null>(null)
@@ -1146,6 +1194,8 @@ async function refreshLocalStatus(): Promise<void> {
   localStatusInfo.value = status
   localInvalidCount.value = status.invalid
   localOverwrittenCount.value = status.overwritten
+  localHits.value = status.hits ?? null
+  localSampled.value = status.sampled ?? null
   if (status.running !== true && status.error > 0) {
     localGap.value = true
   }
@@ -1204,9 +1254,26 @@ async function startLocalSampling(): Promise<void> {
   notice.value = null
   // 纯固定地址/固定指针表达式不需要暂停核心；只有 reg/cfa（栈帧）才必须 halt。
   // 这样全局变量/指针成员可走 5 ms 本地轮询（~200 Hz）且不打断目标运行。
+  const trigger = localTrigger.value
   const needsHalt = entries.some((entry) => addressExprRegisters(entry.expr).size > 0)
+  let breakpointAddress: number | undefined
+  if (trigger === 'breakpoint') {
+    const parsed = parseBreakpointAddressInput(localBreakpointInput.value)
+    if (parsed === null) {
+      notice.value = {type: 'error', title: translate('curve.localBreakpointInvalid')}
+      return
+    }
+    breakpointAddress = parsed
+  }
   try {
-    await startLocalCurve({intervalUs: localIntervalMs.value * 1000, halt: needsHalt, series: specs})
+    await startLocalCurve({
+      intervalUs: localIntervalMs.value * 1000,
+      trigger,
+      breakpointAddress,
+      // breakpoint 命中时核心已暂停，halt 字段无意义；只在周期模式下发。
+      halt: trigger === 'periodic' ? needsHalt : undefined,
+      series: specs,
+    })
   } catch (error) {
     statusError.value = true
     notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
@@ -1224,6 +1291,8 @@ async function startLocalSampling(): Promise<void> {
   localFramesReceived.value = 0
   localInvalidCount.value = 0
   localOverwrittenCount.value = 0
+  localHits.value = null
+  localSampled.value = null
   localGap.value = false
   localStatusInfo.value = null
   localActive.value = true
@@ -1314,8 +1383,18 @@ async function onSamplingSourceChange(): Promise<void> {
     localFramesReceived.value = 0
     localInvalidCount.value = 0
     localOverwrittenCount.value = 0
+    localHits.value = null
+    localSampled.value = null
     localGap.value = false
   }
+  scheduleDraw()
+}
+
+/** 切换 Trigger 时清空上一次断点统计/状态显示（周期模式完全兼容）。 */
+function onLocalTriggerChange(): void {
+  localHits.value = null
+  localSampled.value = null
+  localStatusInfo.value = null
   scheduleDraw()
 }
 
@@ -2436,6 +2515,10 @@ onBeforeUnmount(() => {
 .unsampleable-text {
   font-size: 0.7rem;
   color: #9ca3af;
+}
+
+.breakpoint-input.is-invalid :deep(.el-input__wrapper) {
+  box-shadow: 0 0 0 1px #dc2626 inset;
 }
 
 .mode-badge {
