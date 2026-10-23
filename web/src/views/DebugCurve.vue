@@ -560,21 +560,16 @@
         <span v-if="targetError" style="color: #dc2626">{{ targetError }}</span>
         <span v-else-if="targetRaw" class="opacity-70">
           <template v-if="detectedTarget.detected">
-            {{ translate('curve.targetDetected') }}: {{ detectedTarget.baseGroup || detectedTarget.series || '-' }}
+            {{ translate('curve.targetDetected') }}:
+            <template v-if="detectedTarget.series">{{ detectedTarget.series }} · </template>
+            {{ detectedTarget.baseGroup || '-' }}
             · DEV_ID {{ detectedTarget.devId || '-' }}
             · Flash {{ detectedTarget.flashKib || '-' }} KiB
-            · {{ translate('curve.targetConfidence') }} {{ detectedTarget.confidence }}
+            <template v-if="autoTargetModel">
+              · {{ translate('curve.targetAutoModel') }}: {{ autoTargetModel.label }}
+            </template>
           </template>
           <template v-else>{{ translate('curve.targetNotDetected') }}</template>
-        </span>
-        <label class="flex items-center gap-1">
-          <span>{{ translate('curve.targetProfile') }}</span>
-          <el-select v-model="selectedTargetProfileId" size="small" clearable style="width: 12rem" :placeholder="translate('curve.targetProfileNone')">
-            <el-option v-for="profile in knownTargetProfiles" :key="profile.id" :value="profile.id" :label="`${profile.id} (${profile.flashKib} KiB)`"/>
-          </el-select>
-        </label>
-        <span v-if="selectedTargetProfile" class="opacity-70">
-          {{ translate('curve.targetMatch') }}: {{ targetMatch.level }}
         </span>
         <span v-if="elfFlashRange" class="font-mono opacity-70">
           ELF: 0x{{ elfFlashRange[0].toString(16).toUpperCase() }}–0x{{ elfFlashRange[1].toString(16).toUpperCase() }}
@@ -931,11 +926,7 @@ import {getTargetInfo, type TargetInfo} from '@/api/apiTarget'
 import {
   allTargetProfiles,
   compactTargetProfileApi,
-  compareDetectedToProfile,
-  detectionLimitations,
-  findKnownTargetProfile,
   parseTargetDetection,
-  type CompactTargetProfile,
 } from '@/utils/targetProfile'
 import {parseElfImage} from '@/utils/firmwareImage'
 import {
@@ -1264,7 +1255,6 @@ const currentFunctionOnly = ref(false)
 const targetRaw = shallowRef<TargetInfo | null>(null)
 const targetLoading = ref(false)
 const targetError = ref('')
-const selectedTargetProfileId = ref('')
 const elfFlashRange = shallowRef<[number, number] | null>(null)
 const watchAddressInput = ref('')
 const watchSize = ref<1 | 2 | 4>(4)
@@ -3537,10 +3527,41 @@ function elfFirstLoadableSegment(buffer: ArrayBuffer): {address: number; bytes: 
 
 const detectedTarget = computed(() => parseTargetDetection(targetRaw.value))
 const knownTargetProfiles = allTargetProfiles()
-const selectedTargetProfile = computed(() => findKnownTargetProfile(selectedTargetProfileId.value))
-const compactTarget = computed<CompactTargetProfile>(() => compactTargetProfileApi(detectedTarget.value, selectedTargetProfile.value))
-const targetMatch = computed(() => compareDetectedToProfile(detectedTarget.value, selectedTargetProfile.value))
-const targetLimitations = computed(() => detectionLimitations(detectedTarget.value, selectedTargetProfile.value))
+
+/**
+ * task-49：目标检测区简化后的内置自动匹配 adapter。
+ * task-48 的 target-eng API 尚未落库；先在本页用 KNOWN_TARGET_PROFILES 按
+ * DEV_ID -> Flash 做只读匹配（不暴露 profile 选择/不写 selected profile）。
+ * task-48 API 就绪后只需替换此函数实现，UI/诊断字段不变。
+ */
+interface AutoTargetModel {
+  label: string
+  basis: 'dev-id' | 'flash' | 'detected-group'
+}
+const autoTargetModel = computed<AutoTargetModel | null>(() => {
+  const detected = detectedTarget.value
+  if (!detected.detected) return null
+  const seriesKey = (value: string | undefined) => (value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
+  const detectedSeries = seriesKey(detected.series)
+  const seriesCompatible = (series: string | undefined) => {
+    if (!detectedSeries || !series) return true
+    return seriesKey(series) === detectedSeries
+  }
+  if (detected.devId) {
+    const byDevId = knownTargetProfiles.find((profile) => profile.devId === detected.devId
+      && seriesCompatible(profile.series))
+    if (byDevId) return {label: byDevId.mcu || byDevId.id, basis: 'dev-id'}
+  }
+  if (detected.flashKib) {
+    // 只有系列兼容时才用 Flash 兜底，避免把 H7 的 1 MiB 误配到 F4 型号。
+    const byFlash = knownTargetProfiles.find((profile) => profile.flashKib === detected.flashKib
+      && seriesCompatible(profile.series))
+    if (byFlash) return {label: byFlash.mcu || byFlash.id, basis: 'flash'}
+  }
+  return {label: detected.baseGroup || detected.group || detected.series || '-', basis: 'detected-group'}
+})
+/** 内置自动匹配仅用于显示/诊断；Flash 超界仍以 detected flash 为准。 */
+const compactTarget = computed(() => compactTargetProfileApi(detectedTarget.value, null))
 const targetFlashWarning = computed(() => {
   const flash = compactTarget.value.flashRange
   const elf = elfFlashRange.value
@@ -4233,13 +4254,11 @@ const diagnosticsData = computed(() => {
     },
     target: {
       detected: detectedTarget.value.detected,
+      series: detectedTarget.value.series,
       group: detectedTarget.value.baseGroup,
       devId: detectedTarget.value.devId,
       flashKib: detectedTarget.value.flashKib,
-      confidence: detectedTarget.value.confidence,
-      selectedProfile: selectedTargetProfile.value?.id ?? null,
-      match: targetMatch.value.level,
-      limitations: targetLimitations.value,
+      autoModel: autoTargetModel.value,
       elfFlashRange: elfFlashRange.value,
       warning: targetFlashWarning.value,
     },

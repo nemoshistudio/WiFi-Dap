@@ -819,5 +819,6 @@ export default {
         conditionJump: '跳转条件触发',
         conditionAddressRequired: '请输入条件地址',
         conditionInvalid: '条件地址/对齐/值无效',
+        targetAutoModel: '自动匹配',
     },
 }

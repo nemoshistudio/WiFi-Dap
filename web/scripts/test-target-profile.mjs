@@ -1,17 +1,15 @@
 #!/usr/bin/env node
 /**
- * Pure-function tests for web/src/utils/targetProfile.ts (task-36).
+ * Pure-function tests for web/src/utils/targetProfile.ts (task-36/48).
  *
  * Covers:
- *  - known MCU/board profile list (order code/package/flashKib/ramRanges);
+ *  - built-in STM32F1/F4/G4/H7 profile list invariants (one profile per
+ *    DEV_ID+FSIZE pair, order code/package/flashKib/ramRanges);
  *  - FSIZE density codes + candidate derivation (STM32F103x8 etc.);
- *  - /api/target/info v3 parsing (+ legacy v2 fallback);
- *  - detected-vs-selected-profile comparison levels;
- *  - limitation codes (SWD cannot read package / flash boundary);
- *  - custom profile JSON parsing/validation (ramRanges forms);
- *  - localStorage persistence with an injected fake storage;
+ *  - /api/target/info v3 parsing + legacy fallback (device/flash/idcode);
+ *  - automatic best-profile matching / multi-candidate ranking;
  *  - compact profile API + address classification (DebugCurve hand-off);
- *  - diagnostics JSON.
+ *  - copy-diagnostics JSON (no profile editor state).
  *
  * Usage: node scripts/test-target-profile.mjs
  */
@@ -60,7 +58,7 @@ const F103C8_DETECTION = {
     detection_confidence: 'flash-narrowed',
     supported: false,
     cpuid: 0x410fc231,
-    idcode: 0x10036410,
+    idcode: '0x10036410',
     uid: '00112233445566778899aabb',
     swd_clock_hz: 2000000,
 }
@@ -89,55 +87,49 @@ const UNKNOWN_DEVICE_DETECTION = {
     supported: false,
 }
 
-function fakeStorage(initial = {}) {
-    const map = new Map(Object.entries(initial))
-    return {
-        getItem: (key) => (map.has(key) ? map.get(key) : null),
-        setItem: (key, value) => {
-            map.set(key, String(value))
-        },
-        removeItem: (key) => {
-            map.delete(key)
-        },
-        dump: () => Object.fromEntries(map),
-    }
+function cloneProfile(base, overrides) {
+    return {...base, ramRanges: base.ramRanges.map((range) => ({...range})), ...overrides}
 }
 
-// 1. known profiles ----------------------------------------------------------
-section('known profiles')
-check('8 known profiles', tp.KNOWN_TARGET_PROFILES.length === 8, `${tp.KNOWN_TARGET_PROFILES.length}`)
-const ids = tp.KNOWN_TARGET_PROFILES.map((profile) => profile.id)
+// 1. built-in profile list ---------------------------------------------------
+section('built-in profiles')
+const profiles = tp.KNOWN_TARGET_PROFILES
+check('16 built-in profiles', profiles.length === 16, `${profiles.length}`)
+const ids = profiles.map((profile) => profile.id)
 check('profile ids unique', new Set(ids).size === ids.length)
-const f103c8 = tp.findKnownTargetProfile('stm32f103c8t6')
-check('F103C8T6 profile exists', Boolean(f103c8))
-eq('F103C8T6 orderCode', f103c8.orderCode, 'STM32F103C8T6')
+const pairKeys = profiles.map((profile) => `${profile.devId}/${profile.flashKib}`)
+check('one profile per DEV_ID+FSIZE pair', new Set(pairKeys).size === pairKeys.length, pairKeys.join(','))
+check('all profiles are builtin', profiles.every((profile) => profile.source === 'builtin'))
+check('order code/mcu/name consistent', profiles.every((profile) => profile.orderCode === profile.mcu && profile.name === profile.mcu))
+check('series limited to F1/F4/G4/H7', profiles.every((profile) => ['STM32F1', 'STM32F4', 'STM32G4', 'STM32H7'].includes(profile.series)))
+check('packages present', profiles.every((profile) => typeof profile.package === 'string' && profile.package.length > 0))
+check('flash sizes positive', profiles.every((profile) => profile.flashKib > 0 && Number.isInteger(profile.flashKib)))
+check('dev ids are 12-bit', profiles.every((profile) => profile.devId > 0 && profile.devId <= 0xfff))
+check('ram ranges valid', profiles.every((profile) => profile.ramRanges.length > 0 && profile.ramRanges.every((range) => range.start > 0 && range.size > 0)))
+const seriesSet = new Set(profiles.map((profile) => profile.series))
+check('F1/F4/G4/H7 coverage', ['STM32F1', 'STM32F4', 'STM32G4', 'STM32H7'].every((series) => seriesSet.has(series)), [...seriesSet].join(','))
+const expectedOrderCodes = [
+    'STM32F103C8T6', 'STM32F103CBT6', 'STM32F103RCT6', 'STM32F103ZET6', 'STM32F107VCT6',
+    'STM32F401CCU6', 'STM32F411CEU6', 'STM32F407VGT6', 'STM32F429IGT6', 'STM32F446RET6',
+    'STM32G431CBT6', 'STM32G474RET6', 'STM32H723VGT6', 'STM32H743VIT6', 'STM32H743VGT6', 'STM32H750VBT6',
+]
+check('expected common order codes present', expectedOrderCodes.every((code) => profiles.some((profile) => profile.orderCode === code)))
+const f103c8 = profiles.find((profile) => profile.orderCode === 'STM32F103C8T6')
 eq('F103C8T6 package', f103c8.package, 'LQFP48')
 eq('F103C8T6 flashKib', f103c8.flashKib, 64)
 eq('F103C8T6 devId', f103c8.devId, 0x410)
-eq('F103C8T6 series', f103c8.series, 'STM32F1')
 check('F103C8T6 RAM range', f103c8.ramRanges.length === 1
     && f103c8.ramRanges[0].start === 0x20000000
     && f103c8.ramRanges[0].size === 20 * 1024)
-const f103cb = tp.findKnownTargetProfile('stm32f103cbt6')
-eq('F103CBT6 flashKib', f103cb.flashKib, 128)
-const h723 = tp.findKnownTargetProfile('stm32h723vgt6')
-eq('H723VGT6 flashKib', h723.flashKib, 1024)
-eq('H723VGT6 devId', h723.devId, 0x483)
-check('H723VGT6 AXI RAM', h723.ramRanges.some((range) => range.start === 0x24000000 && range.size === 320 * 1024))
-const h743 = tp.findKnownTargetProfile('stm32h743vit6')
-eq('H743VIT6 flashKib', h743.flashKib, 2048)
-eq('H743VIT6 devId', h743.devId, 0x450)
-check('F407VGT6 present', Boolean(tp.findKnownTargetProfile('stm32f407vgt6')))
-check('F429IGT6 present', Boolean(tp.findKnownTargetProfile('stm32f429igt6')))
-check('unknown profile id -> null', tp.findKnownTargetProfile('nope') === null)
-check('allTargetProfiles appends custom', tp.allTargetProfiles([{id: 'custom:x'}]).length === 9)
+check('findBuiltinTargetProfile', tp.findBuiltinTargetProfile('stm32f103c8t6')?.orderCode === 'STM32F103C8T6')
+check('findBuiltinTargetProfile miss', tp.findBuiltinTargetProfile('nope') === null)
+eq('allTargetProfiles compat length', tp.allTargetProfiles().length, 16)
 
-// 2. confidence + density ----------------------------------------------------
-section('confidence/density helpers')
+// 2. helper functions --------------------------------------------------------
+section('helpers')
 eq('confidence flash-narrowed', tp.parseDetectionConfidence('flash-narrowed'), 'flash-narrowed')
 eq('confidence group', tp.parseDetectionConfidence('GROUP'), 'group')
-eq('confidence unknown fallback', tp.parseDetectionConfidence('something-else'), 'unknown')
-eq('confidence null fallback', tp.parseDetectionConfidence(null), 'unknown')
+eq('confidence unknown fallback', tp.parseDetectionConfidence('nope'), 'unknown')
 eq('density 64K', tp.flashDensityCode(64), 'x8')
 eq('density 128K', tp.flashDensityCode(128), 'xB')
 eq('density 1024K', tp.flashDensityCode(1024), 'xG')
@@ -148,6 +140,8 @@ eq('formatHex32', tp.formatHex32(0x08000000), '0x08000000')
 eq('formatFlashKib 64', tp.formatFlashKib(64), '64 KiB')
 eq('formatFlashKib 1024', tp.formatFlashKib(1024), '1024 KiB (1 MiB)')
 eq('formatRamRange', tp.formatRamRange({start: 0x20000000, size: 20 * 1024}), '0x20000000-0x20005000 (20 KiB)')
+check('flashRangeOf', JSON.stringify(tp.flashRangeOf(64)) === JSON.stringify([0x08000000, 0x08010000]))
+eq('flashRangeOf zero', tp.flashRangeOf(0), null)
 
 // 3. candidate derivation ----------------------------------------------------
 section('candidate derivation')
@@ -163,9 +157,7 @@ check('range token expanded (9 candidates)', ranged.length === 9, JSON.stringify
 check('range expansion contains STM32F479xG', ranged.includes('STM32F479xG'))
 const wbCandidates = tp.deriveOrderCodeCandidates('STM32WB10/WB15/WB20/WB25/WB30/WB35 [512 KiB]', 512)
 check('WB candidates have no density letter', wbCandidates.every((item) => !item.includes('x')), JSON.stringify(wbCandidates))
-check('WB candidates count', wbCandidates.length === 6)
-const fallbackDensity = tp.deriveOrderCodeCandidates('STM32F100/F101/F102/F103 (MD)', 64)
-check('density derived from flashKib when hint missing', fallbackDensity.includes('STM32F103x8'))
+check('density derived from flashKib when hint missing', tp.deriveOrderCodeCandidates('STM32F100/F101/F102/F103 (MD)', 64).includes('STM32F103x8'))
 check('unknown group -> no candidates', tp.deriveOrderCodeCandidates('unknown (DEV_ID=0x410)', 0).length === 0)
 check('empty group -> no candidates', tp.deriveOrderCodeCandidates('', 64).length === 0)
 
@@ -175,7 +167,7 @@ check('F103C8T6 matches F103x8', tp.orderCodeMatchesCandidate('STM32F103C8T6', '
 check('F103C8T6 does not match F100x8', !tp.orderCodeMatchesCandidate('STM32F103C8T6', 'STM32F100x8'))
 check('F103C8T6 does not match F103xB', !tp.orderCodeMatchesCandidate('STM32F103C8T6', 'STM32F103xB'))
 check('H743VIT6 matches H743xI', tp.orderCodeMatchesCandidate('STM32H743VIT6', 'STM32H743xI'))
-check('empty pattern', !tp.orderCodeMatchesCandidate('STM32F103C8T6', ''))
+check('empty pattern rejected', !tp.orderCodeMatchesCandidate('STM32F103C8T6', ''))
 check('regex chars escaped', !tp.orderCodeMatchesCandidate('STM32F103C8T6', 'STM32F1.3x8'))
 
 // 5. detection parsing -------------------------------------------------------
@@ -185,7 +177,6 @@ eq('F103 devId', detectedF103.devId, 0x410)
 eq('F103 flashKib', detectedF103.flashKib, 64)
 eq('F103 density', detectedF103.density, 'x8')
 eq('F103 baseGroup', detectedF103.baseGroup, 'STM32F100/F101/F102/F103 (MD)')
-eq('F103 confidence', detectedF103.confidence, 'flash-narrowed')
 eq('F103 core', detectedF103.core, 'Cortex-M3')
 eq('F103 supported false', detectedF103.supported, false)
 check('F103 candidates', detectedF103.candidates.includes('STM32F103x8'))
@@ -193,156 +184,125 @@ const detectedLegacy = tp.parseTargetDetection({
     detected: true,
     device: 'STM32H723/H725/H730/H733/H735',
     flash_size: 1048576,
+    idcode: '0x10036483',
     supported: true,
 })
 eq('legacy flashKib from flash_size', detectedLegacy.flashKib, 1024)
-eq('legacy inferred confidence', detectedLegacy.confidence, 'group')
-const notDetected = tp.parseTargetDetection(null)
-eq('null detection -> detected false', notDetected.detected, false)
-eq('null detection -> confidence unknown', notDetected.confidence, 'unknown')
+eq('legacy devId derived from idcode', detectedLegacy.devId, 0x483)
+eq('null detection -> detected false', tp.parseTargetDetection(null).detected, false)
+check('unknown-device detection parses', tp.parseTargetDetection(UNKNOWN_DEVICE_DETECTION).devId === 0x123)
 
-// 6. profile comparison ------------------------------------------------------
-section('profile comparison')
-const match = tp.compareDetectedToProfile(F103C8_DETECTION, f103c8)
-eq('F103C8T6 profile match level', match.level, 'match')
-eq('F103 devId matches', match.devIdMatches, true)
-eq('F103 flash matches', match.flashMatches, true)
-eq('F103 candidate matches', match.candidateMatches, true)
-const flashMismatch = tp.compareDetectedToProfile(F103C8_DETECTION, f103cb)
-eq('F103CBT6 vs 64KiB -> flash-mismatch', flashMismatch.level, 'flash-mismatch')
-const devMismatch = tp.compareDetectedToProfile(F103C8_DETECTION, tp.findKnownTargetProfile('stm32f407vgt6'))
-eq('F407 vs F1 -> dev-id-mismatch', devMismatch.level, 'dev-id-mismatch')
-eq('no detection', tp.compareDetectedToProfile(null, f103c8).level, 'no-detection')
-eq('no profile', tp.compareDetectedToProfile(F103C8_DETECTION, null).level, 'no-profile')
-const unknownCompare = tp.compareDetectedToProfile(UNKNOWN_DEVICE_DETECTION, {id: 'custom:x', devId: 0, flashKib: 0})
-eq('unknown detection -> unverified', unknownCompare.level, 'unverified')
-eq('H723 profile match', tp.compareDetectedToProfile(H723_DETECTION, h723).level, 'match')
-
-// 7. limitations -------------------------------------------------------------
-section('limitations')
-const f103Limits = tp.detectionLimitations(F103C8_DETECTION, null)
-check('no-detection limitation first', tp.detectionLimitations(null, null)[0] === 'no-detection')
-check('F103: no package from SWD', f103Limits.includes('swd-no-package'))
-check('F103: flash unsupported', f103Limits.includes('flash-unsupported'))
-check('F103: profile not selected', f103Limits.includes('profile-not-selected'))
-check('F103: flash-narrowed has no group limitation', !f103Limits.includes('dev-id-group'))
-const f103MatchedLimits = tp.detectionLimitations(F103C8_DETECTION, f103c8)
-check('matched profile clears profile-not-selected', !f103MatchedLimits.includes('profile-not-selected'))
-check('matched profile still cannot verify package', f103MatchedLimits.includes('swd-no-package'))
-const groupLimits = tp.detectionLimitations({
-    detected: true,
-    dev_id: 0x410,
-    flash_kib: 0,
-    model_candidates: 'STM32F100/F101/F102/F103 (MD)',
-    detection_confidence: 'group',
-    supported: false,
-}, null)
-check('group confidence -> dev-id-group', groupLimits.includes('dev-id-group'))
-check('group confidence -> flash-size-unknown', groupLimits.includes('flash-size-unknown'))
-check('flash mismatch limitation', tp.detectionLimitations(F103C8_DETECTION, f103cb).includes('profile-flash-mismatch'))
-check('order-code mismatch limitation', tp.detectionLimitations(H723_DETECTION, f103c8).includes('profile-dev-id-mismatch'))
-check('limitation texts are English strings', typeof tp.LIMITATION_TEXT_EN['swd-no-package'] === 'string'
-    && tp.LIMITATION_TEXT_EN['swd-no-package'].includes('SWD'))
-
-// 8. custom profiles ---------------------------------------------------------
-section('custom profiles')
-const customText = JSON.stringify({
-    name: 'My F103 board',
-    mcu: 'STM32F103C8T6',
-    package: 'LQFP48',
-    flashKib: 64,
-    ramRanges: ['0x20000000-0x20005000', {start: '0x10000000', size: '1KiB'}],
-    devId: '0x410',
+// 6. automatic profile matching ---------------------------------------------
+section('automatic profile matching')
+const f103Match = tp.autoMatchTargetProfile(F103C8_DETECTION)
+check('F103C8T6 detection auto-matches', f103Match?.profile.orderCode === 'STM32F103C8T6', JSON.stringify(f103Match?.profile?.orderCode))
+eq('F103C8T6 match confidence', f103Match.confidence, 'exact')
+eq('F103C8T6 alternatives empty', f103Match.alternatives.length, 0)
+const cbDetection = {...F103C8_DETECTION, model_candidates: 'STM32F100/F101/F102/F103 (MD) [xB, 128 KiB]', flash_kib: 128, flash_size: 131072}
+check('F103CB detection auto-matches F103CBT6', tp.autoMatchTargetProfile(cbDetection)?.profile.orderCode === 'STM32F103CBT6')
+eq('0x410 + 32KiB (no builtin) -> null', tp.autoMatchTargetProfile({...F103C8_DETECTION, flash_kib: 32, flash_size: 32768}), null)
+check('F407VGT6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x413, flash_kib: 1024,
+    model_candidates: 'STM32F405/F407/F415/F417 [xG, 1024 KiB]',
+})?.profile.orderCode === 'STM32F407VGT6')
+check('H723VGT6 auto-matches', tp.autoMatchTargetProfile(H723_DETECTION)?.profile.orderCode === 'STM32H723VGT6')
+check('H743VIT6 auto-matches (2 MiB)', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x450, flash_kib: 2048,
+    model_candidates: 'STM32H743/H745/H747/H750/H755/H757 [xI, 2048 KiB]',
+})?.profile.orderCode === 'STM32H743VIT6')
+check('H743VGT6 auto-matches (1 MiB)', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x450, flash_kib: 1024,
+    model_candidates: 'STM32H743/H745/H747/H750/H755/H757',
+})?.profile.orderCode === 'STM32H743VGT6')
+check('H750VBT6 auto-matches (128 KiB)', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x450, flash_kib: 128,
+    model_candidates: 'STM32H750 [xB, 128 KiB]',
+})?.profile.orderCode === 'STM32H750VBT6')
+check('F401CCU6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x423, flash_kib: 256,
+    model_candidates: 'STM32F401xB/F401xC [xC, 256 KiB]',
+})?.profile.orderCode === 'STM32F401CCU6')
+check('F411CEU6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x431, flash_kib: 512,
+    model_candidates: 'STM32F411 [xE, 512 KiB]',
+})?.profile.orderCode === 'STM32F411CEU6')
+check('F446RET6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x421, flash_kib: 512,
+    model_candidates: 'STM32F446',
+})?.profile.orderCode === 'STM32F446RET6')
+check('F107VCT6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x418, flash_kib: 256,
+    model_candidates: 'STM32F105/F107',
+})?.profile.orderCode === 'STM32F107VCT6')
+check('G431CBT6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x468, flash_kib: 128,
+    model_candidates: 'STM32G431/G441 [xB, 128 KiB]',
+})?.profile.orderCode === 'STM32G431CBT6')
+check('G474RET6 auto-matches', tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x469, flash_kib: 512,
+    model_candidates: 'STM32G474/G484 [xE, 512 KiB]',
+})?.profile.orderCode === 'STM32G474RET6')
+check('unknown DEV_ID -> null', tp.autoMatchTargetProfile(UNKNOWN_DEVICE_DETECTION) === null)
+check('DEV_ID without FSIZE -> null', tp.autoMatchTargetProfile({detected: true, dev_id: 0x410, flash_kib: 0}) === null)
+check('not detected -> null', tp.autoMatchTargetProfile(null) === null)
+check('legacy idcode detection auto-matches', tp.autoMatchTargetProfile({
+    detected: true, device: 'STM32H723/H725/H730/H733/H735', flash_size: 1048576, idcode: '0x10036483',
+})?.profile.orderCode === 'STM32H723VGT6')
+const noCandidatesMatch = tp.autoMatchTargetProfile({
+    detected: true, dev_id: 0x410, flash_kib: 64, model_candidates: 'unknown (DEV_ID=0x410)',
 })
-const customParsed = tp.parseCustomTargetProfileJson(customText)
-check('custom profile parsed', customParsed.ok, customParsed.error)
-eq('custom profile mcu', customParsed.profile.mcu, 'STM32F103C8T6')
-eq('custom profile series derived', customParsed.profile.series, 'STM32F1')
-eq('custom profile source', customParsed.profile.source, 'custom')
-check('custom profile id prefixed', customParsed.profile.id.startsWith('custom:'))
-eq('custom profile RAM ranges', customParsed.profile.ramRanges.length, 2)
-check('custom profile RAM size', customParsed.profile.ramRanges.some((range) => range.size === 20 * 1024))
-eq('custom profile devId parsed', customParsed.profile.devId, 0x410)
-check('custom profile id is stable', tp.parseCustomTargetProfileJson(customText).profile.id === customParsed.profile.id)
-const rangeForms = tp.parseCustomTargetProfileJson(JSON.stringify({
-    mcu: 'STM32F103C8T6',
-    flashKib: 64,
-    ramRanges: [{start: 0x20000000, end: 0x20005000}, '0x10000000+1KiB'],
-}))
-check('RAM range object/end + start+size forms', rangeForms.ok
-    && rangeForms.profile.ramRanges.length === 2
-    && rangeForms.profile.ramRanges.some((range) => range.start === 0x20000000 && range.size === 20 * 1024)
-    && rangeForms.profile.ramRanges.some((range) => range.start === 0x10000000 && range.size === 1024))
-check('empty JSON rejected', !tp.parseCustomTargetProfileJson('').ok)
-check('invalid JSON rejected', !tp.parseCustomTargetProfileJson('{nope').ok)
-check('missing mcu/flash rejected', !tp.parseCustomTargetProfileJson('{"name":"x"}').ok)
-check('flashKib=0 rejected', !tp.parseCustomTargetProfileJson('{"mcu":"STM32F103C8T6","flashKib":0}').ok)
-check('bad devId rejected', !tp.parseCustomTargetProfileJson('{"mcu":"STM32F103C8T6","flashKib":64,"devId":"0x1234"}').ok)
-check('overlapping RAM rejected', !tp.parseCustomTargetProfileJson(JSON.stringify({
-    mcu: 'STM32F103C8T6',
-    flashKib: 64,
-    ramRanges: [{start: 0x20000000, size: 0x1000}, {start: 0x20000800, size: 0x1000}],
-})).ok)
-check('stored profile normalizes', tp.normalizeStoredTargetProfile(JSON.parse(JSON.stringify(customParsed.profile))) !== null)
-check('invalid stored profile -> null', tp.normalizeStoredTargetProfile({name: 'x'}) === null)
+check('no candidate list still matches via DEV_ID+FSIZE', noCandidatesMatch?.profile.orderCode === 'STM32F103C8T6')
+eq('no candidate list -> flash confidence', noCandidatesMatch.confidence, 'flash')
 
-// 9. persistence -------------------------------------------------------------
-section('persistence')
-const storage = fakeStorage()
-check('storage count matches', tp.KNOWN_TARGET_PROFILES.length === ids.length)
-eq('load custom profiles empty', tp.loadCustomProfiles(storage).length, 0)
-check('save custom profiles', tp.saveCustomProfiles([customParsed.profile], storage))
-eq('load custom profiles roundtrip', tp.loadCustomProfiles(storage).length, 1)
-eq('load custom profile mcu', tp.loadCustomProfiles(storage)[0].mcu, 'STM32F103C8T6')
-eq('load selected id empty', tp.loadSelectedProfileId(storage), null)
-check('save selected id', tp.saveSelectedProfileId('stm32f103c8t6', storage))
-eq('load selected id', tp.loadSelectedProfileId(storage), 'stm32f103c8t6')
-const restoredKnown = tp.resolveRestoredTargetProfiles(storage)
-eq('restore known selection', restoredKnown.selectedProfile?.id, 'stm32f103c8t6')
-eq('restore custom list too', restoredKnown.customProfiles.length, 1)
-tp.saveSelectedProfileId(customParsed.profile.id, storage)
-eq('restore custom selection', tp.resolveRestoredTargetProfiles(storage).selectedProfile?.mcu, 'STM32F103C8T6')
-tp.saveSelectedProfileId(null, storage)
-eq('clear selected id', tp.loadSelectedProfileId(storage), null)
-eq('unknown selected id -> null', tp.resolveRestoredTargetProfiles(fakeStorage({
-    [tp.TARGET_PROFILE_STORAGE_KEYS.selectedProfileId]: 'gone',
-})).selectedProfile, null)
-eq('broken custom JSON -> empty', tp.loadCustomProfiles(fakeStorage({
-    [tp.TARGET_PROFILE_STORAGE_KEYS.customProfiles]: '{bad',
-})).length, 0)
-eq('null storage custom', tp.loadCustomProfiles(null).length, 0)
-eq('null storage selected', tp.loadSelectedProfileId(null), null)
-check('null storage save false', tp.saveCustomProfiles([], null) === false)
-check('upsert replaces by id', tp.upsertCustomProfile([customParsed.profile], {...customParsed.profile, name: 'renamed'})[0].name === 'renamed')
-check('remove custom profile', tp.removeCustomProfile([customParsed.profile], customParsed.profile.id).length === 0)
+// multi-candidate ranking (synthetic duplicate DEV_ID+FSIZE profiles)
+const syntheticProfiles = [
+    cloneProfile(f103c8, {id: 'synthetic-flash-only', orderCode: 'STM32F199C8T6', name: 'STM32F199C8T6', mcu: 'STM32F199C8T6'}),
+    cloneProfile(f103c8, {id: 'synthetic-exact', orderCode: 'STM32F103C8T6'}),
+    cloneProfile(f103c8, {id: 'synthetic-exact-2', orderCode: 'STM32F101C8T6', name: 'STM32F101C8T6', mcu: 'STM32F101C8T6'}),
+]
+const ranked = tp.rankTargetProfileMatches(F103C8_DETECTION, syntheticProfiles)
+eq('ranking keeps all DEV_ID+FSIZE matches', ranked.length, 3)
+eq('ranking puts exact candidate matches first', ranked[0].confidence, 'exact')
+check('ranking exact entries ordered by profile list', ranked[0].profile.id === 'synthetic-exact')
+check('ranking flash-only last', ranked[2].profile.id === 'synthetic-flash-only')
+check('ranked top equals auto match', tp.autoMatchTargetProfile(F103C8_DETECTION)?.profile.orderCode === 'STM32F103C8T6')
+const nullCandidateRanked = tp.rankTargetProfileMatches(
+    {...detectedF103, candidates: []},
+    [cloneProfile(f103c8, {id: 'synthetic-flash-only', orderCode: 'STM32F199C8T6'})],
+)
+eq('empty candidate list ranks flash', nullCandidateRanked[0].confidence, 'flash')
+eq('empty candidate list candidateMatches null', nullCandidateRanked[0].candidateMatches, null)
 
-// 10. compact API + address classification ----------------------------------
+// 7. compact API + address classification -----------------------------------
 section('compact API / address validation')
-const compactSelected = tp.compactTargetProfileApi(F103C8_DETECTION, f103c8)
-eq('compact source selected', compactSelected.source, 'selected')
-eq('compact orderCode', compactSelected.orderCode, 'STM32F103C8T6')
-eq('compact flashKib', compactSelected.flashKib, 64)
-check('compact flashRange', JSON.stringify(compactSelected.flashRange) === JSON.stringify([0x08000000, 0x08010000]), JSON.stringify(compactSelected.flashRange))
-eq('compact RAM ranges', compactSelected.ramRanges.length, 1)
-const compactDetected = tp.compactTargetProfileApi(F103C8_DETECTION, null)
-eq('compact source detected', compactDetected.source, 'detected')
-eq('compact detected devId', compactDetected.devId, 0x410)
-eq('compact no detection source', tp.compactTargetProfileApi(null, null).source, 'none')
-eq('flash base address', tp.classifyTargetAddress(compactSelected, 0x08000000), 'flash')
-eq('flash last byte', tp.classifyTargetAddress(compactSelected, 0x0800ffff), 'flash')
-eq('flash end exclusive', tp.classifyTargetAddress(compactSelected, 0x08010000), 'none')
-eq('RAM start', tp.classifyTargetAddress(compactSelected, 0x20000000), 'ram')
-eq('RAM end', tp.classifyTargetAddress(compactSelected, 0x20004fff), 'ram')
-eq('RAM end exclusive', tp.classifyTargetAddress(compactSelected, 0x20005000), 'none')
-eq('outside regions', tp.classifyTargetAddress(compactSelected, 0x12345678), 'none')
+const compact = tp.compactTargetProfileApi(F103C8_DETECTION)
+eq('compact source auto', compact.source, 'auto')
+eq('compact order code', compact.orderCode, 'STM32F103C8T6')
+eq('compact flashKib', compact.flashKib, 64)
+eq('compact RAM ranges', compact.ramRanges.length, 1)
+check('compact flashRange', JSON.stringify(compact.flashRange) === JSON.stringify([0x08000000, 0x08010000]), JSON.stringify(compact.flashRange))
+eq('compact devId', compact.devId, 0x410)
+const compactUnknown = tp.compactTargetProfileApi({
+    detected: true, dev_id: 0x123, flash_kib: 512, device: 'unknown (DEV_ID=0x123)',
+})
+eq('compact source detected when unmatched', compactUnknown.source, 'detected')
+eq('compact no order code when unmatched', compactUnknown.orderCode, '')
+eq('compact none', tp.compactTargetProfileApi(null).source, 'none')
+eq('compat compact with null profile param', tp.compactTargetProfileApi(F103C8_DETECTION, null).orderCode, 'STM32F103C8T6')
+eq('flash base address', tp.classifyTargetAddress(compact, 0x08000000), 'flash')
+eq('flash last byte', tp.classifyTargetAddress(compact, 0x0800ffff), 'flash')
+eq('flash end exclusive', tp.classifyTargetAddress(compact, 0x08010000), 'none')
+eq('RAM start', tp.classifyTargetAddress(compact, 0x20000000), 'ram')
+eq('RAM end', tp.classifyTargetAddress(compact, 0x20004fff), 'ram')
+eq('RAM end exclusive', tp.classifyTargetAddress(compact, 0x20005000), 'none')
+eq('outside regions', tp.classifyTargetAddress(compact, 0x12345678), 'none')
 eq('profile-only classification', tp.classifyTargetAddress(f103c8, 0x08000010), 'flash')
-eq('null profile classification', tp.classifyTargetAddress(null, 0x08000000), 'none')
+eq('null classification', tp.classifyTargetAddress(null, 0x08000000), 'none')
 
-// 11. diagnostics JSON -------------------------------------------------------
+// 8. diagnostics JSON --------------------------------------------------------
 section('diagnostics')
 const diagnosticsText = tp.buildTargetDiagnosticsJson({
     detection: F103C8_DETECTION,
-    selectedProfile: f103c8,
     generatedAt: '2026-01-02T03:04:05.000Z',
     appVersion: '1.2.0-test',
 })
@@ -354,25 +314,25 @@ try {
 }
 check('diagnostics JSON parses', diagnostics !== null)
 eq('diagnostics kind', diagnostics.kind, 'birdiebot-target-diagnostics')
+eq('diagnostics version', diagnostics.version, 2)
 eq('diagnostics generatedAt', diagnostics.generatedAt, '2026-01-02T03:04:05.000Z')
+eq('diagnostics appVersion', diagnostics.appVersion, '1.2.0-test')
 eq('diagnostics devIdHex', diagnostics.target.devIdHex, '0x410')
-eq('diagnostics confidence', diagnostics.target.confidence, 'flash-narrowed')
-check('diagnostics candidates', Array.isArray(diagnostics.target.candidates) && diagnostics.target.candidates.includes('STM32F103x8'))
-eq('diagnostics selected orderCode', diagnostics.selectedProfile.orderCode, 'STM32F103C8T6')
-eq('diagnostics match level', diagnostics.match.level, 'match')
-check('diagnostics limitations include swd-no-package',
-    diagnostics.limitations.some((entry) => entry.code === 'swd-no-package'))
-check('diagnostics limitations have text',
-    diagnostics.limitations.every((entry) => typeof entry.text === 'string' && entry.text.length > 0))
+eq('diagnostics flashKib', diagnostics.target.flashKib, 64)
+eq('diagnostics flashBase', diagnostics.target.flashBase, '0x08000000')
+check('diagnostics candidates', diagnostics.target.candidates.includes('STM32F103x8'))
+check('diagnostics has no profile editor state', !('selectedProfile' in diagnostics) && !('match' in diagnostics) && !('limitations' in diagnostics))
+eq('diagnostics autoMatch matched', diagnostics.autoMatch.matched, true)
+eq('diagnostics autoMatch orderCode', diagnostics.autoMatch.orderCode, 'STM32F103C8T6')
+eq('diagnostics autoMatch confidence', diagnostics.autoMatch.confidence, 'exact')
+eq('diagnostics autoMatch alternatives', diagnostics.autoMatch.alternatives.length, 0)
 check('diagnostics profileApi flashRange', JSON.stringify(diagnostics.profileApi.flashRange) === JSON.stringify([0x08000000, 0x08010000]))
-const noProfileDiagnostics = JSON.parse(tp.buildTargetDiagnosticsJson({
-    detection: H723_DETECTION,
-    selectedProfile: null,
-}))
-eq('diagnostics no profile', noProfileDiagnostics.selectedProfile, null)
-eq('diagnostics no profile match', noProfileDiagnostics.match, null)
-check('diagnostics no profile limitation',
-    noProfileDiagnostics.limitations.some((entry) => entry.code === 'profile-not-selected'))
+const unmatchedDiagnostics = JSON.parse(tp.buildTargetDiagnosticsJson({detection: UNKNOWN_DEVICE_DETECTION}))
+eq('diagnostics unmatched autoMatch', unmatchedDiagnostics.autoMatch.matched, false)
+eq('diagnostics unmatched profileApi source', unmatchedDiagnostics.profileApi.source, 'detected')
+const noTargetDiagnostics = JSON.parse(tp.buildTargetDiagnosticsJson({detection: null}))
+eq('diagnostics null detection source', noTargetDiagnostics.profileApi.source, 'none')
+eq('diagnostics null detection autoMatch', noTargetDiagnostics.autoMatch.matched, false)
 
 // summary --------------------------------------------------------------------
 console.log(`\n${checks} checks, ${failures} failure(s)`)

@@ -815,5 +815,6 @@ export default {
         conditionJump: 'Jump to condition trigger',
         conditionAddressRequired: 'Condition address required',
         conditionInvalid: 'Invalid condition address/alignment/value',
+        targetAutoModel: 'Auto model',
     },
 }

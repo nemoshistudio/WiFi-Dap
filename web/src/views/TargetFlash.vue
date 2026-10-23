@@ -30,36 +30,17 @@
 
     <el-descriptions v-if="targetInfo?.detected" class="mt-3" border :column="1">
       <el-descriptions-item :label="translate('target.family')">{{ targetInfo.series || targetInfo.family || '-' }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.model')">{{ targetInfo.device || '-' }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.modelCandidates')">{{ detectedTarget.group || '-' }}</el-descriptions-item>
-      <el-descriptions-item label="DEV_ID">
-        {{ formatDevId(detectedTarget.devId) }}
-        <span v-if="detectedTarget.devId > 0" class="text-xs bb-muted font-mono">({{ detectedTarget.devId }})</span>
+      <el-descriptions-item :label="translate('target.model')">
+        {{ autoMatch ? autoMatch.profile.orderCode : translate('common.unknown') }}
       </el-descriptions-item>
-      <el-descriptions-item :label="translate('target.flashKib')">{{ formatFlashKib(detectedTarget.flashKib) }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.core')">{{ detectedTarget.core }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.confidence')">
-        <el-tag :type="confidenceTagType" size="small" disable-transitions>{{ confidenceText(detectedTarget.confidence) }}</el-tag>
-      </el-descriptions-item>
+      <el-descriptions-item :label="translate('target.modelCandidates')">{{ detectedTarget.group || targetInfo.device || '-' }}</el-descriptions-item>
+      <el-descriptions-item label="DEV_ID">{{ formatDevId(detectedTarget.devId) }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.flashSize')">{{ formatFlashSize(targetInfo.flash_size) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.cpuid')">{{ formatRegister(targetInfo.cpuid) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.idcode')">{{ formatRegister(targetInfo.idcode) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.uid')">{{ targetInfo.uid || '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.flashBase')">{{ formatRegister(targetInfo.flash_base) }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.flashSize')">{{ formatFlashSize(targetInfo.flash_size) }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.running')">{{ formatBoolean(targetInfo.running) }}</el-descriptions-item>
     </el-descriptions>
-    <el-alert
-        v-if="targetInfo?.detected"
-        class="mt-2"
-        type="info"
-        :title="translate('target.limitations')"
-        :closable="false"
-        show-icon
-    >
-      <ul class="bb-target-list">
-        <li v-for="text in limitationTexts" :key="text">{{ text }}</li>
-      </ul>
-    </el-alert>
     <el-alert
         v-if="targetInfo?.detected && targetInfo.supported === false"
         class="mt-2"
@@ -78,128 +59,20 @@
         show-icon
     />
 
-    </section>
+    <div v-if="targetInfo?.detected" class="mt-4">
+      <el-button :disabled="flashing" @click="onCopyDiagnostics">
+        {{ diagnosticsCopied ? translate('common.copied') : translate('target.copyDiagnostics') }}
+      </el-button>
+      <el-alert
+          v-if="diagnosticsError"
+          class="mt-2"
+          type="warning"
+          :title="diagnosticsError"
+          :closable="false"
+          show-icon
+      />
+    </div>
 
-    <section class="bb-card">
-      <div class="bb-card__head">
-        <h2 class="bb-card__title text-lg">{{ translate('target.profileTitle') }}</h2>
-        <el-tag v-if="selectedProfile" type="success" size="small" disable-transitions>{{ selectedProfile.name }}</el-tag>
-        <el-tag v-else type="info" size="small" disable-transitions>{{ translate('target.profileNone') }}</el-tag>
-      </div>
-      <p class="text-xs bb-muted bb-target-wrap">{{ translate('target.profileHint') }}</p>
-
-      <div class="mt-2 flex flex-wrap items-center gap-2">
-        <el-select
-            v-model="selectedProfileId"
-            filterable
-            clearable
-            class="bb-profile-select"
-            :placeholder="translate('target.profileSelectPlaceholder')"
-            :disabled="flashing"
-            @change="onProfileSelected"
-        >
-          <el-option-group :label="translate('target.profileKnownGroup')">
-            <el-option
-                v-for="profile in KNOWN_TARGET_PROFILES"
-                :key="profile.id"
-                :label="profileOptionLabel(profile)"
-                :value="profile.id"
-            />
-          </el-option-group>
-          <el-option-group v-if="customProfiles.length > 0" :label="translate('target.profileCustomGroup')">
-            <el-option
-                v-for="profile in customProfiles"
-                :key="profile.id"
-                :label="profileOptionLabel(profile)"
-                :value="profile.id"
-            />
-          </el-option-group>
-        </el-select>
-        <el-button
-            v-if="selectedProfile && selectedProfile.source === 'custom'"
-            :disabled="flashing"
-            @click="onDeleteCustomProfile"
-        >
-          {{ translate('target.profileDelete') }}
-        </el-button>
-      </div>
-
-      <el-descriptions v-if="selectedProfile" class="mt-3" border :column="1">
-        <el-descriptions-item :label="translate('target.orderCode')">{{ selectedProfile.orderCode || '-' }}</el-descriptions-item>
-        <el-descriptions-item :label="translate('target.package')">{{ selectedProfile.package || '-' }}</el-descriptions-item>
-        <el-descriptions-item :label="translate('target.profileFlash')">{{ formatFlashKib(selectedProfile.flashKib) }}</el-descriptions-item>
-        <el-descriptions-item label="DEV_ID">{{ formatDevId(selectedProfile.devId) }}</el-descriptions-item>
-        <el-descriptions-item :label="translate('target.ramRanges')">
-          <div v-if="selectedProfileRamRanges.length === 0">-</div>
-          <div v-for="range in selectedProfileRamRanges" :key="range" class="font-mono text-xs">{{ range }}</div>
-        </el-descriptions-item>
-        <el-descriptions-item :label="translate('target.flashRange')">{{ selectedProfileFlashRange }}</el-descriptions-item>
-        <el-descriptions-item v-if="selectedProfile.notes" :label="translate('target.profileNotes')">{{ selectedProfile.notes }}</el-descriptions-item>
-      </el-descriptions>
-
-      <template v-if="targetInfo?.detected">
-        <el-descriptions class="mt-3" border :column="2">
-          <el-descriptions-item :label="translate('target.detectedGroup')">{{ detectedGroupText }}</el-descriptions-item>
-          <el-descriptions-item :label="translate('target.selectedProfile')">{{ selectedProfileSummary }}</el-descriptions-item>
-        </el-descriptions>
-        <el-alert
-            class="mt-2"
-            :type="matchAlertType"
-            :title="matchLevelText(profileMatch.level)"
-            :closable="false"
-            show-icon
-        >
-          <ul v-if="matchDetails.length > 0" class="bb-target-list">
-            <li v-for="detail in matchDetails" :key="detail">{{ detail }}</li>
-          </ul>
-        </el-alert>
-      </template>
-
-      <div class="mt-4">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-sm">{{ translate('target.profileCustomTitle') }}</span>
-          <el-button text size="small" :disabled="flashing" @click="customProfileJson = CUSTOM_PROFILE_EXAMPLE">
-            {{ translate('target.profileCustomExample') }}
-          </el-button>
-        </div>
-        <el-input
-            v-model="customProfileJson"
-            class="mt-1"
-            type="textarea"
-            :rows="4"
-            :disabled="flashing"
-            :placeholder="CUSTOM_PROFILE_PLACEHOLDER"
-        />
-        <div class="mt-2 flex flex-wrap gap-2">
-          <el-button :disabled="flashing" @click="onAddCustomProfile">{{ translate('target.profileAdd') }}</el-button>
-          <el-button :disabled="!customProfileJson || flashing" @click="customProfileJson = ''">
-            {{ translate('target.profileClearJson') }}
-          </el-button>
-        </div>
-        <el-alert
-            v-if="customProfileError"
-            class="mt-2"
-            type="error"
-            :title="customProfileError"
-            :closable="false"
-            show-icon
-        />
-      </div>
-
-      <div class="mt-4">
-        <el-button :disabled="flashing || (!targetInfo?.detected && !selectedProfile)" @click="onCopyDiagnostics">
-          {{ diagnosticsCopied ? translate('common.copied') : translate('target.copyDiagnostics') }}
-        </el-button>
-        <p class="text-xs bb-muted mt-1 bb-target-wrap">{{ translate('target.diagnosticsHint') }}</p>
-        <el-alert
-            v-if="diagnosticsError"
-            class="mt-2"
-            type="warning"
-            :title="diagnosticsError"
-            :closable="false"
-            show-icon
-        />
-      </div>
     </section>
 
     <section class="bb-card">
@@ -313,7 +186,9 @@
     >
       <el-descriptions-item :label="translate('target.fileFormat')">{{ firmware ? formatLabel(firmware.format) : '-' }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.family')">{{ result.series || targetInfo?.series || result.family || targetInfo?.family || '-' }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.model')">{{ targetInfo?.device || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.model')">
+        {{ autoMatch ? autoMatch.profile.orderCode : (targetInfo?.device || '-') }}
+      </el-descriptions-item>
       <el-descriptions-item :label="translate('target.idcode')">
         {{ formatRegister(result.idcode ?? targetInfo?.idcode) }}
       </el-descriptions-item>
@@ -346,7 +221,7 @@
 </template>
 
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, ref, shallowRef} from "vue";
+import {computed, onUnmounted, ref, shallowRef} from "vue";
 import {ElMessageBox} from "element-plus";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
@@ -368,28 +243,10 @@ import {
   type FirmwareImage,
 } from "@/utils/firmwareImage";
 import {
-  KNOWN_TARGET_PROFILES,
-  allTargetProfiles,
+  autoMatchTargetProfile,
   buildTargetDiagnosticsJson,
-  compareDetectedToProfile,
-  detectionLimitations,
-  findKnownTargetProfile,
-  flashRangeOf,
   formatDevId,
-  formatFlashKib,
-  formatHex32,
-  formatProfileRamRanges,
-  parseCustomTargetProfileJson,
   parseTargetDetection,
-  removeCustomProfile,
-  resolveRestoredTargetProfiles,
-  saveCustomProfiles,
-  saveSelectedProfileId,
-  upsertCustomProfile,
-  type DetectionConfidence,
-  type DetectionLimitationCode,
-  type ProfileMatchLevel,
-  type TargetProfile,
 } from "@/utils/targetProfile";
 
 type FlashPhase = 'idle' | 'flashing' | 'success' | 'error'
@@ -413,95 +270,16 @@ const result = ref<TargetFlashSuccess | null>(null);
 const errorMessage = ref('');
 const errorDetail = ref('');
 const resetting = ref(false);
+const diagnosticsCopied = ref(false);
+const diagnosticsError = ref('');
 
 let statusTimer = 0;
 let flashHandle: { abort(): void } | null = null;
 let diagnosticsTimer = 0;
 
-// --- MCU/board profile state (explicit selection only; never auto-selected) ---
-const customProfiles = ref<TargetProfile[]>([]);
-const selectedProfileId = ref('');
-const customProfileJson = ref('');
-const customProfileError = ref('');
-const diagnosticsCopied = ref(false);
-const diagnosticsError = ref('');
-
 /** 未检测到目标芯片时的转换默认值（STM32 典型 Flash），检测成功后以设备返回为准。 */
 const DEFAULT_FLASH_BASE = 0x08000000;
 const DEFAULT_FLASH_SIZE = 0x00100000;
-
-/**
- * Technical JSON example inserted into the custom-profile textarea.  Kept as a
- * code constant (not a locale message) because vue-i18n would try to
- * interpolate the literal `{`/`}` braces; see docs/target-profiles.md §6.1.
- */
-const CUSTOM_PROFILE_EXAMPLE = '{"name":"My board","mcu":"STM32F103C8T6","package":"LQFP48","flashKib":64,"ramRanges":["0x20000000-0x20005000"],"devId":"0x410"}';
-
-/** Placeholder example for the custom-profile JSON textarea (same reason as above). */
-const CUSTOM_PROFILE_PLACEHOLDER = CUSTOM_PROFILE_EXAMPLE;
-
-// Enum -> i18n key mappings use explicit switch statements: the i18n contract
-// forbids dynamically built message keys such as translate(VAR[key]).
-function confidenceText(confidence: DetectionConfidence): string {
-  switch (confidence) {
-    case 'flash-narrowed':
-      return translate('target.confidenceFlashNarrowed');
-    case 'group':
-      return translate('target.confidenceGroup');
-    default:
-      return translate('target.confidenceUnknown');
-  }
-}
-
-function limitationText(code: DetectionLimitationCode): string {
-  switch (code) {
-    case 'dev-id-unknown':
-      return translate('target.limitDevIdUnknown');
-    case 'dev-id-group':
-      return translate('target.limitDevIdGroup');
-    case 'flash-size-unknown':
-      return translate('target.limitFlashSizeUnknown');
-    case 'swd-no-package':
-      return translate('target.limitSwdNoPackage');
-    case 'flash-unsupported':
-      return translate('target.limitFlashUnsupported');
-    case 'profile-not-selected':
-      return translate('target.limitProfileNotSelected');
-    case 'profile-dev-id-mismatch':
-      return translate('target.limitProfileDevIdMismatch');
-    case 'profile-flash-mismatch':
-      return translate('target.limitProfileFlashMismatch');
-    case 'profile-order-code-mismatch':
-      return translate('target.limitProfileOrderCodeMismatch');
-    case 'profile-unverified':
-      return translate('target.limitProfileUnverified');
-    case 'no-detection':
-    default:
-      return translate('target.limitNoDetection');
-  }
-}
-
-function matchLevelText(level: ProfileMatchLevel): string {
-  switch (level) {
-    case 'match':
-      return translate('target.matchConsistent');
-    case 'unverified':
-      return translate('target.matchUnverified');
-    case 'dev-id-mismatch':
-      return translate('target.matchDevIdMismatch');
-    case 'flash-mismatch':
-      return translate('target.matchFlashMismatch');
-    case 'no-profile':
-      return translate('target.matchNoProfile');
-    case 'no-detection':
-    default:
-      return translate('target.matchNoDetection');
-  }
-}
-
-function matchWord(matches: boolean | null): string {
-  return matches ? translate('target.matchWordMatch') : translate('target.matchWordMismatch');
-}
 
 const flashing = computed(() => phase.value === 'flashing');
 const canFlash = computed(() => {
@@ -535,110 +313,9 @@ const deviceStatusText = computed(() => {
   return `${status.state ?? '-'}${percent}`;
 });
 
-// --- Detection + MCU profile view models -----------------------------------
+// --- Detection view models: built-in profile auto match (read-only) --------
 const detectedTarget = computed(() => parseTargetDetection(targetInfo.value));
-const selectedProfile = computed(() => {
-  const id = selectedProfileId.value;
-  if (!id) {
-    return null;
-  }
-  return findKnownTargetProfile(id)
-      ?? customProfiles.value.find((profile) => profile.id === id)
-      ?? null;
-});
-const confidenceTagType = computed<'success' | 'warning' | 'info'>(() => {
-  switch (detectedTarget.value.confidence) {
-    case 'flash-narrowed':
-      return 'success';
-    case 'group':
-      return 'warning';
-    default:
-      return 'info';
-  }
-});
-const limitationTexts = computed(() =>
-    detectionLimitations(targetInfo.value, selectedProfile.value).map((code) => limitationText(code)));
-const profileMatch = computed(() => compareDetectedToProfile(targetInfo.value, selectedProfile.value));
-const matchAlertType = computed<'success' | 'warning' | 'info'>(() => {
-  const level: ProfileMatchLevel = profileMatch.value.level;
-  switch (level) {
-    case 'match':
-      return 'success';
-    case 'unverified':
-      return 'warning';
-    default:
-      return 'info';
-  }
-});
-const detectedGroupText = computed(() => {
-  const detected = detectedTarget.value;
-  if (!detected.detected) {
-    return '-';
-  }
-  const parts = [detected.group || detected.baseGroup || '-'];
-  if (detected.flashKib > 0) {
-    parts.push(`${detected.flashKib} KiB`);
-  }
-  if (detected.devId > 0) {
-    parts.push(`DEV_ID ${formatDevId(detected.devId)}`);
-  }
-  return parts.join(' · ');
-});
-const selectedProfileSummary = computed(() => {
-  const profile = selectedProfile.value;
-  if (!profile) {
-    return '-';
-  }
-  const parts = [profile.orderCode || profile.mcu];
-  if (profile.package) {
-    parts.push(profile.package);
-  }
-  if (profile.flashKib > 0) {
-    parts.push(`${profile.flashKib} KiB`);
-  }
-  return parts.join(' · ');
-});
-const selectedProfileRamRanges = computed(() => formatProfileRamRanges(selectedProfile.value));
-const selectedProfileFlashRange = computed(() => {
-  const profile = selectedProfile.value;
-  if (!profile) {
-    return '-';
-  }
-  const range = flashRangeOf(profile.flashKib);
-  return range ? `${formatHex32(range[0])}-${formatHex32(range[1])}` : '-';
-});
-const matchDetails = computed<string[]>(() => {
-  const profile = selectedProfile.value;
-  const detected = detectedTarget.value;
-  const match = profileMatch.value;
-  if (!profile || !detected.detected) {
-    return [];
-  }
-  const details: string[] = [];
-  if (match.devIdMatches !== null) {
-    details.push(translate('target.matchDevIdDetail', {
-      detected: formatDevId(detected.devId),
-      profile: formatDevId(profile.devId),
-      result: matchWord(match.devIdMatches),
-    }));
-  }
-  if (match.flashMatches !== null) {
-    details.push(translate('target.matchFlashDetail', {
-      detected: detected.flashKib,
-      profile: profile.flashKib,
-      result: matchWord(match.flashMatches),
-    }));
-  }
-  if (match.candidateMatches !== null) {
-    const shown = detected.candidates.slice(0, 6).join(', ');
-    const suffix = detected.candidates.length > 6 ? ', …' : '';
-    const candidates = `${shown}${suffix}`;
-    details.push(match.candidateMatches
-        ? translate('target.matchCandidateMatch', {candidates})
-        : translate('target.matchCandidateMismatch', {candidates}));
-  }
-  return details;
-});
+const autoMatch = computed(() => autoMatchTargetProfile(targetInfo.value));
 
 function formatBytes(bytes?: number): string {
   if (!bytes || bytes < 0) {
@@ -672,13 +349,6 @@ function formatRegister(value?: number | string): string {
   return value;
 }
 
-function formatBoolean(value?: boolean): string {
-  if (typeof value !== 'boolean') {
-    return '-';
-  }
-  return value ? translate('common.yes') : translate('common.no');
-}
-
 function formatLabel(format: FirmwareFormat): string {
   switch (format) {
     case 'bin':
@@ -702,59 +372,6 @@ function flashParams(): {base: number; size: number} {
     base: typeof base === 'number' && base > 0 ? base : DEFAULT_FLASH_BASE,
     size: typeof size === 'number' && size > 0 ? size : DEFAULT_FLASH_SIZE,
   };
-}
-
-// ---------------------------------------------------------------------------
-// MCU/board profile selection (explicit only, persisted in localStorage)
-// ---------------------------------------------------------------------------
-
-function profileOptionLabel(profile: TargetProfile): string {
-  const parts = [profile.name || profile.mcu];
-  if (profile.package) {
-    parts.push(profile.package);
-  }
-  if (profile.flashKib > 0) {
-    parts.push(`${profile.flashKib} KiB`);
-  }
-  if (profile.devId > 0) {
-    parts.push(formatDevId(profile.devId));
-  }
-  parts.push(profile.source === 'known' ? translate('target.sourceKnown') : translate('target.sourceCustom'));
-  return parts.join(' · ');
-}
-
-/** Persist only explicit selections: detection never picks a profile itself. */
-function onProfileSelected(value: string | null | undefined) {
-  selectedProfileId.value = typeof value === 'string' ? value : '';
-  saveSelectedProfileId(selectedProfileId.value || null);
-}
-
-function onAddCustomProfile() {
-  const parsed = parseCustomTargetProfileJson(customProfileJson.value);
-  if (!parsed.ok || !parsed.profile) {
-    customProfileError.value = parsed.error ?? 'invalid custom profile';
-    return;
-  }
-  customProfileError.value = '';
-  const profile = parsed.profile;
-  customProfiles.value = upsertCustomProfile(customProfiles.value, profile);
-  saveCustomProfiles(customProfiles.value);
-  selectedProfileId.value = profile.id;
-  saveSelectedProfileId(profile.id);
-  globalNotify(translate('target.profileSaved'), 'success');
-}
-
-function onDeleteCustomProfile() {
-  const profile = selectedProfile.value;
-  if (!profile || profile.source !== 'custom') {
-    return;
-  }
-  customProfiles.value = removeCustomProfile(customProfiles.value, profile.id);
-  saveCustomProfiles(customProfiles.value);
-  if (selectedProfileId.value === profile.id) {
-    selectedProfileId.value = '';
-    saveSelectedProfileId(null);
-  }
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -786,7 +403,6 @@ async function onCopyDiagnostics() {
   diagnosticsError.value = '';
   const text = buildTargetDiagnosticsJson({
     detection: targetInfo.value,
-    selectedProfile: selectedProfile.value,
     generatedAt: new Date().toISOString(),
     appVersion: import.meta.env.VITE_APP_WEB_VERSION,
   });
@@ -1031,16 +647,6 @@ async function onResetTarget() {
   }
 }
 
-onMounted(() => {
-  // Restore only what the user explicitly selected/stored earlier; detection
-  // never auto-selects a profile (task-36).  Broken storage degrades silently.
-  const restored = resolveRestoredTargetProfiles();
-  customProfiles.value = restored.customProfiles;
-  if (restored.selectedProfile) {
-    selectedProfileId.value = restored.selectedProfile.id;
-  }
-});
-
 onUnmounted(() => {
   stopStatusPolling();
   if (diagnosticsTimer) {
@@ -1053,26 +659,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.bb-profile-select {
-  min-width: 320px;
-  max-width: 100%;
-}
-
-.bb-target-list {
-  margin: 0;
-  padding-left: 18px;
-  list-style: disc;
-}
-
-.bb-target-list li {
-  margin: 2px 0;
-}
-
-.bb-target-wrap {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
 :deep(.el-descriptions__label) {
   white-space: normal;
 }
