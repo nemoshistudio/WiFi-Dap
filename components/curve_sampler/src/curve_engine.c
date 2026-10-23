@@ -650,6 +650,10 @@ static void curve_collect_sample(const curve_config_t *cfg, uint8_t group_index,
         }
     }
 
+    /* Object watch: memoize pointer dereferences inside this tick only.  Safe
+     * while the core is halted; no-halt ticks keep the cache disabled. */
+    curve_expr_cache_begin(core_halted);
+
     first = group->series_first;
     last = (uint16_t)(first + group->series_count);
     for (uint16_t si = first; si < last; si++) {
@@ -702,6 +706,7 @@ static void curve_collect_sample(const curve_config_t *cfg, uint8_t group_index,
         offset += series->size;
     }
 
+    curve_expr_cache_end();
     *payload_len_out = offset;
     *invalid_out = invalid;
     *out_of_scope_out = out_of_scope;
@@ -2254,6 +2259,11 @@ void curve_engine_status(curve_status_t *out)
         s_engine.cfg->trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
         out->watchpoint_address = s_engine.cfg->watch_address;
     }
+    out->max_groups = (uint16_t)CURVE_MAX_GROUPS;
+    out->max_series = (uint16_t)CURVE_MAX_SERIES;
+    out->max_series_per_group = (uint16_t)CURVE_MAX_SERIES_PER_GROUP;
+    out->expr_pool_max = (uint16_t)CURVE_EXPR_POOL_MAX;
+    out->expr_pool_used = (s_engine.cfg != NULL) ? s_engine.cfg->pool_used : 0U;
     out->errors = s_engine.stat_errors;
     out->consecutive_errors = s_engine.stat_consecutive;
     out->link_hz = s_engine.link_hz;

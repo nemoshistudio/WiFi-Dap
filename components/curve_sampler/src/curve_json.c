@@ -8,7 +8,8 @@
  *   {"interval_us":20000,"halt":true,
  *    "series":[{"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}}]}
  *
- * Limits: series 1..16, size 1..8, sum(size) <= 256, interval_us 5000..200000,
+ * Limits: series 1..64 per group / 512 total (object watch), size 1..8,
+ * sum(size) <= 256 per group, interval_us 5000..200000,
  * expression depth <= 8.  The expression schema is identical to the Web UI
  * AddressExpr (addr/reg/cfa/add/deref); parsing into the compact node pool is
  * the only allocation-free representation the sampling worker reads later.
@@ -103,6 +104,54 @@ static bool read_hex_u32(const char **cursor, uint32_t *out, uint32_t digits)
     return true;
 }
 
+/**
+ * @brief Return an existing identical expression node (DAG dedup), or
+ * CURVE_EXPR_NONE.
+ *
+ * Nodes are appended bottom-up (children before parents), so comparing
+ * `inner` indexes is enough to identify identical sub-expressions.  Object
+ * watch paths share their prefix (e.g. 324 members of one object) and collapse
+ * onto the same few nodes instead of growing the pool linearly per series.
+ */
+static uint16_t find_duplicate_expr(const curve_config_t *cfg, uint16_t last)
+{
+    const curve_expr_t *cand = &cfg->pool[last];
+
+    for (uint16_t i = 0U; i < last; i++) {
+        const curve_expr_t *node = &cfg->pool[i];
+
+        if (node->kind != cand->kind) {
+            continue;
+        }
+        switch (cand->kind) {
+        case CURVE_EXPR_ADDR:
+            if (node->address == cand->address) {
+                return i;
+            }
+            break;
+        case CURVE_EXPR_REG:
+            if (node->reg == cand->reg && node->offset == cand->offset) {
+                return i;
+            }
+            break;
+        case CURVE_EXPR_CFA:
+            if (node->offset == cand->offset) {
+                return i;
+            }
+            break;
+        case CURVE_EXPR_ADD:
+        case CURVE_EXPR_DEREF:
+            if (node->offset == cand->offset && node->inner == cand->inner) {
+                return i;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return CURVE_EXPR_NONE;
+}
+
 /** Compact prefix expression (v3): A<addr8> R<reg2><off8> C<off8>
  *  +<off8><inner> D<off8><inner>.  Fixed-width hex keeps the HTTP body small
  *  and, more importantly, keeps cJSON's allocation count low on ESP32. */
@@ -161,6 +210,16 @@ static esp_err_t parse_expr_compact(const char **cursor, curve_config_t *cfg,
         break;
     default:
         goto bad;
+    }
+    {
+        uint16_t dup = find_duplicate_expr(cfg, index);
+
+        if (dup != CURVE_EXPR_NONE) {
+            cfg->pool_used = index; /* drop the freshly built duplicate */
+            *cursor = p;
+            *out_index = dup;
+            return ESP_OK;
+        }
     }
     *cursor = p;
     *out_index = index;
@@ -244,6 +303,15 @@ static esp_err_t parse_expr(const cJSON *item, curve_config_t *cfg,
                                 kind->valuestring);
     }
 
+    {
+        uint16_t dup = find_duplicate_expr(cfg, index);
+
+        if (dup != CURVE_EXPR_NONE) {
+            cfg->pool_used = index; /* drop the freshly built duplicate */
+            *out_index = dup;
+            return ESP_OK;
+        }
+    }
     *out_index = index;
     return ESP_OK;
 }

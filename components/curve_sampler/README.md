@@ -1,4 +1,4 @@
-# WiFi Dap - curve page device-local sampler (Phase 0/1/2/2.5 + watchpoint/condition trigger, protocol v2)
+# WiFi Dap - curve page device-local sampler (Phase 0/1/2/2.5 + object watch/watchpoint/condition trigger, protocol v2)
 
 Firmware half of `docs/curve-local-sampler.md`: the Web curve page sends its
 `AddressExpr` series configuration over HTTP, this component samples the STM32
@@ -14,7 +14,7 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 | Method | URI | Notes |
 | --- | --- | --- |
 | POST | `/api/curve/selftest` | Phase 0 diagnostic, optional `{}` body |
-| POST | `/api/curve/start` | JSON body <= 4096 B, 1..8 groups x 1..32 series |
+| POST | `/api/curve/start` | JSON body <= 24576 B, 1..8 groups x 1..64 series (<=512 total) |
 | POST | `/api/curve/stop` | idempotent, optional body |
 | GET | `/api/curve/status` | sampler status JSON |
 | GET | `/api/curve/frames?since=&max=` | binary CVF2, `application/octet-stream` |
@@ -72,7 +72,7 @@ Limits enforced by the parser (`src/curve_json.c`): `trigger` is `periodic`
 (default), `breakpoint` (FPB) or `watchpoint` (DWT); `interval_us` is
 5000..200000 for periodic and the throttle floor 5000..1000000 for
 breakpoint/watchpoint (default 20000); `groups` 1..8
-(legacy root `series` = one group), 1..32 series per group, 256 series total,
+(legacy root `series` = one group), 1..64 series per group, 512 series total,
 `size` 1..8, per-group `sum(size)` <= 256, expression depth <= 8, `variants`
 1..16 per series; expression kinds
 `addr`/`reg`/`cfa`/`add`/`deref`.  `halt=false` rejects `reg`/`cfa`
@@ -124,8 +124,9 @@ of a larger allocation:
 16 B -> 264 frames (~8.2 KiB), 64 B -> 103, 128 B -> 57, 256 B (one full group)
 -> 30 frames (~8.1 KiB); with the PC field: 234 / 98 / 55 / 29 frames.  The 16-frame floor is only a math guard (never
 reached within the 256 B payload cap); if `malloc` still fails the engine halves
-the count down to 8 frames.  This guarantees `start` for 32x8B / 64x8B / 256+
-series payloads without the old ~34 KiB worst case.  `ring_frames` in
+the count down to 8 frames.  This guarantees `start` for 64x4B / 32x8B / 256+
+series payloads without the old ~34 KiB worst case (series count does not change
+the payload cap: a group of 64 size-4 series is exactly 256 B).  `ring_frames` in
 `/api/curve/status` reports the actual capacity (never a nominal value);
 history at 50 Hz is ~5.3 s / 2.1 s / 1.1 s / 0.6 s for the sizes above.
 `overwritten` counts **frames that were
@@ -242,7 +243,9 @@ function PC range:
 
 ## Protocol v2: multi-group round-robin + loclist variants
 
-* **Groups**: up to 8 groups x 32 series (<=256 total).  Each tick samples only
+* **Groups**: up to 8 groups x 64 series (<=512 total; object watch: one object
+  can be split over groups of <=64 members, each group payload still <=256 B).
+  Each tick samples only
   the current group, then `current_group = (current_group + 1) % group_count`
   round-robins.  `interval_us` is the *per-frame* period, so each group's
   refresh rate is `1 / (group_count * interval_us)` (the Web UI shows group
@@ -273,15 +276,57 @@ function PC range:
   the Web UI does not send the field yet and existing clients are unaffected.
   Invalid weights (0, >8, non-numeric) return HTTP 400.  `CVF2.group` still
   carries the original group index, so the Web mapping is unchanged.
-* **Static budget**: the HTTP layer owns one static `curve_config_t`
-  (~17.2 KiB: 8 groups, 256 series, 256 loclist variants, 768 expression nodes)
-  and the engine only keeps a const pointer while running; the parser refuses
-  to overwrite it until the engine is idle (start returns 409 busy).  The 4 KiB
-  request-body limit bounds real Web requests well below those pool caps; a
-  request that exhausts the variant/expr pool is rejected with a clear error.
-  Logical limits reported by the parser: groups 1..8, series/group 1..32, total
-  series <=256, variants/series 1..16, total variants <=256, expression nodes
-  <=768 (each node 12 B).
+* **Static budget (object watch, P1.8)**: the HTTP layer owns one static
+  `curve_config_t` (**38232 B**: 8 groups, 512 series x 20 B, 256 loclist
+  variants x 12 B, 2048 expression nodes x 12 B) plus a static 24576 B request
+  body buffer (HTTP `s_json` 1280 B); the engine only keeps a const pointer
+  while running and the parser refuses to overwrite it until the engine is idle
+  (start returns 409 busy).  Builds stay far below the ESP32/S3 DRAM budget
+  (measured image sizes are reported in `PHASE0-1-REPORT.md` §16).
+  Logical limits reported by the parser and `GET /api/curve/status`
+  (`max_groups`/`max_series`/`max_series_per_group`/`expr_pool_max`/
+  `expr_pool_used`): groups 1..8, series/group 1..64, total series <=512,
+  variants/series 1..16, total variants <=256, expression nodes <=2048
+  (each node 12 B).  A request that exhausts the variant/expr pool is rejected
+  with a clear 400 error.  The **compact v3 `expr_s` format** is required for
+  large object-watch requests: 512 minimal series are ~17 KiB, while the same
+  configuration in the verbose v2 object form easily exceeds the 24 KiB body.
+
+## P1.8 object watch: 512 series, expression DAG, per-tick read cache
+
+Ozone-style "watch one object" needs hundreds of member paths (e.g. 324 fields
+of `target_debug_handle`).  To support that without exploding memory:
+
+1. **Series limits**: 512 series total, up to 64 per group, 8 groups, per-group
+   payload cap stays 256 B (`sum(size)`), so all CVF2/ring/weighted-schedule
+   behaviour is unchanged.  The parser and status report the actual maxima.
+2. **Expression DAG dedup**: every expression node is canonicalised while it is
+   appended to `curve_config_t.pool`: a new node whose `(kind, inner,
+   offset/reg/address)` equals an existing node reuses that index instead of
+   growing the pool.  Member paths of one object share their root/prefix nodes,
+   so 324 fields with two levels of dereference need ~326 nodes instead of
+   ~973; 512 distinct one-node `addr` series need 512 nodes.  Nodes are still
+   addressed by `uint16_t` indexes, so evaluation is unchanged.
+3. **Per-tick pointer-read cache** (optional, automatic): while the core is
+   halted the evaluator memoizes 4-byte pointer loads for the current tick
+   (`curve_expr_cache_begin(true)` in the sampler loop), so a shared root pointer
+   is read once per tick instead of once per series.  Correctness:
+   - the cache is cleared every tick and only enabled for halted ticks
+     (periodic `halt=true`, breakpoint and watchpoint hits); a no-halt periodic
+     tick disables it because the running core may change memory between two
+     reads;
+   - each series still loads its own value at its own address, so per-series
+     values are independent and unchanged;
+   - host tests verify read counts (cache hit reduces `tf_swd_read_mem` calls)
+     and that no-halt ticks do not cache.
+
+Memory budget (measured on the built firmware, see report §16): the static
+configuration object grew from 17.6 KiB to 38.2 KiB and the static request body
+from 16 KiB to 24 KiB; the ESP32/S3 images still link with plenty of DRAM/heap
+headroom.  Practical upper bounds: 512 series when their expressions average
+<=4 nodes each (512 x 4 = 2048 exactly); object-watch requests with deep member
+chains should stay at a few hundred fields (the 324-field case uses ~326
+nodes).  Exceeding the pool returns HTTP 400 "too many expr nodes".
 
 ## P1.8: conditional trigger `trigger_condition`
 
@@ -475,9 +520,12 @@ fully functional (it is not disabled by a WS subscription).
   `overwritten=0` after many ring wraps; stalled consumer -> real losses
   counted once; served-then-evicted frames are not counted), Phase 2 trigger
   config/limits, breakpoint address window validation, Phase 2.5 PC-scope
-  parsing/normalization/scope test, 32-series config/pool/ring boundaries, the
+  parsing/normalization/scope test, 64-series/group + 512-series config/pool/
+  ring boundaries (including a 512-series compact v3 body that fits the HTTP
+  budget), expression DAG dedup (324 object fields -> <=326 nodes, identical
+  sub-trees collapse), per-tick read-cache hit/miss/no-halt behaviour, the
   status JSON field set, and the protocol v2 model (groups parsing/boundaries
-  8x32=256 series, variant selection + normalisation, variant/expression pool
+  8x64=512 series, variant selection + normalisation, variant/expression pool
   caps, CVF2 header/frame byte layout, group round-robin wrap, legacy
   single-group compatibility and the static config-size budget).
 
@@ -500,6 +548,13 @@ fully functional (it is not disabled by a WS subscription).
 * The ring is intentionally small (8 KiB budget): at 256 B/frame only 30 frames
   (~0.6 s at 50 Hz) are retained.  The Web UI polls every 30-50 ms, so this is
   enough; a stalled browser will see `overwritten` grow sooner than before.
+* Object watch: 512 series only fit the expression pool when the average chain
+  is <=4 nodes; deep member chains should stay at a few hundred fields (DAG
+  dedup shares prefixes).  Large configurations must use the compact v3
+  `expr_s` format - the verbose object format can exceed the 24 KiB body.
+* The per-tick pointer-read cache is active only while the core is halted
+  (breakpoint/watchpoint, periodic halt=true); no-halt ticks intentionally read
+  every time to avoid stale values.
 * `trigger_condition` compares an int32 value only (no 64-bit compare yet) and
   is evaluated after the series snapshot; the CVF2 bit3 marker is per batch
   with the exact seq in `status.condition_trigger_seq`.

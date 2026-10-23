@@ -51,7 +51,7 @@
 /* The ESP httpd task has a single instance and a 4 KiB stack: request bodies
  * and response JSON use static buffers (same pattern as tf_debug_http.c). */
 static char s_body[CURVE_JSON_BODY_MAX + 1U];
-static char s_json[1024];
+static char s_json[1280];
 static curve_config_t s_http_cfg;
 
 /* ------------------------------------------------------------------------- */

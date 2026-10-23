@@ -31,28 +31,34 @@ extern "C" {
  *
  * Actual static-memory caps (reported to the Lead, not all in the Web API):
  *   CURVE_MAX_GROUPS              8
- *   CURVE_MAX_SERIES_PER_GROUP   32 (Web API limit)
- *   CURVE_MAX_SERIES            256 (total across groups)
+ *   CURVE_MAX_SERIES_PER_GROUP   64 (object watch: up to 64 members/group)
+ *   CURVE_MAX_SERIES            512 (total across groups)
  *   CURVE_MAX_VARIANTS_PER_SERIES 16
  *   CURVE_MAX_VARIANTS          256 (total loclist variant pool)
- *   CURVE_EXPR_POOL_MAX         768 expression nodes (12 B each, ~9 KiB);
+ *   CURVE_EXPR_POOL_MAX        2048 expression nodes (12 B each, 24 KiB).
+ *     Object member paths share their prefix: the parser deduplicates identical
+ *     (kind, inner, offset/reg/address) nodes, so 324 object fields typically
+ *     need only a few hundred nodes instead of ~1600; 2048 still leaves headroom
+ *     for 512 independent series with 3-4 node chains.
+ *   CURVE_JSON_BODY_MAX        24576 request bytes (512-series/324-field stop
+ *     requests are ~16-20 KiB even in the compact v3 format).
  *                                   every expr chain node (single expr or
  *                                   variant expr, depth <= 8) comes from here.
  * A request that exceeds the variant/expr pool is rejected with a clear parse
  * error (groups/series limits themselves follow the contract exactly). */
 #define CURVE_MAX_GROUPS            8U
-#define CURVE_MAX_SERIES_PER_GROUP  32U
-#define CURVE_MAX_SERIES            256U
+#define CURVE_MAX_SERIES_PER_GROUP  64U
+#define CURVE_MAX_SERIES            512U
 #define CURVE_MAX_VARIANTS_PER_SERIES 16U
 #define CURVE_MAX_VARIANTS          256U
-#define CURVE_EXPR_POOL_MAX         768U
+#define CURVE_EXPR_POOL_MAX         2048U
 #define CURVE_MAX_EXPR_DEPTH        8U
 #define CURVE_MAX_SAMPLE_BYTES      256U
 #define CURVE_MIN_INTERVAL_US       1000U
 #define CURVE_MAX_INTERVAL_US       200000U
 #define CURVE_SERIES_SIZE_MIN       1U
 #define CURVE_SERIES_SIZE_MAX       8U
-#define CURVE_JSON_BODY_MAX         16384U
+#define CURVE_JSON_BODY_MAX         24576U
 #define CURVE_MAX_FRAMES_PER_REQ    64U
 
 /* Frame ring.  The hard constraint is the heap budget (8 KiB), so the capacity
@@ -437,6 +443,12 @@ typedef struct {
     bool condition_met;          /* latched true after the first match */
     uint32_t condition_hits;     /* number of matching ticks */
     uint32_t condition_trigger_seq; /* seq of the last condition-match frame */
+    /* object-watch capacity (compile-time limits, reported for the Web UI) */
+    uint16_t max_groups;
+    uint16_t max_series;
+    uint16_t max_series_per_group;
+    uint16_t expr_pool_max;
+    uint16_t expr_pool_used;
     uint32_t errors;             /* failed sample ticks */
     uint32_t consecutive_errors;
     uint32_t link_hz;
@@ -474,6 +486,14 @@ curve_eval_result_t curve_expr_eval(const curve_config_t *cfg, uint16_t expr_ind
                                     const uint32_t *reg_values,
                                     const bool *reg_valid,
                                     uint32_t *address);
+
+/* P1.8 object-watch optimization: per-tick memoization of pointer reads.
+ * Object member paths (e.g. 324 fields of one object) dereference the same
+ * intermediate pointers several times per tick.  The engine enables the cache
+ * only while the core is halted (a running core may change memory between two
+ * reads, so no-halt ticks keep it disabled).  Cache is cleared per tick. */
+void curve_expr_cache_begin(bool core_halted);
+void curve_expr_cache_end(void);
 
 /* ---- CVF2 wire framing (curve_cvf2.c) ------------------------------------
  * magic "CVF2", version 2, flags bit0=gap, count u16, first_seq u32,

@@ -61,6 +61,58 @@ bool curve_addr_range_ok(uint32_t addr, uint32_t size)
     return false;
 }
 
+/* ---- per-tick pointer-read memoization (object watch) ------------------- */
+#define CURVE_EXPR_READ_CACHE 32U
+
+typedef struct {
+    uint32_t address;
+    uint32_t value;
+} curve_expr_read_cache_t;
+
+static bool s_expr_cache_active;
+static uint8_t s_expr_cache_count;
+static curve_expr_read_cache_t s_expr_cache[CURVE_EXPR_READ_CACHE];
+
+void curve_expr_cache_begin(bool core_halted)
+{
+    /* Only a halted core guarantees that two reads in one tick see the same
+     * memory (no-halt periodic sampling may change it between two series). */
+    s_expr_cache_count = 0U;
+    s_expr_cache_active = core_halted;
+}
+
+void curve_expr_cache_end(void)
+{
+    s_expr_cache_active = false;
+}
+
+/** tf_swd_read_mem(4) with per-tick memoization when the cache is enabled. */
+static esp_err_t expr_read_pointer(uint32_t address, uint32_t *value)
+{
+    uint32_t pointer = 0U;
+    esp_err_t err;
+
+    if (s_expr_cache_active) {
+        for (uint8_t i = 0U; i < s_expr_cache_count; i++) {
+            if (s_expr_cache[i].address == address) {
+                *value = s_expr_cache[i].value;
+                return ESP_OK;
+            }
+        }
+    }
+    err = tf_swd_read_mem(address, &pointer, sizeof(pointer));
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (s_expr_cache_active && s_expr_cache_count < CURVE_EXPR_READ_CACHE) {
+        s_expr_cache[s_expr_cache_count].address = address;
+        s_expr_cache[s_expr_cache_count].value = pointer;
+        s_expr_cache_count++;
+    }
+    *value = pointer;
+    return ESP_OK;
+}
+
 static curve_eval_result_t eval_index(const curve_config_t *cfg, uint16_t index,
                                       const uint32_t *reg_values,
                                       const bool *reg_valid, uint32_t *address)
@@ -68,7 +120,6 @@ static curve_eval_result_t eval_index(const curve_config_t *cfg, uint16_t index,
     const curve_expr_t *expr;
     curve_eval_result_t res;
     uint32_t inner;
-    uint32_t pointer = 0U;
 
     if (cfg == NULL || index >= cfg->pool_used) {
         return CURVE_EVAL_INVALID;
@@ -110,10 +161,14 @@ static curve_eval_result_t eval_index(const curve_config_t *cfg, uint16_t index,
         if (!curve_addr_range_ok(inner, 4U)) {
             return CURVE_EVAL_INVALID;
         }
-        if (tf_swd_read_mem(inner, &pointer, sizeof(pointer)) != ESP_OK) {
-            return CURVE_EVAL_BUS;
+        {
+            uint32_t pointer = 0U;
+
+            if (expr_read_pointer(inner, &pointer) != ESP_OK) {
+                return CURVE_EVAL_BUS;
+            }
+            *address = pointer + (uint32_t)expr->offset;
         }
-        *address = pointer + (uint32_t)expr->offset;
         return CURVE_EVAL_OK;
 
     default:

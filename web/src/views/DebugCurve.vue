@@ -532,6 +532,29 @@
       <p v-if="isLocalSource && seriesList.length === 0" class="mt-2 text-xs opacity-70">{{ translate('curve.localSelectHint') }}</p>
       </div>
 
+      <!-- Objects：Ozone 式对象/字段浏览（ObjectBrowser 独立组件，task-52 API） -->
+      <div v-if="objectsViewEverOpened" v-show="elfView === 'objects'" class="object-view">
+        <ObjectBrowser
+            ref="objectBrowserRef"
+            :variables="elfInfo?.variables ?? []"
+            :roots="objectRoots"
+            :root-key="objectRootKey"
+            :selected-keys="objectSelectedKeys"
+            :watch-keys="watchKeys"
+            :live-values="objectLiveValues"
+            :presets="objectPresets"
+            @root-change="onObjectRootChange"
+            @select-variable="onObjectSelected"
+            @add-curves="onObjectAddCurves"
+            @watch-nodes="onObjectWatchNodes"
+            @toggle-watch="onObjectToggleWatch"
+            @jump-source="onObjectJumpSource"
+            @save-preset="onObjectSavePreset"
+            @load-preset="onObjectLoadPreset"
+            @delete-preset="onObjectDeletePreset"
+        />
+      </div>
+
       <!-- Source：本地项目源码浏览 + 点击变量直接加入曲线（SourceBrowser 独立组件，labels 由页面 i18n 注入） -->
       <div v-if="sourceViewEverOpened" v-show="elfView === 'source'" class="source-view">
         <SourceBrowser
@@ -884,9 +907,30 @@ import {ElMessageBox} from 'element-plus'
 import {translate, translateRaw, type TranslationKeys} from '@/locales'
 import {globalNotify} from '@/composables/notification'
 import SourceBrowser from '@/components/source/SourceBrowser.vue'
+import ObjectBrowser from '@/components/object/ObjectBrowser.vue'
+import {
+  DEFAULT_OBJECT_ROOT_NAMES,
+  defaultObjectRoot,
+  discoverObjectRoots,
+  findObjectNodes,
+  findObjectRoot,
+  objectNodeRef,
+  type ObjectBatchPayload,
+  type ObjectNodeRef,
+  type ObjectPreset,
+  type ObjectPresetSavePayload,
+  type ObjectRoot,
+  type ObjectSourceJumpPayload,
+  type ObjectToggleWatchPayload,
+} from '@/components/object'
 import type {SourceBrowserLabels} from '@/components/source/labels'
 import type {SourceLineAddressMap, SourceLineClickPayload, SourceLiveValueMap} from '@/utils/sourceProject'
 import type {SourceActiveFileLine} from '@/components/source/lineTarget'
+import {
+  deleteObjectWatchPreset,
+  listObjectWatchPresets,
+  saveObjectWatchPreset,
+} from '@/utils/objectWatchPresets'
 import {
   deleteRecording,
   listRecordings,
@@ -946,6 +990,7 @@ import {
   decodeCurveFrames,
   CURVE_LOCAL_MAX_GROUPS,
   CURVE_LOCAL_MAX_SERIES_PER_GROUP,
+  CURVE_LOCAL_MAX_SAMPLE_BYTES,
   CURVE_LOCAL_MAX_TOTAL_SERIES,
   CurveLocalError,
   splitSeriesIntoGroups,
@@ -981,7 +1026,7 @@ const DEFAULT_DEBUG_INTERVAL_MS = 50
 type SamplingSource = 'web' | 'local'
 const SAMPLING_SOURCES: SamplingSource[] = ['web', 'local']
 /** ELF 卡片视图：Variables（原有变量树/手动地址）/ Source（SourceBrowser 源码浏览）。 */
-type ElfView = 'variables' | 'source'
+type ElfView = 'variables' | 'source' | 'objects'
 /** 设备本地采样间隔（ms）；固件契约 5..200 ms。 */
 const LOCAL_INTERVALS = [5, 10, 20, 50]
 /** 新用户默认 20 ms（50 Hz）本地采样；保留 10 ms 选项。 */
@@ -1115,7 +1160,7 @@ const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 /** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
 const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : MAX_CURVE_SERIES))
-/** 本地 v2：按每组 32 路自动分组（运行前按选择计划，运行后以固件 group_count 为准）。 */
+/** 本地 v2：按每组 64 路自动分组（task-51：groups 1..8，总 512；运行后以固件 group_count 为准）。 */
 const localPlannedGroups = computed(() => Math.max(1, Math.ceil(seriesList.value.length / CURVE_LOCAL_MAX_SERIES_PER_GROUP)))
 const localActiveGroupCount = computed(() => (sampling.value && localGroupCount.value > 0 ? localGroupCount.value : localPlannedGroups.value))
 /** 每组刷新率 = 1/(组数 × interval)；总帧率仍约 1/interval（每组轮转）。 */
@@ -1354,6 +1399,7 @@ const elfView = ref<ElfView>('variables')
 const elfViewOptions = computed(() => [
   {label: translate('curve.sourceViewVariables'), value: 'variables'},
   {label: translate('curve.sourceViewSource'), value: 'source'},
+  {label: translate('curve.sourceViewObjects'), value: 'objects'},
 ])
 /** 源码项目：SourceBrowser 首次选目录后由 @project-loaded 回传；切换视图复用，不重复选目录。 */
 const sourceProject = shallowRef<SourceProject | null>(null)
@@ -1441,6 +1487,29 @@ const sourceSelectedKeys = computed<string[]>(() => seriesList.value.map((item) 
  * 也避免影响只做变量选择的既有流程）；挂载后保持（v-show），切换视图不丢浏览状态。
  */
 const sourceViewEverOpened = ref(false)
+/** task-53：Objects/Watch 视图（懒挂载，切 tab 保持状态）。 */
+const objectsViewEverOpened = ref(false)
+const objectRoots = computed<ObjectRoot[]>(() => (elfInfo.value
+  ? discoverObjectRoots(elfInfo.value.variables, {preferredNames: DEFAULT_OBJECT_ROOT_NAMES})
+  : []))
+const objectRootKey = ref<string | null>(null)
+const activeObjectRoot = computed(() => findObjectRoot(objectRoots.value, objectRootKey.value)
+  ?? defaultObjectRoot(objectRoots.value))
+const objectBrowserRef = ref<{ selectRootByKey?(key: string): void } | null>(null)
+const objectPresetVersion = ref(0)
+const objectSelectedKeys = computed<string[]>(() => seriesList.value.map((item) => item.key))
+const objectPresets = computed(() => {
+  void objectPresetVersion.value
+  const root = activeObjectRoot.value
+  if (!root) return []
+  return listObjectWatchPresets(root.qualifiedName).map((preset) => ({
+    id: preset.id,
+    name: preset.name,
+    rootPath: preset.rootPath,
+    fields: preset.fields,
+  }))
+})
+const objectLiveValues = computed(() => sourceLiveValues.value)
 const sourceBrowserRef = ref<{
   scrollToVariableByKey(key: string): Promise<boolean>
   openFile?(file: string): Promise<void>
@@ -1450,6 +1519,7 @@ const sourceBrowserRef = ref<{
 const autoPcSource = ref(true)
 watch(elfView, (view) => {
   if (view === 'source') sourceViewEverOpened.value = true
+  if (view === 'objects') objectsViewEverOpened.value = true
 }, {immediate: true})
 const connecting = ref(false)
 const connected = ref(false)
@@ -2277,8 +2347,12 @@ async function startLocalSampling(): Promise<void> {
     return
   }
   // v2：自动按每组 32 路切分（最多 8 组/256 路）；超出明确提示，不伪造。
-  const split = splitSeriesIntoGroups(snapshot, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS)
+  const split = splitSeriesIntoGroups(snapshot, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS, {sizeOf: (item) => Math.max(1, Math.min(8, item.sample.size)), maxBytes: CURVE_LOCAL_MAX_SAMPLE_BYTES})
   if (split.error === 'empty') return
+  if (split.error === 'too_many_bytes') {
+    notice.value = {type: 'error', title: translate('curve.localGroupLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES})}
+    return
+  }
   if (split.error === 'too_many_series') {
     notice.value = {type: 'error', title: translate('curve.localGroupLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES})}
     return
@@ -4640,6 +4714,8 @@ async function parseElfFile(file: File): Promise<void> {
     lastElfBytes.value = buffer.byteLength
     const result = parseElfVariables(buffer)
     elfInfo.value = result
+    objectRootKey.value = defaultObjectRoot(discoverObjectRoots(result.variables), {preferredNames: DEFAULT_OBJECT_ROOT_NAMES})?.key ?? null
+    objectPresetVersion.value += 1
     elfFlashRange.value = elfPtLoadRange(buffer)
     elfVerifySegment.value = elfFirstLoadableSegment(buffer)
     verifyState.value = 'idle'
@@ -4761,6 +4837,97 @@ function jumpToSource(key: string): void {
     void sourceBrowserRef.value?.scrollToVariableByKey(key)
   })
 }
+
+// ---- task-53：Objects/Watch 集成 -----------------------------------------
+function applyObjectRootChange(key: string, root: ObjectRoot): void {
+  objectRootKey.value = key || root.key
+  objectPresetVersion.value += 1
+}
+
+function applyObjectSelected(payload: ObjectNodeRef): void {
+  if (newSeries(payload.path, payload.curveKey, payload.typeName, payload.node)) {
+    activeSourceKey.value = payload.curveKey
+  }
+}
+
+function applyObjectAddCurves(payload: ObjectBatchPayload): void {
+  if (payload.truncated) {
+    globalNotify(translate('curve.objectBatchTruncated', {count: payload.nodes.length, total: payload.total}), 'warning')
+  }
+  if (payload.nodes.length === 0) return
+  addSelectedRowsBulk(payload.nodes.map((node) => ({name: node.path, key: node.curveKey, node: node.node})))
+}
+
+function ensureObjectSeries(node: ObjectNodeRef): void {
+  if (!isWatched(node.curveKey)) toggleWatch(node.curveKey, node.path)
+  if (seriesList.value.some((item) => item.key === node.curveKey)) return
+  newSeries(node.path, node.curveKey, node.typeName, node.node)
+}
+
+function applyObjectToggleWatch(payload: ObjectToggleWatchPayload): void {
+  toggleWatch(payload.curveKey, payload.path)
+  if (payload.watched) ensureObjectSeries(payload)
+}
+
+function applyObjectWatchNodes(payload: ObjectBatchPayload): void {
+  if (payload.truncated) {
+    globalNotify(translate('curve.objectBatchTruncated', {count: payload.nodes.length, total: payload.total}), 'warning')
+  }
+  for (const node of payload.nodes) ensureObjectSeries(node)
+}
+
+function applyObjectJumpSource(payload: ObjectSourceJumpPayload): void {
+  elfView.value = 'source'
+  sourceViewEverOpened.value = true
+  void nextTick(async () => {
+    const file = payload.relativeFile || payload.path
+    if (file) await sourceBrowserRef.value?.openFile?.(file)
+    if (payload.line > 0) sourceBrowserRef.value?.scrollToLine?.(payload.line)
+  })
+}
+
+function applyObjectSavePreset(payload: ObjectPresetSavePayload): void {
+  saveObjectWatchPreset({
+    name: payload.name,
+    rootPath: payload.rootPath || activeObjectRoot.value?.qualifiedName || '',
+    fields: payload.keys,
+  })
+  objectPresetVersion.value += 1
+}
+
+function applyObjectLoadPreset(preset: ObjectPreset): void {
+  const root = objectRoots.value.find((candidate) => candidate.qualifiedName === preset.rootPath)
+    ?? activeObjectRoot.value
+  if (!root) return
+  if (objectRootKey.value !== root.key) objectRootKey.value = root.key
+  const keys = preset.keys?.length ? preset.keys : []
+  if (keys.length === 0) {
+    objectPresetVersion.value += 1
+    return
+  }
+  const matches = findObjectNodes(root, keys, {maxNodes: 512})
+  addSelectedRowsBulk(matches.map((match) => {
+    const ref = objectNodeRef({key: root.key, name: root.name}, match.node.node, match.node.path, match.node.depth)
+    return {name: ref.path, key: ref.curveKey, node: ref.node}
+  }))
+  objectPresetVersion.value += 1
+}
+
+function applyObjectDeletePreset(id: string): void {
+  deleteObjectWatchPreset(id)
+  objectPresetVersion.value += 1
+}
+
+// ObjectBrowser emits 在 SFC 模板推断中为宽松函数类型；统一 rest-arg adapter。
+const onObjectRootChange = (...args: unknown[]): void => applyObjectRootChange(args[0] as string, args[1] as ObjectRoot)
+const onObjectSelected = (...args: unknown[]): void => applyObjectSelected(args[0] as ObjectNodeRef)
+const onObjectAddCurves = (...args: unknown[]): void => applyObjectAddCurves(args[0] as ObjectBatchPayload)
+const onObjectWatchNodes = (...args: unknown[]): void => applyObjectWatchNodes(args[0] as ObjectBatchPayload)
+const onObjectToggleWatch = (...args: unknown[]): void => applyObjectToggleWatch(args[0] as ObjectToggleWatchPayload)
+const onObjectJumpSource = (...args: unknown[]): void => applyObjectJumpSource(args[0] as ObjectSourceJumpPayload)
+const onObjectSavePreset = (...args: unknown[]): void => applyObjectSavePreset(args[0] as ObjectPresetSavePayload)
+const onObjectLoadPreset = (...args: unknown[]): void => applyObjectLoadPreset(args[0] as ObjectPreset)
+const onObjectDeletePreset = (...args: unknown[]): void => applyObjectDeletePreset(args[0] as string)
 
 /** task-29 接口：点击源码行号 gutter -> 本地断点模式 + 地址（需本地采样支持）。 */
 function onSourceLineClick(payload: SourceLineClickPayload): void {
@@ -6078,6 +6245,18 @@ onBeforeUnmount(() => {
 /* ELF 卡片内 Variables / Source 视图切换（SourceBrowser 源码浏览） */
 .elf-view-switch {
   @apply mx-2;
+}
+
+.object-view {
+  display: flex;
+  height: 560px;
+  min-height: 360px;
+  margin-top: 0.5rem;
+}
+
+.object-view > * {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .source-view {

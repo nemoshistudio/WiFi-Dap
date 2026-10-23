@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 732
+const EXPECTED_TOTAL = 734
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 584
+const EXPECTED_ADDED = 586
 
 const errors = []
 const warnings = []
@@ -219,6 +219,7 @@ const ADDED_KEYS = [
         // task-37：录制回放/预设/watch/光标/派生/诊断/移动端
         'activeStale', 'activeStaleHint',
         // task-42：行断点/PC/target/Watchpoint/WS
+        'sourceViewObjects', 'objectBatchTruncated',
         'targetAutoModel',
         'conditionEnable', 'conditionAddress', 'conditionSize', 'conditionOp', 'conditionValue', 'conditionSigned', 'conditionMode', 'conditionOnce', 'conditionContinuous', 'conditionStopAfter', 'conditionArmed', 'conditionMet', 'conditionHits', 'conditionTriggerSeq', 'conditionJump', 'conditionAddressRequired', 'conditionInvalid',
         'sourceActivePcLine', 'sourceLineNoAddressHint', 'pcLineNoLineIndex', 'pcLineNoLine',

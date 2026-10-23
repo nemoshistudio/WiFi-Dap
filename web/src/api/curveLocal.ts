@@ -21,9 +21,10 @@ export const CURVE_LOCAL_FRAMES_PATH = '/api/curve/frames'
 /** 固件契约限制（docs §1.1）。 */
 export const CURVE_LOCAL_MIN_SERIES = 1
 /** 单组系列上限（兼容旧接口名；v2 多组见 MAX_TOTAL_SERIES）。 */
-export const CURVE_LOCAL_MAX_SERIES = 32
+export const CURVE_LOCAL_MAX_SERIES = 64
 export const CURVE_LOCAL_MAX_GROUPS = 8
-export const CURVE_LOCAL_MAX_SERIES_PER_GROUP = 32
+/** 固件 task-51：每组上限 64 路，总上限 512 路。 */
+export const CURVE_LOCAL_MAX_SERIES_PER_GROUP = 64
 export const CURVE_LOCAL_MAX_TOTAL_SERIES = CURVE_LOCAL_MAX_GROUPS * CURVE_LOCAL_MAX_SERIES_PER_GROUP
 export const CURVE_LOCAL_MAX_VARIANTS = 16
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
@@ -289,21 +290,39 @@ export interface SeriesGroupSplit<T> {
     groups: T[][]
     groupCount: number
     /** 首个错误：empty / too_many_series；null = 可下发。 */
-    error: 'empty' | 'too_many_series' | null
+    error: 'empty' | 'too_many_series' | 'too_many_bytes' | null
 }
 
-/** 按每组 perGroup 路切分（默认 32；最多 maxGroups 组 = 总 256 路）。 */
+/**
+ * 按每组 perGroup 路切分；可选按字节上限再切（固件每组 sum(size)≤256 B）。
+ * 默认 64/组、最多 8 组 = 总 512 路。
+ */
 export function splitSeriesIntoGroups<T>(
     series: readonly T[],
     perGroup = CURVE_LOCAL_MAX_SERIES_PER_GROUP,
     maxGroups = CURVE_LOCAL_MAX_GROUPS,
+    options: {sizeOf?: (item: T) => number; maxBytes?: number} = {},
 ): SeriesGroupSplit<T> {
     const totalLimit = perGroup * maxGroups
+    const maxBytes = options.maxBytes ?? CURVE_LOCAL_MAX_SAMPLE_BYTES
     const groups: T[][] = []
-    for (let index = 0; index < series.length; index += perGroup) {
-        groups.push(series.slice(index, index + perGroup))
+    let current: T[] = []
+    let currentBytes = 0
+    for (const item of series) {
+        const itemBytes = options.sizeOf ? Math.max(1, options.sizeOf(item)) : 0
+        if (current.length > 0 && (current.length >= perGroup || (options.sizeOf && currentBytes + itemBytes > maxBytes))) {
+            groups.push(current)
+            current = []
+            currentBytes = 0
+        }
+        current.push(item)
+        currentBytes += itemBytes
     }
+    if (current.length > 0) groups.push(current)
     if (series.length === 0) return {groups: [], groupCount: 0, error: 'empty'}
+    if (options.sizeOf && series.some((item) => Math.max(1, options.sizeOf!(item)) > maxBytes)) {
+        return {groups: groups.slice(0, maxGroups), groupCount: groups.length, error: 'too_many_bytes'}
+    }
     if (series.length > totalLimit || groups.length > maxGroups) {
         return {groups: groups.slice(0, maxGroups), groupCount: groups.length, error: 'too_many_series'}
     }

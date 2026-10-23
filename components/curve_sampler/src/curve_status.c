@@ -33,7 +33,9 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     "\"watchpoint_hits\":%u,\"trigger_seq\":%u,"
                     "\"condition_armed\":%s,\"condition_met\":%s,"
                     "\"condition_hits\":%u,\"condition_trigger_seq\":%u,"
-                    "\"error\":%u,"
+                    "\"max_groups\":%u,\"max_series\":%u,"
+                    "\"max_series_per_group\":%u,\"expr_pool_max\":%u,"
+                    "\"expr_pool_used\":%u,\"error\":%u,"
                     "\"sample_bytes\":%u,\"series_count\":%u,\"halt\":%s,"
                     "\"link_hz\":%u,\"consecutive_errors\":%u,"
                     "\"ring_frames\":%u,\"served_seq\":%u,\"last_tick_us\":%u,"
@@ -57,6 +59,11 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
                     status->condition_met ? "true" : "false",
                     (unsigned)status->condition_hits,
                     (unsigned)status->condition_trigger_seq,
+                    (unsigned)status->max_groups,
+                    (unsigned)status->max_series,
+                    (unsigned)status->max_series_per_group,
+                    (unsigned)status->expr_pool_max,
+                    (unsigned)status->expr_pool_used,
                     (unsigned)status->errors,
                     (unsigned)status->sample_bytes,
                     (unsigned)status->series_count,

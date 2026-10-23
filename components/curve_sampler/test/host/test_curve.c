@@ -153,23 +153,23 @@ static void test_parse_series_counts(void)
     char json[4096];
     size_t pos;
 
-    /* 32 series accepted (Phase 2.5; 32 x size 8 = the 256 B payload cap) */
+    /* 64 series accepted per group (64 x size 4 = the 256 B payload cap) */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,\"series\":[");
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
-                                "%s{\"id\":%d,\"size\":8,\"expr\":{\"kind\":\"addr\","
+                                "%s{\"id\":%d,\"size\":4,\"expr\":{\"kind\":\"addr\","
                                 "\"address\":%u}}",
-                                (i == 0) ? "" : ",", i, 0x20000000U + (uint32_t)i * 8U);
+                                (i == 0) ? "" : ",", i, 0x20000000U + (uint32_t)i * 4U);
     }
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series_count == 32U);
+    CHECK(cfg.series_count == 64U);
     CHECK(cfg.sample_bytes == 256U);
     CHECK(curve_ring_capacity_for(cfg.sample_bytes, false) == 30U);
 
-    /* 33 series rejected */
+    /* 65 series in one group rejected */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,\"series\":[");
-    for (int i = 0; i < 33; i++) {
+    for (int i = 0; i < 65; i++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                 "%s{\"size\":1,\"expr\":{\"kind\":\"addr\","
                                 "\"address\":%u}}",
@@ -577,7 +577,7 @@ static void test_parse_trigger(void)
 static void test_status_json(void)
 {
     static curve_status_t st;
-    char buf[1024];
+    char buf[2048];
     int len;
 
     memset(&st, 0, sizeof(st));
@@ -667,13 +667,23 @@ static void test_status_json(void)
     st.ring_capacity = 4294967295U;
     st.served_seq = 4294967295U;
     st.last_tick_us = 4294967295U;
+    st.max_groups = 8U;
+    st.max_series = 512U;
+    st.max_series_per_group = 64U;
+    st.expr_pool_max = 2048U;
+    st.expr_pool_used = 2047U;
     (void)snprintf(st.last_err, sizeof(st.last_err), "%s", "ESP_ERR_INVALID_STATE");
     memset(st.message, 'x', sizeof(st.message) - 1U);
     st.message[sizeof(st.message) - 1U] = '\0';
     len = curve_status_format_json(&st, buf, sizeof(buf));
     CHECK(len > 0);
-    CHECK(len < 1024); /* httpd s_json size in curve_http.c */
+    CHECK(len < 1280); /* httpd s_json size in curve_http.c */
     CHECK(strstr(buf, "\"trigger\":\"periodic\"") != NULL);
+    CHECK(strstr(buf, "\"max_groups\":8") != NULL);
+    CHECK(strstr(buf, "\"max_series\":512") != NULL);
+    CHECK(strstr(buf, "\"max_series_per_group\":64") != NULL);
+    CHECK(strstr(buf, "\"expr_pool_max\":2048") != NULL);
+    CHECK(strstr(buf, "\"expr_pool_used\":2047") != NULL);
 }
 
 
@@ -1072,7 +1082,7 @@ static void build_addr_series(char *buf, size_t cap, size_t *pos, int index,
 static void test_groups_boundaries(void)
 {
     static curve_config_t cfg;
-    static char json[32768];
+    static char json[65536];
     char err[96];
     size_t pos;
 
@@ -1089,11 +1099,11 @@ static void test_groups_boundaries(void)
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
           ESP_ERR_INVALID_ARG);
 
-    /* 33 series in one group rejected. */
+    /* 65 series in one group rejected. */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
                                               "\"halt\":true,\"groups\":["
                                               "{\"series\":[");
-    for (int i = 0; i < 33; i++) {
+    for (int i = 0; i < 65; i++) {
         build_addr_series(json, sizeof(json), &pos, i, 1U,
                           536870912U + (uint32_t)i);
     }
@@ -1101,26 +1111,26 @@ static void test_groups_boundaries(void)
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
           ESP_ERR_INVALID_ARG);
 
-    /* Contract maximum: 8 groups x 32 series = 256 total series. */
+    /* Contract maximum: 8 groups x 64 series = 512 total series. */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
                                               "\"halt\":true,\"groups\":[");
     for (int g = 0; g < 8; g++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "%s{\"series\":[",
                                 (g == 0) ? "" : ",");
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < 64; i++) {
             build_addr_series(json, sizeof(json), &pos, i, 1U,
-                              536870912U + (uint32_t)(g * 32 + i));
+                              536870912U + (uint32_t)(g * 64 + i));
         }
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
     }
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
     CHECK(cfg.group_count == 8U);
-    CHECK(cfg.series_count == 256U);
-    CHECK(cfg.sample_bytes == 32U);
-    CHECK(cfg.groups[7].series_first == 224U);
-    CHECK(cfg.groups[7].series_count == 32U);
-    CHECK(cfg.pool_used == 256U);
+    CHECK(cfg.series_count == 512U);
+    CHECK(cfg.sample_bytes == 64U);
+    CHECK(cfg.groups[7].series_first == 448U);
+    CHECK(cfg.groups[7].series_count == 64U);
+    CHECK(cfg.pool_used == 512U);
 
     /* One group with 32 x size 8 = the 256 B payload cap. */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
@@ -1304,23 +1314,19 @@ static void test_expr_pool_limit(void)
     size_t pos = (size_t)snprintf(json, sizeof(json),
                                   "{\"interval_us\":20000,\"halt\":true,"
                                   "\"groups\":[");
-    /* 4 groups x 25 series x depth-8 expression = 800 nodes > 768. */
-    for (int g = 0; g < 4; g++) {
+    /* 5 groups x 64 series x depth-8 compact expression (8 nodes each) =
+     * 2560 unique nodes > CURVE_EXPR_POOL_MAX (2048).  The base address is
+     * unique per series so DAG dedup cannot collapse the chains. */
+    for (int g = 0; g < 5; g++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                 "%s{\"series\":[", (g == 0) ? "" : ",");
-        for (int i = 0; i < 25; i++) {
+        for (int i = 0; i < 64; i++) {
+            unsigned base = 0x20000000U + (unsigned)(g * 64 + i) * 4U;
             pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
-                                    "%s{\"size\":1,\"expr\":", (i == 0) ? "" : ",");
-            for (int d = 0; d < 7; d++) {
-                pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
-                                        "{\"kind\":\"add\",\"offset\":1,\"inner\":");
-            }
-            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
-                                    "{\"kind\":\"addr\",\"address\":536870912}");
-            for (int d = 0; d < 7; d++) {
-                pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "}");
-            }
-            pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "}");
+                                    "%s{\"expr_s\":\"A%08X+00000001+00000001"
+                                    "+00000001+00000001+00000001+00000001"
+                                    "+00000001\",\"size\":1}",
+                                    (i == 0) ? "" : ",", base);
         }
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
     }
@@ -1328,6 +1334,53 @@ static void test_expr_pool_limit(void)
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
           ESP_ERR_INVALID_ARG);
     CHECK(strstr(err, "expr") != NULL);
+}
+
+static void test_expr_dag_dedup(void)
+{
+    static curve_config_t cfg;
+    static char json[24576];
+    char err[128];
+    size_t pos;
+
+    /* Object watch: 324 fields sharing one root pointer chain, split into
+     * groups of <=64 members (Web/object-watch layout).  Without DAG dedup this
+     * needs 1 + 324*2 nodes; dedup keeps the shared prefix. */
+    pos = (size_t)snprintf(json, sizeof(json),
+                           "{\"interval_us\":20000,\"halt\":true,\"groups\":[");
+    for (int g = 0; g < 6; g++) {
+        int count = (g < 5) ? 64 : 4;
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "%s{\"series\":[", (g == 0) ? "" : ",");
+        for (int i = 0; i < count; i++) {
+            unsigned field_off = (unsigned)(g * 64 + i) * 4U;
+
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "%s{\"expr_s\":\"D%08XD00000000A20000000\","
+                                    "\"size\":4}", (i == 0) ? "" : ",",
+                                    field_off);
+        }
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.series_count == 324U);
+    /* A(addr) + D(offset 0) shared once, one D per field. */
+    CHECK(cfg.pool_used <= 2U + 324U);
+    CHECK(cfg.pool_used >= 324U);
+
+    /* Identical sub-trees fully collapse: 64 identical reg expressions. */
+    {
+        static const char *dup_json =
+            "{\"interval_us\":20000,\"halt\":true,\"series\":["
+            "{\"expr_s\":\"D00000000A20000000\",\"size\":4},"
+            "{\"expr_s\":\"D00000000A20000000\",\"size\":4},"
+            "{\"expr_s\":\"D00000000A20000000\",\"size\":4}]}";
+
+        CHECK(curve_config_parse(dup_json, strlen(dup_json), &cfg, err,
+                                 sizeof(err)) == ESP_OK);
+        CHECK(cfg.pool_used == 2U); /* reg node + deref node, shared */
+    }
 }
 
 static void test_group_rotation(void)
@@ -1554,13 +1607,17 @@ static void test_cvf2_wire(void)
 
 static void test_config_static_budget(void)
 {
-    /* Static single instance owned by the HTTP layer; keep it well below a
-     * typical 24 KiB .bss budget so 8 groups x 32 series + variants fit. */
-    CHECK(sizeof(curve_config_t) > 12U * 1024U);
-    CHECK(sizeof(curve_config_t) < 24U * 1024U);
+    /* Static single instance owned by the HTTP layer (8 groups, 512 series,
+     * 2048 expr nodes, 256 variants) plus the static HTTP body buffer. */
+    CHECK(sizeof(curve_config_t) > 32U * 1024U);
+    CHECK(sizeof(curve_config_t) < 44U * 1024U);
     CHECK(sizeof(curve_series_t) <= 24U);
     CHECK(sizeof(curve_variant_t) <= 12U);
     CHECK(sizeof(curve_expr_t) <= 12U);
+    CHECK(CURVE_JSON_BODY_MAX >= 20480U); /* 512-series/324-field requests */
+    CHECK(CURVE_MAX_SERIES == 512U);
+    CHECK(CURVE_MAX_SERIES_PER_GROUP == 64U);
+    CHECK(CURVE_EXPR_POOL_MAX >= 1500U);
 }
 
 
@@ -1927,6 +1984,102 @@ static void test_parse_condition(void)
     }
 }
 
+
+/* ---- P1.8 object watch: per-tick read cache + 512-series body size -------- */
+
+static void test_expr_read_cache(void)
+{
+    static curve_config_t cfg;
+    char err[128];
+    static const char *json =
+        "{\"interval_us\":20000,\"halt\":true,\"series\":["
+        "{\"expr_s\":\"D00000000A20000000\",\"size\":4}]}";
+    uint32_t reg_values[CURVE_MAX_CORE_REGS] = {0};
+    bool reg_valid[CURVE_MAX_CORE_REGS] = {false};
+    uint32_t address1 = 0U;
+    uint32_t address2 = 0U;
+    int reads_before;
+
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    g_pointer_value = 0x20000100U;
+
+    /* Cache disabled (default): every evaluation reads the pointer. */
+    g_read_count = 0;
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address1) == CURVE_EVAL_OK);
+    CHECK(address1 == 0x20000100U);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address2) == CURVE_EVAL_OK);
+    CHECK(address2 == 0x20000100U);
+    CHECK(g_read_count == 2);
+
+    /* Halted tick: one shared pointer read is reused within the tick. */
+    g_read_count = 0;
+    curve_expr_cache_begin(true);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address1) == CURVE_EVAL_OK);
+    reads_before = g_read_count;
+    CHECK(reads_before == 1);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address2) == CURVE_EVAL_OK);
+    CHECK(g_read_count == reads_before); /* cache hit, no extra SWD read */
+    CHECK(address1 == address2);
+    curve_expr_cache_end();
+
+    /* Cache is cleared between ticks: another tick reads again. */
+    g_read_count = 0;
+    curve_expr_cache_begin(true);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address1) == CURVE_EVAL_OK);
+    curve_expr_cache_end();
+    curve_expr_cache_begin(true);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address1) == CURVE_EVAL_OK);
+    curve_expr_cache_end();
+    CHECK(g_read_count == 2);
+
+    /* No-halt tick: cache disabled (core may change memory between reads). */
+    g_read_count = 0;
+    curve_expr_cache_begin(false);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address1) == CURVE_EVAL_OK);
+    CHECK(curve_expr_eval(&cfg, cfg.series[0].expr, reg_values, reg_valid,
+                          &address2) == CURVE_EVAL_OK);
+    curve_expr_cache_end();
+    CHECK(g_read_count == 2);
+}
+
+/* A realistic 512-series compact v3 request must fit the HTTP body budget. */
+static void test_compact_512_series_body(void)
+{
+    static curve_config_t cfg;
+    static char json[CURVE_JSON_BODY_MAX + 1U];
+    char err[128];
+    size_t pos = 0U;
+
+    pos = (size_t)snprintf(json, sizeof(json),
+                           "{\"interval_us\":20000,\"halt\":true,\"groups\":[");
+    for (int g = 0; g < 8; g++) {
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "%s{\"series\":[", (g == 0) ? "" : ",");
+        for (int i = 0; i < 64; i++) {
+            unsigned index = (unsigned)(g * 64 + i);
+
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "%s{\"expr_s\":\"A%08X\",\"size\":4}",
+                                    (i == 0) ? "" : ",", 0x20000000U + index * 4U);
+        }
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(strlen(json) < CURVE_JSON_BODY_MAX);
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 8U);
+    CHECK(cfg.series_count == 512U);
+    CHECK(cfg.sample_bytes == 256U);
+    CHECK(cfg.pool_used == 512U); /* one unique addr node per series (no dedup) */
+}
+
 int main(void)
 {
     test_addr_filter();
@@ -1945,6 +2098,7 @@ int main(void)
     test_pc_scope_parse();
     test_groups_parse();
     test_groups_boundaries();
+    test_expr_dag_dedup();
     test_variants_parse_select();
     test_variant_pool_limit();
     test_expr_pool_limit();
@@ -1960,6 +2114,8 @@ int main(void)
     test_ws_core_subscribe();
     test_ws_core_plan_push();
     test_ws_core_ack();
+    test_expr_read_cache();
+    test_compact_512_series_body();
     test_condition_match();
     test_parse_condition();
     test_config_static_budget();
