@@ -1160,7 +1160,7 @@ const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 /** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
 const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : MAX_CURVE_SERIES))
-/** 本地 v2：按每组 64 路自动分组（task-51：groups 1..8，总 512；运行后以固件 group_count 为准）。 */
+/** 本地 v2：按每组 64 路自动分组（groups 1..8，总 256；运行后以固件 group_count 为准）。 */
 const localPlannedGroups = computed(() => Math.max(1, Math.ceil(seriesList.value.length / CURVE_LOCAL_MAX_SERIES_PER_GROUP)))
 const localActiveGroupCount = computed(() => (sampling.value && localGroupCount.value > 0 ? localGroupCount.value : localPlannedGroups.value))
 /** 每组刷新率 = 1/(组数 × interval)；总帧率仍约 1/interval（每组轮转）。 */

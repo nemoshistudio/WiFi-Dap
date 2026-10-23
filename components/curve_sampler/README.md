@@ -14,7 +14,7 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 | Method | URI | Notes |
 | --- | --- | --- |
 | POST | `/api/curve/selftest` | Phase 0 diagnostic, optional `{}` body |
-| POST | `/api/curve/start` | JSON body <= 20480 B, 1..8 groups x 1..64 series (<=512 total) |
+| POST | `/api/curve/start` | JSON body <= 16384 B, 1..8 groups x 1..64 series (<=256 total; typical use: tens) |
 | POST | `/api/curve/stop` | idempotent, optional body |
 | GET | `/api/curve/status` | sampler status JSON |
 | GET | `/api/curve/frames?since=&max=` | binary CVF2, `application/octet-stream` |

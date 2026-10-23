@@ -25,7 +25,7 @@ export const CURVE_LOCAL_MAX_SERIES = 64
 export const CURVE_LOCAL_MAX_GROUPS = 8
 /** 固件 task-51：每组上限 64 路，总上限 512 路。 */
 export const CURVE_LOCAL_MAX_SERIES_PER_GROUP = 64
-export const CURVE_LOCAL_MAX_TOTAL_SERIES = CURVE_LOCAL_MAX_GROUPS * CURVE_LOCAL_MAX_SERIES_PER_GROUP
+export const CURVE_LOCAL_MAX_TOTAL_SERIES = 256
 export const CURVE_LOCAL_MAX_VARIANTS = 16
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
@@ -301,9 +301,9 @@ export function splitSeriesIntoGroups<T>(
     series: readonly T[],
     perGroup = CURVE_LOCAL_MAX_SERIES_PER_GROUP,
     maxGroups = CURVE_LOCAL_MAX_GROUPS,
-    options: {sizeOf?: (item: T) => number; maxBytes?: number} = {},
+    options: {sizeOf?: (item: T) => number; maxBytes?: number; maxTotal?: number} = {},
 ): SeriesGroupSplit<T> {
-    const totalLimit = perGroup * maxGroups
+    const totalLimit = Math.min(perGroup * maxGroups, options.maxTotal ?? CURVE_LOCAL_MAX_TOTAL_SERIES)
     const maxBytes = options.maxBytes ?? CURVE_LOCAL_MAX_SAMPLE_BYTES
     const groups: T[][] = []
     let current: T[] = []

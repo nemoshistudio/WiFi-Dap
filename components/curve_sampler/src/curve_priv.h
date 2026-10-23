@@ -32,7 +32,7 @@ extern "C" {
  * Actual static-memory caps (reported to the Lead, not all in the Web API):
  *   CURVE_MAX_GROUPS              8
  *   CURVE_MAX_SERIES_PER_GROUP   64 (object watch: up to 64 members/group)
- *   CURVE_MAX_SERIES            512 (total across groups)
+ *   CURVE_MAX_SERIES            256 (total across groups; typical use is tens)
  *   CURVE_MAX_VARIANTS_PER_SERIES 16
  *   CURVE_MAX_VARIANTS          256 (total loclist variant pool)
  *   CURVE_EXPR_POOL_MAX        2048 expression nodes (12 B each, 24 KiB).
@@ -40,7 +40,7 @@ extern "C" {
  *     (kind, inner, offset/reg/address) nodes, so 324 object fields typically
  *     need only a few hundred nodes instead of ~1600; 2048 still leaves headroom
  *     for 512 independent series with 3-4 node chains.
- *   CURVE_JSON_BODY_MAX        24576 request bytes (512-series/324-field stop
+ *   CURVE_JSON_BODY_MAX        16384 request bytes (256-series/typical selection)
  *     requests are ~16-20 KiB even in the compact v3 format).
  *                                   every expr chain node (single expr or
  *                                   variant expr, depth <= 8) comes from here.
@@ -48,7 +48,7 @@ extern "C" {
  * error (groups/series limits themselves follow the contract exactly). */
 #define CURVE_MAX_GROUPS            8U
 #define CURVE_MAX_SERIES_PER_GROUP  64U
-#define CURVE_MAX_SERIES            512U
+#define CURVE_MAX_SERIES            256U
 #define CURVE_MAX_VARIANTS_PER_SERIES 16U
 #define CURVE_MAX_VARIANTS          256U
 #define CURVE_EXPR_POOL_MAX         768U
@@ -58,7 +58,7 @@ extern "C" {
 #define CURVE_MAX_INTERVAL_US       200000U
 #define CURVE_SERIES_SIZE_MIN       1U
 #define CURVE_SERIES_SIZE_MAX       8U
-#define CURVE_JSON_BODY_MAX         20480U
+#define CURVE_JSON_BODY_MAX         16384U
 #define CURVE_MAX_FRAMES_PER_REQ    64U
 
 /* Frame ring.  The hard constraint is the heap budget (8 KiB), so the capacity
