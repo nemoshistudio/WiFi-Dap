@@ -38,7 +38,12 @@
       <el-descriptions-item :label="translate('target.flashSize')">{{ formatFlashSize(targetInfo.flash_size) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.cpuid')">{{ formatRegister(targetInfo.cpuid) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.idcode')">{{ formatRegister(targetInfo.idcode) }}</el-descriptions-item>
-      <el-descriptions-item :label="translate('target.uid')">{{ targetInfo.uid || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.uid')">
+        <div v-if="uidWords(targetInfo.uid).length" class="font-mono text-xs leading-5">
+          <div v-for="(word, index) in uidWords(targetInfo.uid)" :key="index">UID{{ index }}: {{ word }}</div>
+        </div>
+        <span v-else>-</span>
+      </el-descriptions-item>
       <el-descriptions-item :label="translate('target.flashBase')">{{ formatRegister(targetInfo.flash_base) }}</el-descriptions-item>
     </el-descriptions>
     <el-alert
@@ -192,7 +197,12 @@
       <el-descriptions-item :label="translate('target.idcode')">
         {{ formatRegister(result.idcode ?? targetInfo?.idcode) }}
       </el-descriptions-item>
-      <el-descriptions-item :label="translate('target.uid')">{{ result.uid || targetInfo?.uid || '-' }}</el-descriptions-item>
+      <el-descriptions-item :label="translate('target.uid')">
+        <div v-if="uidWords(result.uid || targetInfo?.uid).length" class="font-mono text-xs leading-5">
+          <div v-for="(word, index) in uidWords(result.uid || targetInfo?.uid)" :key="index">UID{{ index }}: {{ word }}</div>
+        </div>
+        <span v-else>-</span>
+      </el-descriptions-item>
       <el-descriptions-item :label="translate('target.written')">{{ formatBytes(result.written) }}</el-descriptions-item>
       <el-descriptions-item :label="translate('target.sha256')">
         <span class="font-mono text-xs break-all">{{ result.sha256 || fileSha256 || '-' }}</span>
@@ -339,6 +349,13 @@ function formatFlashSize(bytes?: number): string {
 }
 
 /** 寄存器数值统一显示为 0x + 8 位大写 hex（协议原始字段，不做本地化）。 */
+/** STM32 96-bit UID: 显示为原生的 UID0/UID1/UID2 三个 32-bit 字。 */
+function uidWords(value?: string): string[] {
+  const raw = String(value ?? '').replace(/^0x/i, '').replace(/[^0-9a-f]/gi, '').toUpperCase()
+  if (raw.length !== 24) return raw ? [`0x${raw}`] : []
+  return [raw.slice(0, 8), raw.slice(8, 16), raw.slice(16, 24)].map((word) => `0x${word}`)
+}
+
 function formatRegister(value?: number | string): string {
   if (value === undefined || value === null || value === '') {
     return '-';

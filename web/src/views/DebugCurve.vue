@@ -10,14 +10,6 @@
         :closable="false"
         show-icon
     />
-    <el-alert
-        v-else
-        class="mb-3"
-        type="info"
-        :title="translate('curve.localTakeoverNote')"
-        :closable="false"
-        show-icon
-    />
 
     <el-alert
         v-if="kickWarning"
@@ -51,6 +43,7 @@
     <section class="curve-card">
       <div class="flex flex-wrap items-center gap-2">
         <el-tag :type="statusTagType" effect="dark">{{ statusText }}</el-tag>
+        <InfoTip v-if="isLocalSource" :content="translate('curve.localTakeoverNote')" :label="translate('common.details')"/>
         <template v-if="!isLocalSource">
           <span class="font-mono text-xs opacity-70">{{ endpointText }}</span>
           <span v-if="targetInfo" class="font-mono text-xs opacity-70">
@@ -86,6 +79,9 @@
           </el-button>
         </template>
         <el-button :disabled="sampleCount === 0" @click="clearData">{{ translate('curve.clear') }}</el-button>
+        <el-button class="desktop-only" size="small" @click="showAdvanced = !showAdvanced">
+          {{ showAdvanced ? translate('curve.mobileLess') : translate('curve.mobileMore') }}
+        </el-button>
         <el-button class="mobile-only" size="small" @click="mobileAdvanced = !mobileAdvanced">
           {{ mobileAdvanced ? translate('curve.mobileLess') : translate('curve.mobileMore') }}
         </el-button>
@@ -94,6 +90,7 @@
       <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
         <label class="flex items-center gap-2">
           <span class="whitespace-nowrap">{{ translate('curve.samplingSource') }}</span>
+          <InfoTip v-if="isLocalSource" :content="localModeHintText" :label="translate('common.details')"/>
           <el-select v-model="samplingSource" size="small" style="width: 13rem" :disabled="sampling" @change="onSamplingSourceChange">
             <el-option
                 v-for="source in SAMPLING_SOURCES"
@@ -191,7 +188,9 @@
           <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
           <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
           <span>{{ translate('curve.localStatus') }}: <b>{{ (sampling && localStatusInfo?.running !== false) ? translate('curve.localRunning') : translate('curve.localStopped') }}</b></span>
-          <span v-if="localTrigger === 'periodic'">Halt: <b>{{ localStatusInfo?.halt === false ? 'OFF' : (localStatusInfo?.halt === true ? 'ON' : '-') }}</b></span>
+          <span v-if="localTrigger === 'periodic'">
+            Halt: <b>{{ localStatusInfo?.halt === false ? 'OFF' : (localStatusInfo?.halt === true ? 'ON' : '-') }}</b>
+          </span>
           <span v-else-if="localTrigger === 'watchpoint'">
             {{ translate('curve.watchpointArmed') }}: <b>{{ watchpointArmed === null ? '-' : (watchpointArmed ? 'ON' : 'OFF') }}</b>
             · {{ translate('curve.watchpointHits') }}: <b>{{ watchpointHits ?? '-' }}</b>
@@ -204,19 +203,13 @@
             </span>
             <span v-if="pcLineStatusMessage" class="opacity-60"> · {{ pcLineStatusMessage }}</span>
           </span>
-          <span v-if="localTrigger === 'breakpoint'">{{ translate('curve.localSampled') }}: <b>{{ localStatusInfo?.sampled ?? localSampled ?? '-' }}</b></span>
-          <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
-          <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
-          <span>{{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b></span>
-          <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
           <span>{{ translate('curve.localSeries') }}: <b>{{ seriesList.length }}/{{ seriesLimit }}</b></span>
-          <span>{{ translate('curve.localGroups') }}: <b>{{ localActiveGroupCount }}</b></span>
+          <span class="inline-flex items-center gap-1">{{ translate('curve.localGroups') }}: <b>{{ localActiveGroupCount }}</b>
+            <InfoTip :content="translate('curve.localGroupingHint')" :label="translate('common.details')"/>
+          </span>
           <span>{{ translate('curve.localCurrentGroup') }}: <b>{{ sampling ? ((localCurrentGroup ?? 0) + 1) + '/' + localActiveGroupCount : '-' }}</b></span>
-          <span>{{ translate('curve.localGroupRate') }}: <b>{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
           <span>{{ translate('curve.wsTransport') }}: <b>{{ wsTransport }}</b></span>
-          <span>{{ translate('curve.wsFrames') }}: <b>{{ wsFrames }}</b></span>
-          <span>{{ translate('curve.wsDropped') }}: <b>{{ wsDropped }}</b></span>
-          <span>{{ translate('curve.wsLatency') }}: <b>{{ wsLatencyMs.toFixed(1) }} ms</b></span>
+          <InfoTip :content="localStatsDetailText" :title="translate('common.details')" :label="translate('common.details')"/>
         </template>
         <template v-else>
           <label class="flex items-center gap-2">
@@ -256,11 +249,6 @@
           </el-select>
         </label>
       </div>
-      <div class="mt-1 text-xs opacity-70">
-        {{ isLocalSource
-          ? (localTrigger === 'breakpoint' ? translate('curve.localBreakpointHint') : translate('curve.localModeHint'))
-          : (isDebugMode ? translate('curve.debugModeHint') : translate('curve.samplingHint')) }}
-      </div>
       <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs curve-field-error">
         {{ localBreakpointError }}
       </div>
@@ -271,13 +259,11 @@
         <el-button size="small" :disabled="watchTriggerSeq === null" @click="jumpToWatchTrigger(false)">{{ translate('curve.watchpointJumpPost') }}</el-button>
         <span v-if="watchFramesTriggered" class="render-warning">{{ translate('curve.watchpointTriggered') }}</span>
       </div>
-      <div v-if="isLocalSource && localOutOfScopeCount > 0" class="mt-1 text-xs opacity-70">
-        {{ translate('curve.localOutOfScopeHint') }}
+      <div v-if="isLocalSource && localOutOfScopeCount > 0" class="mt-1 inline-flex items-center gap-1 text-xs opacity-70">
+        {{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b>
+        <InfoTip :content="translate('curve.localOutOfScopeHint')" :label="translate('common.details')"/>
       </div>
-      <div v-if="isLocalSource" class="mt-1 text-xs opacity-70">
-        {{ translate('curve.localGroupingHint') }}
-      </div>
-      <div v-if="isLocalSource" class="mt-2 rounded border border-gray-200 p-2 text-xs">
+      <div v-if="isLocalSource && showAdvanced" class="mt-2 rounded border border-gray-200 p-2 text-xs">
         <div class="flex flex-wrap items-center gap-2">
           <el-checkbox v-model="conditionEnabled" :disabled="sampling">{{ translate('curve.conditionEnable') }}</el-checkbox>
           <template v-if="conditionEnabled">
@@ -326,7 +312,7 @@
           </template>
         </div>
       </div>
-      <div v-if="isLocalSource" class="group-weights mt-1 flex flex-wrap items-center gap-2 text-xs">
+      <div v-if="isLocalSource && localActiveGroupCount > 1" class="group-weights mt-1 flex flex-wrap items-center gap-2 text-xs">
         <span>{{ translate('curve.groupWeight') }}</span>
         <label v-for="(weight, index) in groupWeights.slice(0, localActiveGroupCount)" :key="index" class="flex items-center gap-1">
           <span>G{{ index + 1 }}</span>
@@ -352,27 +338,19 @@
     <!-- ELF / DWARF 变量浏览器 -->
     <section class="curve-card">
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <h2 class="text-lg font-bold">{{ translate('curve.elfUpload') }}</h2>
+        <h2 class="inline-flex items-center gap-1 text-lg font-bold">{{ translate('curve.elfUpload') }}
+          <InfoTip :content="translate('curve.elfHint')" :label="translate('common.details')"/>
+        </h2>
         <el-segmented v-model="elfView" :options="elfViewOptions" size="small" class="elf-view-switch"/>
         <el-button :loading="elfParsing" :disabled="isLocalSource && sampling" @click="openElfDialog">{{ translate('curve.elfUpload') }}</el-button>
         <input ref="elfInputRef" type="file" accept=".elf,.out" class="hidden" @change="onElfSelected"/>
       </div>
-      <p class="mt-1 text-xs opacity-70">{{ translate('curve.elfHint') }}</p>
       <p v-if="!elfInfo" class="mt-1 text-xs opacity-70">{{ translate('curve.emptyElfState') }}</p>
 
       <div v-if="elfInfo" class="mt-2">
-        <p v-if="elfInfo.source === 'dwarf'" class="text-sm">
+        <p v-if="elfInfo.source === 'dwarf'" class="inline-flex items-center gap-1 text-sm">
           {{ translate('curve.dwarfParsed', {count: elfInfo.variables.length, fixed: elfInfo.dwarfWithAddress}) }}
-          <span v-if="unsampleableCount > 0" class="block text-xs opacity-70">
-            {{ translate('curve.unsampleableHint', {count: unsampleableCount}) }}
-          </span>
-          <span v-if="elfInfo.dwarfHaltSamplable > 0" class="block text-xs opacity-70">
-            {{ translate('curve.haltSamplableHint', {count: elfInfo.dwarfHaltSamplable}) }}
-          </span>
-          <span v-if="elfInfo.dwarfPointerExpanded > 0" class="block text-xs opacity-70">
-            {{ translate('curve.pointerExpandedHint', {count: elfInfo.dwarfPointerExpanded}) }}
-          </span>
-          <span class="block text-xs opacity-70">{{ translate('curve.debugInfoHint') }}</span>
+          <InfoTip :content="dwarfDetailsText" :label="translate('common.details')"/>
         </p>
         <template v-else>
           <el-alert
@@ -387,7 +365,9 @@
           </p>
           <p class="mt-1 text-sm">{{ translate('curve.elfParsed', {count: elfInfo.variables.length}) }}</p>
         </template>
-        <p v-if="wideHint" class="mt-1 text-xs opacity-70">{{ translate('curve.wideHint') }}</p>
+        <span v-if="wideHint" class="ml-1 inline-flex align-middle">
+          <InfoTip :content="translate('curve.wideHint')" :label="translate('common.details')"/>
+        </span>
       </div>
       <el-alert v-if="elfError" class="mt-2" type="error" :title="elfError" :closable="false" show-icon/>
       <el-alert v-if="addressError" class="mt-2" type="warning" :title="addressError" :closable="false" show-icon/>
@@ -528,8 +508,8 @@
             @keyup.enter="addManualAddress"
         />
         <el-button size="small" @click="addManualAddress">{{ translate('curve.addAddress') }}</el-button>
+        <InfoTip v-if="isLocalSource && seriesList.length === 0" :content="translate('curve.localSelectHint')" :label="translate('common.details')"/>
       </div>
-      <p v-if="isLocalSource && seriesList.length === 0" class="mt-2 text-xs opacity-70">{{ translate('curve.localSelectHint') }}</p>
       </div>
 
       <!-- Objects：Ozone 式对象/字段浏览（ObjectBrowser 独立组件，task-52 API） -->
@@ -843,7 +823,7 @@
     </section>
 
     <!-- 录制 / 回放 -->
-    <section class="curve-card record-panel advanced-control">
+    <section v-if="showAdvanced || recordingActive" class="curve-card record-panel advanced-control">
       <div class="flex flex-wrap items-center gap-2 text-xs">
         <span class="font-semibold">{{ translate('curve.recordTitle') }}</span>
         <el-button size="small" :disabled="!sampling || playbackMode" @click="startRecording">{{ translate('curve.recordStart') }}</el-button>
@@ -908,6 +888,7 @@ import {translate, translateRaw, type TranslationKeys} from '@/locales'
 import {globalNotify} from '@/composables/notification'
 import SourceBrowser from '@/components/source/SourceBrowser.vue'
 import ObjectBrowser from '@/components/object/ObjectBrowser.vue'
+import InfoTip from '@/components/InfoTip.vue'
 import {
   DEFAULT_OBJECT_ROOT_NAMES,
   defaultObjectRoot,
@@ -1169,6 +1150,32 @@ const localGroupRefreshRate = computed(() => {
   if (groups <= 0 || localIntervalMs.value <= 0) return 0
   return 1000 / (groups * localIntervalMs.value)
 })
+
+/** 说明性文案：悬浮/点击 info 图标才显示，页面主体保持简洁。 */
+const localModeHintText = computed(() => (localTrigger.value === 'breakpoint'
+  ? translate('curve.localBreakpointHint')
+  : translate('curve.localModeHint')))
+const localStatsDetailText = computed(() => [
+  `Halt: ${localStatusInfo.value?.halt === false ? 'OFF' : localStatusInfo.value?.halt === true ? 'ON' : '-'}`,
+  `${translate('curve.localHits')}: ${localStatusInfo.value?.hits ?? localHits.value ?? '-'}`,
+  `${translate('curve.localFrames')}: ${localFramesReceived.value}`,
+  `${translate('curve.localInvalid')}: ${localInvalidCount.value}`,
+  `${translate('curve.localOutOfScope')}: ${localOutOfScopeCount.value}`,
+  `${translate('curve.localOverwritten')}: ${localOverwrittenCount.value}`,
+  `${translate('curve.localGroupRate')}: ${localGroupRefreshRate.value.toFixed(1)} Hz`,
+  `${translate('curve.wsFrames')}: ${wsFrames.value}`,
+  `${translate('curve.wsDropped')}: ${wsDropped.value}`,
+  `${translate('curve.wsLatency')}: ${wsLatencyMs.value.toFixed(1)} ms`,
+].join('\n'))
+const dwarfDetailsText = computed(() => {
+  if (!elfInfo.value) return ''
+  const lines: string[] = []
+  if (unsampleableCount.value > 0) lines.push(translate('curve.unsampleableHint', {count: unsampleableCount.value}))
+  if (elfInfo.value.dwarfHaltSamplable > 0) lines.push(translate('curve.haltSamplableHint', {count: elfInfo.value.dwarfHaltSamplable}))
+  if (elfInfo.value.dwarfPointerExpanded > 0) lines.push(translate('curve.pointerExpandedHint', {count: elfInfo.value.dwarfPointerExpanded}))
+  lines.push(translate('curve.debugInfoHint'))
+  return lines.join('\n')
+})
 /** 可见曲线（勾选 legend/selected 的 visible）与 B 模式实际绘制列表。 */
 const visibleSeriesList = computed(() => seriesList.value.filter((item) => item.visible))
 /** 自适应 B cap：>128 条可见时自动降到 32（仍保留手动 32/64/128），提示用户切 A。 */
@@ -1263,6 +1270,7 @@ const SMOOTHING_WINDOWS = [1, 3, 5, 9]
 const fftOpen = ref(false)
 const fftData = ref<{name: string; sampleRate: number; peaks: Array<{hz: number; magnitude: number}>} | null>(null)
 const mobileAdvanced = ref(false)
+const showAdvanced = ref(false)
 const legendExpanded = ref(false)
 const selectedCollapsed = ref(false)
 const selectedShowAll = ref(false)
@@ -6518,9 +6526,11 @@ onBeforeUnmount(() => {
 .playback-range { flex: 1; min-width: 8rem; }
 
 .mobile-only { display: none; }
+.desktop-only { display: inline-flex; }
 
 @media (max-width: 760px) {
   .mobile-only { display: inline-flex; }
+  .desktop-only { display: none !important; }
   .advanced-control { display: none !important; }
   .curve-layout.mobile-advanced .advanced-control { display: flex !important; }
 }
