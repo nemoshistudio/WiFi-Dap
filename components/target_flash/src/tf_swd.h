@@ -39,6 +39,21 @@ esp_err_t tf_swd_recover_bus(void);
 esp_err_t tf_swd_read_u32(uint32_t addr, uint32_t *value);
 esp_err_t tf_swd_write_u32(uint32_t addr, uint32_t value);
 
+/**
+ * @brief Switch the AHB-AP CSW access size between 32-bit (default) and
+ *        16-bit single-increment accesses.
+ *
+ * Only the F0/F1/F3 flash path needs 16-bit accesses (their flash controller
+ * programs one half-word per data write).  The caller must always restore
+ * 32-bit mode after the half-word sequence, even on error.
+ */
+esp_err_t tf_swd_set_access_16bit(bool enable);
+
+/** Write one half-word; the caller must have enabled 16-bit access first. */
+esp_err_t tf_swd_write_u16_raw(uint32_t addr, uint16_t value);
+/** Read one half-word; the caller must have enabled 16-bit access first. */
+esp_err_t tf_swd_read_u16_raw(uint32_t addr, uint16_t *value);
+
 /** Read a memory range through the AHB-AP (chunked block reads). */
 esp_err_t tf_swd_read_mem(uint32_t addr, void *buf, size_t len);
 

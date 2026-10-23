@@ -9,11 +9,23 @@
  * as it arrives (only a small alignment buffer is kept in RAM).
  *
  * Supported target families (first hardware: STM32F407):
- *   - STM32F4 (Cortex-M4, FLASH at 0x08000000): sectors 16K/64K/128K,
+ *   - STM32F4/F2 (Cortex-M4/M3, FLASH at 0x08000000): sectors 16K/64K/128K,
  *     x64 parallel programming (PSIZE=3) with automatic x32 fallback;
+ *   - STM32F7 single-bank (Cortex-M7, 1 MiB F74x/F75x, 512 KiB F72x/F73x):
+ *     sectors 32K/128K/256K (or 16K/64K/128K), same x64 strategy;
  *   - STM32H7 (Cortex-M7, dual bank 0x08000000/0x08100000): 128K sectors,
- *     256-bit (32-byte aligned) flash word programming.
- * Other targets are detected but reported as "unknown" (probe fails).
+ *     256-bit (32-byte aligned) flash word programming;
+ *   - STM32G4 (Cortex-M4): 2 KiB pages (4 KiB in G47x/G48x single-bank mode),
+ *     FLASH_OPTR.DBANK dual-bank selection, 64-bit double-word programming;
+ *   - STM32L4 (Cortex-M4): 2 KiB pages, 4/8 KiB pages on L4R/S/P/Q, DBANK
+ *     dual-bank option, 64-bit double-word programming;
+ *   - STM32G0 (Cortex-M0+): 2 KiB pages, G0B/G0C dual-bank option (BKER bit
+ *     13), 64-bit double-word programming;
+ *   - STM32WB / STM32WL (Cortex-M4, FLASH interface at 0x58004000): 4 KiB
+ *     (WB5x) / 2 KiB (WLEx) pages, 64-bit double-word programming;
+ *   - STM32F0/F1/F3 (Cortex-M0/M3/M4): 1/2 KiB pages, 16-bit half-word
+ *     programming (F1 XL-density two-bank addressing included).
+ * Other targets are detected and reported as identified-but-unsupported.
  *
  * Thread-safety / concurrency contract:
  *   - All API functions are thread-safe (internal mutex + busy state).
@@ -101,7 +113,8 @@ typedef struct {
                                     "STM32H723/H725/H730/H733/H735"; unknown
                                     DEV_ID -> "unknown (DEV_ID=0x483)" */
     bool supported;            /**< true only for families with a working
-                                    flash implementation (F4/H7 today) */
+                                    flash implementation (see the family list
+                                    at the top of this header) */
     uint32_t swd_clock_hz;     /**< SWD clock the probe link came up with
                                     (H7 boards may fall back to 1 MHz/500 kHz) */
 

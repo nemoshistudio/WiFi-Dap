@@ -53,8 +53,15 @@ typedef enum {
 /** Flash implementations that can actually program the part. */
 enum {
     TF_STM32_FLASH_OPS_NONE = 0,
-    TF_STM32_FLASH_OPS_F4 = 1,   /* tf_stm32f4.c (FLASH regs 0x40023C00) */
+    TF_STM32_FLASH_OPS_F4 = 1,   /* tf_stm32f4.c (F2/F4, FLASH regs 0x40023C00) */
     TF_STM32_FLASH_OPS_H7 = 2,   /* tf_stm32h7.c (FLASH regs 0x52002000) */
+    TF_STM32_FLASH_OPS_F7 = 3,   /* tf_stm32f4.c (F7, sector controller) */
+    TF_STM32_FLASH_OPS_F1X = 4,  /* tf_stm32f1.c (F0/F1/F3, page controller) */
+    TF_STM32_FLASH_OPS_G4 = 5,   /* tf_stm32_page.c (RM0440) */
+    TF_STM32_FLASH_OPS_L4 = 6,   /* tf_stm32_page.c (RM0351/RM0394/RM0432) */
+    TF_STM32_FLASH_OPS_G0 = 7,   /* tf_stm32_page.c (RM0444) */
+    TF_STM32_FLASH_OPS_WB = 8,   /* tf_stm32_page.c (RM0434, FLASH @0x58004000) */
+    TF_STM32_FLASH_OPS_WL = 9,   /* tf_stm32_page.c (RM0461, FLASH @0x58004000) */
 };
 
 typedef struct {
@@ -74,6 +81,16 @@ extern const size_t tf_stm32_part_table_size;
 
 /** dev_id lookup (table sorted by dev_id; NULL when unknown). */
 const tf_stm32_part_t *tf_stm32_part_find(uint16_t dev_id);
+
+/**
+ * Programming granularity in bytes for a TF_STM32_FLASH_OPS_* family:
+ * 2 = F0/F1/F3 half-word, 8 = F2/F4/F7/G4/L4/G0/WB/WL double word,
+ * 32 = H7 flash word.  Returns 0 for TF_STM32_FLASH_OPS_NONE.
+ *
+ * This pure helper is the single source of truth used by the engine to
+ * flush/pad the image buffer, so it is covered by the host tests.
+ */
+uint32_t tf_stm32_flash_program_unit(uint8_t flash_ops);
 
 /** CPUID -> core class (uses ARM PARTNO in bits[15:4]). */
 tf_core_class_t tf_stm32_core_from_cpuid(uint32_t cpuid);

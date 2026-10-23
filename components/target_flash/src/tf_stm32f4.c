@@ -1,11 +1,13 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * STM32F4 (Cortex-M4) internal-flash algorithm for the target flash engine.
+ * STM32F2/F4/F7 (Cortex-M3/M4/M7) internal-flash algorithm for the target
+ * flash engine.
  *
- * Register reference: RM0090 (STM32F405/407/415/417, FLASH at 0x40023C00).
- *   KEYR 0x04, SR 0x0C, CR 0x10.
- *   CR: PG(0) SER(1) STRT(16) PSIZE(9:8) LOCK(31).
+ * Register reference: RM0090 (STM32F4), RM0033 (STM32F2), RM0385/RM0410/RM0431
+ * (STM32F7) - all three use the same sector-based controller:
+ *   FLASH base 0x40023C00.  KEYR 0x04, SR 0x0C, CR 0x10.
+ *   CR: PG(0) SER(1) MER(2) SNB(6:3) PSIZE(9:8) STRT(16) LOCK(31).
  *   SR: EOP(0) OPERR(1) WRPERR(4) PGAERR(5) PGPERR(6) PGSERR(7) BSY(16).
  *
  * Programming strategy ("A4" x64 parallel optimization):
@@ -16,14 +18,27 @@
  *      PSIZE=2 (x32) and retry the unit as two 32-bit units.  x32 is also used
  *      for the rest of the image after the first fallback.
  *
+ * Coverage:
+ *   F2              - 0x411 (sector map 4x16 + 64 + 128 KiB)
+ *   F4 single-bank  - 0x413/0x423/0x431/0x433/0x441/0x458
+ *   F7 single-bank  - 0x449 (F74x/F75x, 32+128+256 KiB sectors) and 0x452
+ *                     (F72x/F73x, 16+64+128 KiB sectors)
+ * The 2 MiB dual-bank parts (F42x/F43x, F469/F479, F76x/F77x dual-bank and
+ * single-bank-option variants) use bank-relative sector numbering (SNB|0x10)
+ * and are intentionally reported as identified-but-unsupported.
+ *
  * The core must be halted while the flash is erased/programmed; the engine
- * halts it before calling these operations.
+ * halts it before calling these operations.  F407 hardware runs the F4 path;
+ * F2/F7 use the same register sequence but still need first-hardware
+ * validation.
  */
 #include <string.h>
 
 #include <esp_log.h>
 
 #include "tf_dap.h"
+#include "tf_stm32_geom.h"
+#include "tf_stm32_id.h"
 #include "tf_swd.h"
 #include "tf_internal.h"
 
@@ -57,64 +72,32 @@
 #define F4_ERASE_TIMEOUT_MS  10000U
 
 typedef struct {
-    uint32_t offset;
-    uint32_t size;
-} f4_sector_t;
+    uint16_t dev_id;
+    const char *family;   /* lower-case public family string */
+    tf_core_class_t core; /* CPUID core class check */
+} f4_part_t;
 
-/* DEV_IDs of the single-bank (<= 1 MiB) STM32F4 parts.  2 MiB dual-bank parts
- * (F42x/F43x, DEV_ID 0x419/0x421) are intentionally reported as unsupported:
- * their sector numbering uses the bank bit (SNB|0x10) which needs a second
- * bank-aware erase/program path (kept for a follow-up when hardware exists). */
-static bool f4_dev_id_supported(uint32_t dev_id)
+static const f4_part_t f4_parts[] = {
+    { 0x411U, "stm32f2", TF_CORE_M3 }, /* F205/F207/F215/F217 */
+    { 0x413U, "stm32f4", TF_CORE_M4 }, /* F405/F407/F415/F417 */
+    { 0x421U, "stm32f4", TF_CORE_M4 }, /* F446 */
+    { 0x423U, "stm32f4", TF_CORE_M4 }, /* F401xB/xC */
+    { 0x431U, "stm32f4", TF_CORE_M4 }, /* F411 */
+    { 0x433U, "stm32f4", TF_CORE_M4 }, /* F401xD/xE */
+    { 0x441U, "stm32f4", TF_CORE_M4 }, /* F412/F413 */
+    { 0x458U, "stm32f4", TF_CORE_M4 }, /* F410 */
+    { 0x449U, "stm32f7", TF_CORE_M7 }, /* F74x/F75x */
+    { 0x452U, "stm32f7", TF_CORE_M7 }, /* F72x/F73x */
+};
+
+static const f4_part_t *f4_part_find(uint32_t dev_id)
 {
-    switch (dev_id) {
-    case 0x411: /* F2x0/F2x5 (same flash controller family) */
-    case 0x413: /* F405/F407/F415/F417 - first hardware: F407 */
-    case 0x423: /* F401xB/C */
-    case 0x431: /* F411 */
-    case 0x433: /* F401xD/E */
-    case 0x441: /* F412/F413 */
-        return true;
-    default:
-        return false;
-    }
-}
-
-static size_t f4_build_sectors(const tf_target_t *target, f4_sector_t *sectors, size_t cap)
-{
-    size_t count = 0U;
-    uint32_t offset = 0U;
-
-    if (target->flash_size == 0U) {
-        return 0U;
-    }
-    /* Sectors 0..3: 16 KiB each, sector 4: 64 KiB, sectors 5+: 128 KiB each. */
-    for (uint32_t i = 0; i < 4U && offset < target->flash_size; i++) {
-        sectors[count].offset = offset;
-        sectors[count].size = 16U * 1024U;
-        offset += 16U * 1024U;
-        count++;
-        if (count >= cap) {
-            return count;
+    for (size_t i = 0U; i < sizeof(f4_parts) / sizeof(f4_parts[0]); i++) {
+        if (f4_parts[i].dev_id == (uint16_t)dev_id) {
+            return &f4_parts[i];
         }
     }
-    if (offset < target->flash_size && count < cap) {
-        sectors[count].offset = offset;
-        sectors[count].size = 64U * 1024U;
-        offset += 64U * 1024U;
-        count++;
-    }
-    while (offset < target->flash_size && count < cap) {
-        uint32_t size = 128U * 1024U;
-        if (target->flash_size - offset < size) {
-            size = target->flash_size - offset;
-        }
-        sectors[count].offset = offset;
-        sectors[count].size = size;
-        offset += size;
-        count++;
-    }
-    return count;
+    return NULL;
 }
 
 static esp_err_t f4_unlock(tf_target_t *target)
@@ -226,8 +209,13 @@ static esp_err_t f4_program(tf_target_t *target, uint32_t addr, const uint8_t *d
 {
     size_t offset = 0U;
 
-    if ((len % F4_PROGRAM_UNIT) != 0U) {
+    if ((len % F4_PROGRAM_UNIT) != 0U || (addr % F4_PROGRAM_UNIT) != 0U) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (addr < target->flash_base ||
+        (addr - target->flash_base) > target->flash_size ||
+        len > (size_t)(target->flash_size - (addr - target->flash_base))) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
     /* f4_erase() clears CR after the erase loop, so re-arm PG/PSIZE here. */
@@ -275,13 +263,18 @@ static esp_err_t f4_program(tf_target_t *target, uint32_t addr, const uint8_t *d
 
 static esp_err_t f4_erase(tf_target_t *target, uint32_t addr, uint32_t size)
 {
-    f4_sector_t sectors[16];
+    tf_sector_t sectors[32];
     size_t count;
     size_t erased = 0U;
     uint32_t start = addr - target->flash_base;
     uint32_t end = start + size;
 
-    count = f4_build_sectors(target, sectors, sizeof(sectors) / sizeof(sectors[0]));
+    if (size == 0U || addr < target->flash_base || start > target->flash_size ||
+        size > (target->flash_size - start)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    count = tf_stm32_sector_map((uint16_t)target->dev_id, target->flash_size, sectors,
+                                sizeof(sectors) / sizeof(sectors[0]));
     if (count == 0U) {
         return ESP_FAIL;
     }
@@ -294,8 +287,9 @@ static esp_err_t f4_erase(tf_target_t *target, uint32_t addr, uint32_t size)
         if (sector_end <= start || sectors[i].offset >= end) {
             continue;
         }
-        ESP_LOGI(TF_TAG, "F4: erase sector %u @0x%08X (%u KiB), image 0x%08X..0x%08X",
-                 (unsigned)i, (unsigned)(target->flash_base + sectors[i].offset),
+        ESP_LOGI(TF_TAG, "%s: erase sector %u @0x%08X (%u KiB), image 0x%08X..0x%08X",
+                 target->family_str, (unsigned)i,
+                 (unsigned)(target->flash_base + sectors[i].offset),
                  (unsigned)(sectors[i].size / 1024U),
                  (unsigned)addr, (unsigned)(addr + size));
         if (tf_swd_write_u32(F4_REG_CR,
@@ -326,18 +320,23 @@ static esp_err_t f4_erase(tf_target_t *target, uint32_t addr, uint32_t size)
 
 static esp_err_t f4_probe(tf_target_t *target)
 {
+    const tf_stm32_part_t *part;
+    const f4_part_t *cfg;
     uint32_t idcode = 0U;
     uint32_t cpuid = 0U;
-    uint32_t size_reg = 0U;
-    uint32_t uid[3];
+    uint32_t size_word = 0U;
+    uint32_t uid[3] = {0U, 0U, 0U};
     uint32_t dev_id;
     uint32_t flash_size;
+    tf_core_class_t core;
+    tf_sector_t sectors[32];
 
     if (tf_swd_read_u32(TF_F4_DBGMCU_IDCODE, &idcode) != ESP_OK) {
         return ESP_FAIL;
     }
     dev_id = idcode & 0xFFFU;
-    if (!f4_dev_id_supported(dev_id)) {
+    cfg = f4_part_find(dev_id);
+    if (cfg == NULL) {
         ESP_LOGW(TF_TAG, "F4: unsupported DBGMCU DEV_ID 0x%03X (IDCODE=0x%08X)",
                  (unsigned)dev_id, (unsigned)idcode);
         return ESP_ERR_NOT_SUPPORTED;
@@ -345,28 +344,39 @@ static esp_err_t f4_probe(tf_target_t *target)
     if (tf_swd_read_u32(TF_REG_CPUID, &cpuid) != ESP_OK) {
         return ESP_FAIL;
     }
-    /* Cortex-M4 CPUID (PARTNO 0xC24, variant 0x1). */
-    if ((cpuid & 0xFF00FF00U) != 0x4100C200U && cpuid != 0x410FC241U) {
-        ESP_LOGW(TF_TAG, "F4: unexpected CPUID 0x%08X (not Cortex-M4)", (unsigned)cpuid);
+    core = tf_stm32_core_from_cpuid(cpuid);
+    if (core != cfg->core) {
+        ESP_LOGW(TF_TAG, "%s: unexpected CPUID 0x%08X (%s, want %s)",
+                 cfg->family, (unsigned)cpuid, tf_stm32_core_name(core),
+                 tf_stm32_core_name(cfg->core));
         return ESP_ERR_NOT_SUPPORTED;
     }
-    if (tf_swd_read_u32(TF_F4_FLASH_SIZE_REG, &size_reg) != ESP_OK) {
-        return ESP_FAIL;
-    }
-    flash_size = ((size_reg >> 16) & 0xFFFFU) * 1024U;
-    if (flash_size == 0U) {
-        ESP_LOGE(TF_TAG, "F4: invalid flash size (FSIZE reg=0x%08X)", (unsigned)size_reg);
-        return ESP_FAIL;
-    }
-    if (flash_size > 1024U * 1024U) {
-        ESP_LOGW(TF_TAG, "F4: %u KiB dual-bank parts are not supported yet",
-                 (unsigned)(flash_size / 1024U));
+    part = tf_stm32_part_find((uint16_t)dev_id);
+    if (part == NULL || part->flash_size_reg == 0U || part->flash_size_shift == 0xFFU) {
         return ESP_ERR_NOT_SUPPORTED;
     }
-    if (tf_swd_read_mem(TF_F4_UID_BASE, uid, sizeof(uid)) != ESP_OK) {
+    if (tf_swd_read_u32(part->flash_size_reg, &size_word) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    flash_size = ((size_word >> part->flash_size_shift) & 0xFFFFU) * 1024U;
+    if (flash_size < 16U * 1024U ||
+        flash_size > tf_stm32_sector_max_flash((uint16_t)dev_id)) {
+        ESP_LOGE(TF_TAG, "%s: unsupported flash size %u KiB (FSIZE reg=0x%08X)",
+                 cfg->family, (unsigned)(flash_size / 1024U), (unsigned)size_word);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (tf_stm32_sector_map((uint16_t)dev_id, flash_size, sectors,
+                            sizeof(sectors) / sizeof(sectors[0])) == 0U) {
+        ESP_LOGW(TF_TAG, "%s: DEV_ID=0x%03X flash=%u KiB sector map not modelled",
+                 cfg->family, (unsigned)dev_id, (unsigned)(flash_size / 1024U));
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (part->uid_base != 0U &&
+        tf_swd_read_mem(part->uid_base, uid, sizeof(uid)) != ESP_OK) {
         return ESP_FAIL;
     }
 
+    target->dev_id = (uint16_t)dev_id;
     target->idcode = idcode;
     target->cpuid = cpuid;
     memcpy(target->uid, uid, sizeof(target->uid));
@@ -374,10 +384,10 @@ static esp_err_t f4_probe(tf_target_t *target)
     target->flash_size = flash_size;
     target->max_image_size = flash_size;
     target->f4_x32_mode = false;
-    snprintf(target->family_str, sizeof(target->family_str), "stm32f4");
-    ESP_LOGI(TF_TAG, "F4 detected: DEV_ID=0x%03X REV=0x%04X CPUID=0x%08X flash=%u KiB",
-             (unsigned)dev_id, (unsigned)(idcode >> 16), (unsigned)cpuid,
-             (unsigned)(flash_size / 1024U));
+    snprintf(target->family_str, sizeof(target->family_str), "%s", cfg->family);
+    ESP_LOGI(TF_TAG, "%s detected: DEV_ID=0x%03X REV=0x%04X CPUID=0x%08X (%s) flash=%u KiB",
+             cfg->family, (unsigned)dev_id, (unsigned)(idcode >> 16), (unsigned)cpuid,
+             tf_stm32_core_name(core), (unsigned)(flash_size / 1024U));
     return ESP_OK;
 }
 
@@ -386,6 +396,9 @@ static esp_err_t f4_program_begin(tf_target_t *target)
     uint32_t sr = 0U;
 
     if (f4_unlock(target) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    if (tf_swd_wait_clear(F4_REG_SR, F4_SR_BSY, F4_BSY_TIMEOUT_MS) != ESP_OK) {
         return ESP_FAIL;
     }
     if (tf_swd_read_u32(F4_REG_SR, &sr) == ESP_OK && (sr & F4_SR_ERRORS) != 0U) {
@@ -406,6 +419,15 @@ static esp_err_t f4_program_end(tf_target_t *target)
 
 const tf_family_ops_t tf_family_stm32f4_ops = {
     .name = "stm32f4",
+    .probe = f4_probe,
+    .erase = f4_erase,
+    .program_begin = f4_program_begin,
+    .program = f4_program,
+    .program_end = f4_program_end,
+};
+
+const tf_family_ops_t tf_family_stm32f7_ops = {
+    .name = "stm32f7",
     .probe = f4_probe,
     .erase = f4_erase,
     .program_begin = f4_program_begin,

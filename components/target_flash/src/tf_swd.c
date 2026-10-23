@@ -135,6 +135,52 @@ esp_err_t tf_swd_write_u32(uint32_t addr, uint32_t value)
     return ESP_OK;
 }
 
+esp_err_t tf_swd_set_access_16bit(bool enable)
+{
+    uint32_t csw = enable ? TF_AP_CSW_16BIT_INC : TF_AP_CSW_32BIT_INC;
+
+    if (tf_swd_write_ap(TF_AP_CSW, csw) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "AP CSW write (16-bit=%d) failed", (int)enable);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t tf_swd_write_u16_raw(uint32_t addr, uint16_t value)
+{
+    tf_dap_item_t items[2];
+
+    items[0].request = TF_REQ_AP_WRITE(TF_AP_TAR);
+    items[0].data = addr;
+    items[1].request = TF_REQ_AP_WRITE(TF_AP_DRW);
+    items[1].data = (uint32_t)value;
+
+    if (tf_dap_transfer(items, 2U, NULL, NULL) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "write16 0x%08X<=0x%04X failed",
+                 (unsigned)addr, (unsigned)value);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t tf_swd_read_u16_raw(uint32_t addr, uint16_t *value)
+{
+    uint32_t data[1] = {0U};
+
+    if (value == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (tf_swd_write_ap(TF_AP_TAR, addr) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    if (tf_dap_transfer_block(TF_REQ_AP_READ(TF_AP_DRW), 1U, data, true) != ESP_OK) {
+        ESP_LOGE(TF_TAG, "read16 0x%08X: block read failed", (unsigned)addr);
+        return ESP_FAIL;
+    }
+    *value = (uint16_t)(data[0] & 0xFFFFU);
+    return ESP_OK;
+}
+
 esp_err_t tf_swd_wait_clear(uint32_t addr, uint32_t mask, uint32_t timeout_ms)
 {
     uint64_t deadline = tf_now_ms() + timeout_ms;

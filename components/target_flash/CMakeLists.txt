@@ -1,7 +1,8 @@
 # WiFi Dap - target flash engine (Web-side direct flashing)
 #
-# Streams a target firmware image from the Web layer to an STM32 (F4/H7) over
-# SWD by driving the CMSIS-DAP command engine (components/DAP) inline.
+# Streams a target firmware image from the Web layer to an STM32 (F0/F1/F2/F3/
+# F4/F7/G0/G4/H7/L4/WB/WL) over SWD by driving the CMSIS-DAP command engine
+# (components/DAP) inline.
 #
 # Dependencies:
 #   DAP        - DAP_ExecuteCommand() (CMSIS-DAP command engine)
@@ -27,9 +28,12 @@ set(srcs
     "src/wt_target_flash.c"
     "src/tf_dap.c"
     "src/tf_swd.c"
+    "src/tf_stm32_id.c"
+    "src/tf_stm32_geom.c"
+    "src/tf_stm32f1.c"
     "src/tf_stm32f4.c"
     "src/tf_stm32h7.c"
-    "src/tf_stm32_id.c"
+    "src/tf_stm32_page.c"
 )
 
 

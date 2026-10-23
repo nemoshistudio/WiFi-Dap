@@ -14,6 +14,7 @@
 #include <esp_err.h>
 #include <sdkconfig.h>
 
+#include "tf_stm32_geom.h"
 #include "wt_target_flash.h"
 #include "wt_target_flash_debug.h"
 
@@ -96,12 +97,23 @@ extern "C" {
 #define TF_AP_CSW_32BIT_INC      (0x00000012U | TF_AP_CSW_HPROT_PRIV | \
                                   TF_AP_CSW_HMASTER_DEBUG)
 #define TF_AP_CSW_MODE_MASK      0x00000013U
+/* 16-bit single-increment CSW (F0/F1/F3 half-word programming), same HPROT/
+ * HMASTER bits as the 32-bit default. */
+#define TF_AP_CSW_16BIT_INC      (0x00000011U | TF_AP_CSW_HPROT_PRIV | \
+                                  TF_AP_CSW_HMASTER_DEBUG)
 
 /* Target families.  TF_FAMILY_STM32_IDENTIFIED = a real STM32 was identified
  * (CPUID+DBGMCU DEV_ID match) but no flash implementation exists for it yet. */
 typedef enum {
     TF_FAMILY_UNKNOWN = 0,
-    TF_FAMILY_STM32F4,
+    TF_FAMILY_STM32F4,        /* F2/F4 (sector-based) */
+    TF_FAMILY_STM32F7,        /* F7 (sector-based) */
+    TF_FAMILY_STM32F1,        /* F0/F1/F3 (page-based, half-word programming) */
+    TF_FAMILY_STM32G4,
+    TF_FAMILY_STM32L4,
+    TF_FAMILY_STM32G0,
+    TF_FAMILY_STM32WB,
+    TF_FAMILY_STM32WL,
     TF_FAMILY_STM32H7,
     TF_FAMILY_STM32_IDENTIFIED,
 } tf_family_t;
@@ -124,7 +136,7 @@ typedef struct tf_target {
     /* Detailed identification (static DEV_ID table, tf_stm32_id.c). */
     char series[16];          /* "STM32H7"; "unknown" if the DEV_ID is unknown */
     char device[56];          /* candidate model list or "unknown (DEV_ID=0x...)" */
-    bool supported;           /* a flash implementation exists (F4/H7 only) */
+    bool supported;           /* a flash implementation exists (see ops table) */
     uint32_t swd_clock_hz;    /* SWD clock the link came up with */
 
     /* Detection detail (v3, mirrors wt_tf_info_t). */
@@ -135,9 +147,16 @@ typedef struct tf_target {
 
     /* STM32F4: false = x64 (PSIZE=3) programming, true = x32 fallback. */
     bool f4_x32_mode;
+
+    /* Table flash_ops enum of this part (program-unit source of truth). */
+    uint8_t flash_ops;
+    /* Page-based families (G4/L4/G0/WB/WL): controller + page/bank geometry. */
+    tf_page_geom_t page;
+    /* F0/F1/F3 page geometry (page erase by address, 16-bit programming). */
+    tf_f1_geom_t f1;
 } tf_target_t;
 
-/** Per-family flash operations (implemented in tf_stm32f4.c / tf_stm32h7.c). */
+/** Per-family flash operations. */
 typedef struct tf_family_ops {
     const char *name;
     /** Fill target->family_str/idcode/uid/flash_* from the already-linked target. */
@@ -152,7 +171,14 @@ typedef struct tf_family_ops {
     esp_err_t (*program_end)(tf_target_t *target);
 } tf_family_ops_t;
 
-extern const tf_family_ops_t tf_family_stm32f4_ops;
+extern const tf_family_ops_t tf_family_stm32f4_ops;   /* F2/F4 */
+extern const tf_family_ops_t tf_family_stm32f7_ops;   /* F7 */
+extern const tf_family_ops_t tf_family_stm32f1_ops;   /* F0/F1/F3 */
+extern const tf_family_ops_t tf_family_stm32g4_ops;
+extern const tf_family_ops_t tf_family_stm32l4_ops;
+extern const tf_family_ops_t tf_family_stm32g0_ops;
+extern const tf_family_ops_t tf_family_stm32wb_ops;
+extern const tf_family_ops_t tf_family_stm32wl_ops;
 extern const tf_family_ops_t tf_family_stm32h7_ops;
 
 /* ---- bring-up stage tracking (RTC noinit; debug endpoint builds only) ---- */

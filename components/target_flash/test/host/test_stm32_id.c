@@ -67,7 +67,52 @@ static int table_ok(void)
     check("0x483 series STM32H7", strcmp(tf_stm32_part_find(0x483U)->series, "STM32H7") == 0, NULL);
     check("0x450 flash ops H7", tf_stm32_part_find(0x450U)->flash_ops == TF_STM32_FLASH_OPS_H7, NULL);
     check("0x413 flash ops F4", tf_stm32_part_find(0x413U)->flash_ops == TF_STM32_FLASH_OPS_F4, NULL);
-    check("0x410 no flash ops", tf_stm32_part_find(0x410U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x410 flash ops F1X", tf_stm32_part_find(0x410U)->flash_ops == TF_STM32_FLASH_OPS_F1X, NULL);
+    check("0x449 flash ops F7", tf_stm32_part_find(0x449U)->flash_ops == TF_STM32_FLASH_OPS_F7, NULL);
+    check("0x452 flash ops F7", tf_stm32_part_find(0x452U)->flash_ops == TF_STM32_FLASH_OPS_F7, NULL);
+    check("0x468 flash ops G4", tf_stm32_part_find(0x468U)->flash_ops == TF_STM32_FLASH_OPS_G4, NULL);
+    check("0x469 flash ops G4", tf_stm32_part_find(0x469U)->flash_ops == TF_STM32_FLASH_OPS_G4, NULL);
+    check("0x479 flash ops G4", tf_stm32_part_find(0x479U)->flash_ops == TF_STM32_FLASH_OPS_G4, NULL);
+    check("0x415 flash ops L4", tf_stm32_part_find(0x415U)->flash_ops == TF_STM32_FLASH_OPS_L4, NULL);
+    check("0x470 flash ops L4", tf_stm32_part_find(0x470U)->flash_ops == TF_STM32_FLASH_OPS_L4, NULL);
+    check("0x456 flash ops G0", tf_stm32_part_find(0x456U)->flash_ops == TF_STM32_FLASH_OPS_G0, NULL);
+    check("0x467 flash ops G0", tf_stm32_part_find(0x467U)->flash_ops == TF_STM32_FLASH_OPS_G0, NULL);
+    check("0x495 flash ops WB", tf_stm32_part_find(0x495U)->flash_ops == TF_STM32_FLASH_OPS_WB, NULL);
+    check("0x497 flash ops WL", tf_stm32_part_find(0x497U)->flash_ops == TF_STM32_FLASH_OPS_WL, NULL);
+    /* Intentionally identified-only: dual-bank 2 MiB sector parts and the
+     * PECR-based L0/L1 and TrustZone L5/U5 families. */
+    check("0x419 (F42x/F43x 2MiB) no flash ops", tf_stm32_part_find(0x419U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x434 (F46x/F47x 2MiB) no flash ops", tf_stm32_part_find(0x434U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x451 (F76x/F77x 2MiB) no flash ops", tf_stm32_part_find(0x451U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x416 (L1) no flash ops", tf_stm32_part_find(0x416U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x417 (L0) no flash ops", tf_stm32_part_find(0x417U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x472 (L5) no flash ops", tf_stm32_part_find(0x472U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    check("0x482 (U5) no flash ops", tf_stm32_part_find(0x482U)->flash_ops == TF_STM32_FLASH_OPS_NONE, NULL);
+    /* Every flash_ops entry must be a known enum value and have a program unit. */
+    for (i = 0U; i < tf_stm32_part_table_size; i++) {
+        const tf_stm32_part_t *p = &tf_stm32_part_table[i];
+        if (p->flash_ops != TF_STM32_FLASH_OPS_NONE &&
+            tf_stm32_flash_program_unit(p->flash_ops) == 0U) {
+            check("flash_ops has program unit", 0, p->series);
+            return failures;
+        }
+    }
+    check("flash_ops has program unit", 1, NULL);
+    return failures;
+}
+
+static int program_unit_ok(void)
+{
+    check("program unit F1X 2", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_F1X) == 2U, NULL);
+    check("program unit F4 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_F4) == 8U, NULL);
+    check("program unit F7 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_F7) == 8U, NULL);
+    check("program unit G4 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_G4) == 8U, NULL);
+    check("program unit L4 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_L4) == 8U, NULL);
+    check("program unit G0 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_G0) == 8U, NULL);
+    check("program unit WB 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_WB) == 8U, NULL);
+    check("program unit WL 8", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_WL) == 8U, NULL);
+    check("program unit H7 32", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_H7) == 32U, NULL);
+    check("program unit NONE 0", tf_stm32_flash_program_unit(TF_STM32_FLASH_OPS_NONE) == 0U, NULL);
     return failures;
 }
 
@@ -173,6 +218,7 @@ int main(void)
     printf("tf_stm32_id host tests\n");
     core_ok();
     table_ok();
+    program_unit_ok();
     bases_ok();
     density_ok();
     group_ok();

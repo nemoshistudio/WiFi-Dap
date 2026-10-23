@@ -398,9 +398,52 @@ static void tf_series_to_family(const char *series, char *out, size_t out_len)
  * order code remain unknowable over SWD (the Web layer compares against a
  * user-selected MCU/board profile). */
 
-/* Fill s_target for an identified table entry.  F4/H7 entries run the existing
- * family probe (it re-validates DEV_ID/CPUID and reads FSIZE/UID); other series
- * only get generic FSIZE/UID reads, reported as identified-but-unsupported. */
+/* Map the table's flash_ops enum to the runtime ops vtable + family id. */
+static const tf_family_ops_t *tf_ops_for_part(const tf_stm32_part_t *part,
+                                              tf_family_t *family)
+{
+    switch (part->flash_ops) {
+    case TF_STM32_FLASH_OPS_F4:
+        *family = TF_FAMILY_STM32F4;
+        return &tf_family_stm32f4_ops;
+    case TF_STM32_FLASH_OPS_F7:
+        *family = TF_FAMILY_STM32F7;
+        return &tf_family_stm32f7_ops;
+    case TF_STM32_FLASH_OPS_F1X:
+        *family = TF_FAMILY_STM32F1;
+        return &tf_family_stm32f1_ops;
+    case TF_STM32_FLASH_OPS_G4:
+        *family = TF_FAMILY_STM32G4;
+        return &tf_family_stm32g4_ops;
+    case TF_STM32_FLASH_OPS_L4:
+        *family = TF_FAMILY_STM32L4;
+        return &tf_family_stm32l4_ops;
+    case TF_STM32_FLASH_OPS_G0:
+        *family = TF_FAMILY_STM32G0;
+        return &tf_family_stm32g0_ops;
+    case TF_STM32_FLASH_OPS_WB:
+        *family = TF_FAMILY_STM32WB;
+        return &tf_family_stm32wb_ops;
+    case TF_STM32_FLASH_OPS_WL:
+        *family = TF_FAMILY_STM32WL;
+        return &tf_family_stm32wl_ops;
+    case TF_STM32_FLASH_OPS_H7:
+        *family = TF_FAMILY_STM32H7;
+        return &tf_family_stm32h7_ops;
+    default:
+        *family = TF_FAMILY_STM32_IDENTIFIED;
+        return NULL;
+    }
+}
+
+/* Fill s_target for an identified table entry.  Entries with a flash_ops
+ * implementation run the family probe (it re-validates DEV_ID/CPUID and reads
+ * FSIZE/UID); other series only get generic FSIZE/UID reads and are reported as
+ * identified-but-unsupported.  A family probe may also report
+ * ESP_ERR_NOT_SUPPORTED for a valid DEV_ID whose size/option-bit combination is
+ * not modelled (e.g. 2 MiB dual-bank F4/F7): such a part still keeps the
+ * identification data and is marked unsupported instead of failing the whole
+ * detection. */
 static esp_err_t tf_target_apply_part(const tf_stm32_part_t *part, uint32_t idcode,
                                       uint32_t cpuid, uint32_t clock_hz)
 {
@@ -416,28 +459,37 @@ static esp_err_t tf_target_apply_part(const tf_stm32_part_t *part, uint32_t idco
     s_target.flash_base = TF_MAIN_FLASH_BASE;
     s_target.f4_x32_mode = false;
     s_target.swd_clock_hz = clock_hz;
+    s_target.dev_id = part->dev_id;
+    s_target.flash_ops = part->flash_ops;
     snprintf(s_target.series, sizeof(s_target.series), "%s", part->series);
     tf_series_to_family(part->series, s_target.family_str, sizeof(s_target.family_str));
 
-    if (part->flash_ops == TF_STM32_FLASH_OPS_F4) {
-        s_target.ops = &tf_family_stm32f4_ops;
-        s_target.family = TF_FAMILY_STM32F4;
-    } else if (part->flash_ops == TF_STM32_FLASH_OPS_H7) {
-        s_target.ops = &tf_family_stm32h7_ops;
-        s_target.family = TF_FAMILY_STM32H7;
-    } else {
-        s_target.ops = NULL;
-        s_target.family = TF_FAMILY_STM32_IDENTIFIED;
-    }
-
+    s_target.ops = tf_ops_for_part(part, &s_target.family);
+    s_target.supported = false;
     if (s_target.ops != NULL) {
         err = s_target.ops->probe(&s_target);
-        if (err != ESP_OK) {
+        if (err == ESP_OK) {
+            flash_size = s_target.flash_size;
+            s_target.supported = true;
+        } else if (err == ESP_ERR_NOT_SUPPORTED) {
+            /* Valid part, but this size/option-bit variant has no modelled
+             * flash layout: keep the identification and downgrade. */
+            ESP_LOGW(TF_TAG, "target: DEV_ID 0x%03X (%s) flash variant unsupported",
+                     (unsigned)part->dev_id, part->model);
+            s_target.ops = NULL;
+            s_target.family = TF_FAMILY_STM32_IDENTIFIED;
+            s_target.supported = false;
+            s_target.flash_size = 0U;
+            s_target.max_image_size = 0U;
+            memset(s_target.uid, 0, sizeof(s_target.uid));
+            tf_series_to_family(part->series, s_target.family_str,
+                                sizeof(s_target.family_str));
+        } else {
             return err;
         }
-        flash_size = s_target.flash_size;
-        s_target.supported = true;
-    } else {
+    }
+
+    if (!s_target.supported) {
         if (part->flash_size_reg != 0U && part->flash_size_shift != 0xFFU) {
             uint32_t reg = 0U;
             if (tf_swd_read_u32(part->flash_size_reg, &reg) == ESP_OK) {
@@ -458,7 +510,6 @@ static esp_err_t tf_target_apply_part(const tf_stm32_part_t *part, uint32_t idco
         memcpy(s_target.uid, uid, sizeof(s_target.uid));
         s_target.flash_size = flash_size;
         s_target.max_image_size = flash_size;
-        s_target.supported = false;
     }
 
     model_str = tf_stm32_model_group(part->dev_id, flash_size, part->model, model, sizeof(model));
@@ -663,7 +714,12 @@ static bool tf_abort_check(void)
 
 static size_t tf_program_unit(void)
 {
-    return (s_target.family == TF_FAMILY_STM32H7) ? 32U : 8U;
+    uint32_t unit = tf_stm32_flash_program_unit(s_target.flash_ops);
+
+    /* Unsupported/unknown parts never reach programming, but the tail flush in
+     * tf_job_flash_end calls this only after a supported probe.  Keep an 8-byte
+     * fallback for robustness. */
+    return (unit != 0U) ? (size_t)unit : 8U;
 }
 
 static esp_err_t tf_program_block(const uint8_t *data, size_t len)
