@@ -1,5 +1,5 @@
 <template>
-  <div class="curve-layout" :class="{'mobile-advanced': mobileAdvanced}">
+  <div class="curve-layout">
     <h1 class="page-title">{{ translate('page.debugCurve') }}</h1>
 
     <el-alert
@@ -79,12 +79,6 @@
           </el-button>
         </template>
         <el-button :disabled="sampleCount === 0" @click="clearData">{{ translate('curve.clear') }}</el-button>
-        <el-button class="desktop-only" size="small" @click="showAdvanced = !showAdvanced">
-          {{ showAdvanced ? translate('curve.mobileLess') : translate('curve.mobileMore') }}
-        </el-button>
-        <el-button class="mobile-only" size="small" @click="mobileAdvanced = !mobileAdvanced">
-          {{ mobileAdvanced ? translate('curve.mobileLess') : translate('curve.mobileMore') }}
-        </el-button>
       </div>
 
       <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
@@ -209,7 +203,6 @@
           </span>
           <span>{{ translate('curve.localCurrentGroup') }}: <b>{{ sampling ? ((localCurrentGroup ?? 0) + 1) + '/' + localActiveGroupCount : '-' }}</b></span>
           <span>{{ translate('curve.wsTransport') }}: <b>{{ wsTransport }}</b></span>
-          <InfoTip :content="localStatsDetailText" :title="translate('common.details')" :label="translate('common.details')"/>
         </template>
         <template v-else>
           <label class="flex items-center gap-2">
@@ -249,6 +242,20 @@
           </el-select>
         </label>
       </div>
+      <div v-if="isLocalSource" class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs opacity-80">
+        <span v-if="localTrigger === 'breakpoint'">{{ translate('curve.localSampled') }}: <b>{{ localStatusInfo?.sampled ?? localSampled ?? '-' }}</b></span>
+        <span>{{ translate('curve.localHits') }}: <b>{{ localStatusInfo?.hits ?? localHits ?? '-' }}</b></span>
+        <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
+        <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
+        <span class="inline-flex items-center gap-1">{{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b>
+          <InfoTip :content="translate('curve.localOutOfScopeHint')" :label="translate('common.details')"/>
+        </span>
+        <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
+        <span>{{ translate('curve.localGroupRate') }}: <b>{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
+        <span>{{ translate('curve.wsFrames') }}: <b>{{ wsFrames }}</b></span>
+        <span>{{ translate('curve.wsDropped') }}: <b>{{ wsDropped }}</b></span>
+        <span>{{ translate('curve.wsLatency') }}: <b>{{ wsLatencyMs.toFixed(1) }} ms</b></span>
+      </div>
       <div v-if="isLocalSource && localTrigger === 'breakpoint' && localBreakpointError" class="mt-1 text-xs curve-field-error">
         {{ localBreakpointError }}
       </div>
@@ -259,11 +266,7 @@
         <el-button size="small" :disabled="watchTriggerSeq === null" @click="jumpToWatchTrigger(false)">{{ translate('curve.watchpointJumpPost') }}</el-button>
         <span v-if="watchFramesTriggered" class="render-warning">{{ translate('curve.watchpointTriggered') }}</span>
       </div>
-      <div v-if="isLocalSource && localOutOfScopeCount > 0" class="mt-1 inline-flex items-center gap-1 text-xs opacity-70">
-        {{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b>
-        <InfoTip :content="translate('curve.localOutOfScopeHint')" :label="translate('common.details')"/>
-      </div>
-      <div v-if="isLocalSource && showAdvanced" class="mt-2 rounded border border-gray-200 p-2 text-xs">
+      <div v-if="isLocalSource" class="mt-2 rounded border border-gray-200 p-2 text-xs">
         <div class="flex flex-wrap items-center gap-2">
           <el-checkbox v-model="conditionEnabled" :disabled="sampling">{{ translate('curve.conditionEnable') }}</el-checkbox>
           <template v-if="conditionEnabled">
@@ -823,7 +826,7 @@
     </section>
 
     <!-- 录制 / 回放 -->
-    <section v-if="showAdvanced || recordingActive" class="curve-card record-panel advanced-control">
+    <section class="curve-card record-panel advanced-control">
       <div class="flex flex-wrap items-center gap-2 text-xs">
         <span class="font-semibold">{{ translate('curve.recordTitle') }}</span>
         <el-button size="small" :disabled="!sampling || playbackMode" @click="startRecording">{{ translate('curve.recordStart') }}</el-button>
@@ -1151,22 +1154,9 @@ const localGroupRefreshRate = computed(() => {
   return 1000 / (groups * localIntervalMs.value)
 })
 
-/** 说明性文案：悬浮/点击 info 图标才显示，页面主体保持简洁。 */
 const localModeHintText = computed(() => (localTrigger.value === 'breakpoint'
   ? translate('curve.localBreakpointHint')
   : translate('curve.localModeHint')))
-const localStatsDetailText = computed(() => [
-  `Halt: ${localStatusInfo.value?.halt === false ? 'OFF' : localStatusInfo.value?.halt === true ? 'ON' : '-'}`,
-  `${translate('curve.localHits')}: ${localStatusInfo.value?.hits ?? localHits.value ?? '-'}`,
-  `${translate('curve.localFrames')}: ${localFramesReceived.value}`,
-  `${translate('curve.localInvalid')}: ${localInvalidCount.value}`,
-  `${translate('curve.localOutOfScope')}: ${localOutOfScopeCount.value}`,
-  `${translate('curve.localOverwritten')}: ${localOverwrittenCount.value}`,
-  `${translate('curve.localGroupRate')}: ${localGroupRefreshRate.value.toFixed(1)} Hz`,
-  `${translate('curve.wsFrames')}: ${wsFrames.value}`,
-  `${translate('curve.wsDropped')}: ${wsDropped.value}`,
-  `${translate('curve.wsLatency')}: ${wsLatencyMs.value.toFixed(1)} ms`,
-].join('\n'))
 const dwarfDetailsText = computed(() => {
   if (!elfInfo.value) return ''
   const lines: string[] = []
@@ -1269,8 +1259,7 @@ const smoothingWindow = ref(1)
 const SMOOTHING_WINDOWS = [1, 3, 5, 9]
 const fftOpen = ref(false)
 const fftData = ref<{name: string; sampleRate: number; peaks: Array<{hz: number; magnitude: number}>} | null>(null)
-const mobileAdvanced = ref(false)
-const showAdvanced = ref(false)
+
 const legendExpanded = ref(false)
 const selectedCollapsed = ref(false)
 const selectedShowAll = ref(false)
@@ -6525,14 +6514,8 @@ onBeforeUnmount(() => {
 
 .playback-range { flex: 1; min-width: 8rem; }
 
-.mobile-only { display: none; }
-.desktop-only { display: inline-flex; }
 
 @media (max-width: 760px) {
-  .mobile-only { display: inline-flex; }
-  .desktop-only { display: none !important; }
-  .advanced-control { display: none !important; }
-  .curve-layout.mobile-advanced .advanced-control { display: flex !important; }
 }
 
 @media (max-width: 760px) {
