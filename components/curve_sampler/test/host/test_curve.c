@@ -1608,16 +1608,17 @@ static void test_cvf2_wire(void)
 static void test_config_static_budget(void)
 {
     /* Static single instance owned by the HTTP layer (8 groups, 512 series,
-     * 2048 expr nodes, 256 variants) plus the static HTTP body buffer. */
-    CHECK(sizeof(curve_config_t) > 32U * 1024U);
-    CHECK(sizeof(curve_config_t) < 44U * 1024U);
-    CHECK(sizeof(curve_series_t) <= 24U);
+     * 768 expr nodes, 256 variants); the 24 KiB HTTP body is heap-allocated
+     * only while reading a POST so it does not shrink the DAP heap at boot. */
+    CHECK(sizeof(curve_config_t) > 20U * 1024U);
+    CHECK(sizeof(curve_config_t) < 32U * 1024U);
+    CHECK(sizeof(curve_series_t) <= 16U);
     CHECK(sizeof(curve_variant_t) <= 12U);
     CHECK(sizeof(curve_expr_t) <= 12U);
     CHECK(CURVE_JSON_BODY_MAX >= 20480U); /* 512-series/324-field requests */
     CHECK(CURVE_MAX_SERIES == 512U);
     CHECK(CURVE_MAX_SERIES_PER_GROUP == 64U);
-    CHECK(CURVE_EXPR_POOL_MAX >= 1500U);
+    CHECK(CURVE_EXPR_POOL_MAX >= 768U);
 }
 
 

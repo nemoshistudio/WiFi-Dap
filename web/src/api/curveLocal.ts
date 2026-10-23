@@ -556,7 +556,7 @@ function optionalFiniteNumber(value: unknown): number | undefined {
 /** 启动设备本地采样。 */
 /** 序列化一个 series（v2：variants-only 或 expr+pc_low/pc_high）。 */
 function serializeSeriesSpec(item: CurveLocalSeriesSpec): Record<string, unknown> {
-    const spec: Record<string, unknown> = {id: item.id, size: item.size}
+    const spec: Record<string, unknown> = {size: item.size}
     const variants = item.variants ?? []
     if (variants.length > 0) {
         spec.variants = variants.map((variant) => ({

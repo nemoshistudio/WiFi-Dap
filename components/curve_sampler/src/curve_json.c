@@ -574,7 +574,6 @@ static esp_err_t parse_series(const cJSON *item, curve_config_t *cfg,
     }
     parse_pc_scope(item, dst);
 
-    dst->id = id;
     dst->size = (uint8_t)size;
     *sample_bytes += (uint16_t)size;
     if (*sample_bytes > CURVE_MAX_SAMPLE_BYTES) {

@@ -14,7 +14,7 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 | Method | URI | Notes |
 | --- | --- | --- |
 | POST | `/api/curve/selftest` | Phase 0 diagnostic, optional `{}` body |
-| POST | `/api/curve/start` | JSON body <= 24576 B, 1..8 groups x 1..64 series (<=512 total) |
+| POST | `/api/curve/start` | JSON body <= 20480 B, 1..8 groups x 1..64 series (<=512 total) |
 | POST | `/api/curve/stop` | idempotent, optional body |
 | GET | `/api/curve/status` | sampler status JSON |
 | GET | `/api/curve/frames?since=&max=` | binary CVF2, `application/octet-stream` |
@@ -278,7 +278,7 @@ function PC range:
   carries the original group index, so the Web mapping is unchanged.
 * **Static budget (object watch, P1.8)**: the HTTP layer owns one static
   `curve_config_t` (**38232 B**: 8 groups, 512 series x 20 B, 256 loclist
-  variants x 12 B, 2048 expression nodes x 12 B) plus a static 24576 B request
+  variants x 12 B, 768 expression nodes x 12 B) plus a static 20480 B request
   body buffer (HTTP `s_json` 1280 B); the engine only keeps a const pointer
   while running and the parser refuses to overwrite it until the engine is idle
   (start returns 409 busy).  Builds stay far below the ESP32/S3 DRAM budget
@@ -286,7 +286,7 @@ function PC range:
   Logical limits reported by the parser and `GET /api/curve/status`
   (`max_groups`/`max_series`/`max_series_per_group`/`expr_pool_max`/
   `expr_pool_used`): groups 1..8, series/group 1..64, total series <=512,
-  variants/series 1..16, total variants <=256, expression nodes <=2048
+  variants/series 1..16, total variants <=256, expression nodes <=768
   (each node 12 B).  A request that exhausts the variant/expr pool is rejected
   with a clear 400 error.  The **compact v3 `expr_s` format** is required for
   large object-watch requests: 512 minimal series are ~17 KiB, while the same
@@ -324,7 +324,7 @@ Memory budget (measured on the built firmware, see report §16): the static
 configuration object grew from 17.6 KiB to 38.2 KiB and the static request body
 from 16 KiB to 24 KiB; the ESP32/S3 images still link with plenty of DRAM/heap
 headroom.  Practical upper bounds: 512 series when their expressions average
-<=4 nodes each (512 x 4 = 2048 exactly); object-watch requests with deep member
+<=1.5 nodes each on average (768 / 512); object-watch requests with deep member
 chains should stay at a few hundred fields (the 324-field case uses ~326
 nodes).  Exceeding the pool returns HTTP 400 "too many expr nodes".
 

@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -50,7 +51,20 @@
 
 /* The ESP httpd task has a single instance and a 4 KiB stack: request bodies
  * and response JSON use static buffers (same pattern as tf_debug_http.c). */
-static char s_body[CURVE_JSON_BODY_MAX + 1U];
+/* Request body buffer (kept in .bss: the ESP32-S3 heap's largest free block
+ * after WiFi is smaller than this buffer).  The 512-series compact v3 start
+ * body is ~17 KiB, hence the 20 KiB cap. */
+static char s_body_storage[CURVE_JSON_BODY_MAX + 1U];
+static char *s_body = s_body_storage;
+
+static char *curve_body_acquire(void)
+{
+    return s_body;
+}
+
+static void curve_body_release(void)
+{
+}
 static char s_json[1280];
 static curve_config_t s_http_cfg;
 
@@ -176,6 +190,9 @@ static esp_err_t curve_read_body(httpd_req_t *req, size_t *out_len)
         return ESP_ERR_INVALID_ARG;
     }
     *out_len = 0U;
+    if (s_body == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     if (content_len == 0U) {
         s_body[0] = '\0';
         return ESP_OK;
@@ -240,6 +257,10 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
     char err_msg[64] = {0};
     curve_status_t status;
 
+    if (curve_body_acquire() == NULL) {
+        return curve_send_error(req, "500 Internal Server Error",
+                                "{\"ok\":false,\"err\":\"no memory for body\"}");
+    }
     err = curve_read_body(req, &body_len);
     if (err == ESP_ERR_INVALID_SIZE) {
         return curve_send_error(req, "413 Payload Too Large",
@@ -265,6 +286,7 @@ static esp_err_t curve_handle_start(httpd_req_t *req)
      * global WebSocket alive. */
     curve_engine_release_ring();
     err = curve_config_parse(s_body, body_len, &s_http_cfg, err_msg, sizeof(err_msg));
+    curve_body_release();
     if (err != ESP_OK) {
         return curve_send_error(req, curve_http_status(err),
                                 "{\"ok\":false,\"err\":\"%s\"}", err_msg);
@@ -384,7 +406,12 @@ static esp_err_t curve_post_handler_impl(httpd_req_t *req)
     if (curve_path_is(uri, CURVE_URI_SELFTEST)) {
         /* Body is optional ("{}" or none); drain any content first. */
         size_t body_len = 0U;
+        if (curve_body_acquire() == NULL) {
+            return curve_send_error(req, "500 Internal Server Error",
+                                    "{\"ok\":false,\"err\":\"no memory for body\"}");
+        }
         esp_err_t err = curve_read_body(req, &body_len);
+        curve_body_release();
         if (err == ESP_ERR_INVALID_SIZE) {
             return curve_send_error(req, "413 Payload Too Large",
                                     "{\"ok\":false,\"err\":\"JSON body > %u bytes\"}",
@@ -426,7 +453,7 @@ static esp_err_t curve_get_handler_impl(httpd_req_t *req)
                             "{\"ok\":false,\"err\":\"unknown /api/curve action\"}");
 }
 
-/* Shared static s_body / s_http_cfg: serialize handlers.  Even though the
+/* Shared lazily allocated s_body / static s_http_cfg: serialize handlers.  Even though the
  * current web_server uses one httpd task, requests can arrive through more
  * than one server instance in future and the ESP HTTP stack may dispatch
  * handlers concurrently; an overwritten body buffer would otherwise surface as

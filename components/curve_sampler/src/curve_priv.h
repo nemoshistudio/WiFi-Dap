@@ -51,14 +51,14 @@ extern "C" {
 #define CURVE_MAX_SERIES            512U
 #define CURVE_MAX_VARIANTS_PER_SERIES 16U
 #define CURVE_MAX_VARIANTS          256U
-#define CURVE_EXPR_POOL_MAX         2048U
+#define CURVE_EXPR_POOL_MAX         768U
 #define CURVE_MAX_EXPR_DEPTH        8U
 #define CURVE_MAX_SAMPLE_BYTES      256U
 #define CURVE_MIN_INTERVAL_US       1000U
 #define CURVE_MAX_INTERVAL_US       200000U
 #define CURVE_SERIES_SIZE_MIN       1U
 #define CURVE_SERIES_SIZE_MAX       8U
-#define CURVE_JSON_BODY_MAX         24576U
+#define CURVE_JSON_BODY_MAX         20480U
 #define CURVE_MAX_FRAMES_PER_REQ    64U
 
 /* Frame ring.  The hard constraint is the heap budget (8 KiB), so the capacity
@@ -320,7 +320,6 @@ typedef struct {
 } curve_variant_t;
 
 typedef struct {
-    uint32_t id;              /* echoed back by callers; frames ordered by index */
     uint32_t pc_low;          /* single-style PC gate bounds (normalized) */
     uint32_t pc_high;         /* valid when CURVE_SERIES_FLAG_PC_GATE is set */
     uint16_t expr;            /* single expression index (CURVE_EXPR_NONE when
@@ -329,7 +328,7 @@ typedef struct {
     uint8_t size;             /* 1..8 bytes read from the evaluated address */
     uint8_t flags;            /* CURVE_SERIES_FLAG_* */
     uint8_t variant_count;    /* 0 = single expr/pc-gate series, 1..16 otherwise */
-    uint8_t reserved;
+    uint8_t reserved;         /* keep explicit: sizeof == 16, 512 series = 8 KiB */
 } curve_series_t;
 
 /* P2: optional per-group scheduling weight (weighted round-robin).  Web does
