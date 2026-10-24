@@ -76,7 +76,8 @@ const router = createRouter({
             path: '/',
             name: 'home',
             meta: { titleKey: 'page.home' },
-            redirect: () => '/uart',
+            // P0：首页即目标烧录页（`/target`）；`/` 只保留重定向，便于旧书签可用。
+            redirect: () => '/target',
         }, {
             path: '/wifi:ext(.*)',
             meta: { titleKey: 'page.wifi' },
@@ -106,8 +107,8 @@ const router = createRouter({
             path: '/update:ext(.*)',
             meta: { titleKey: 'page.update' },
             name: 'update',
-            // Wave 1 的 OTA flag 固定 false：页面源码保留，路由按不可达处理（隐藏）；
-            // Wave 2 的 WP-207 打开 VITE_ENABLE_OTA 后再接入上传流程。
+            // OTA 上传页默认启用（buildMode.isOTAEnabled() 默认 true）；
+            // 显式 VITE_ENABLE_OTA=false 的精简构建里按不可达路由处理（404）。
             component: isOTAEnabled() ? Update : Page404,
         }, {
             path: '/:catchAll(.*)', // Catch-all route for 404

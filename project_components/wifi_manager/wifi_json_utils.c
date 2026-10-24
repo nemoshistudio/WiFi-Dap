@@ -5,6 +5,7 @@
 
 #include "wifi_json_utils.h"
 #include "wifi_api.h"
+#include "wifi_manager.h"
 
 /* Bounded copy into a fixed buffer (the old code used strncpy with a wrong
  * size and a hardcoded out-of-bounds NUL write, docs §8.1 defect). */
@@ -63,6 +64,16 @@ cJSON *wifi_api_json_serialize_ap_info(wifi_api_ap_info_t *ap_info, wifi_api_jso
 	snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
 	         m[0], m[1], m[2], m[3], m[4], m[5]);
 	cJSON_AddStringToObject(root, "mac", mac_str);
+
+	/* DAP latency contract (docs/wifi-no-power-save.md): expose the effective
+	 * station power-save mode with the STA info so a Web/host client can verify
+	 * that modem sleep really is off (the IDF default is min_modem). The AP
+	 * info response (cmd 5) is unchanged; GET_MODE stays byte-compatible. */
+	if (cmd == WIFI_API_JSON_STA_GET_AP_INFO) {
+		wifi_ps_type_t ps = wifi_manager_get_power_save();
+		cJSON_AddStringToObject(root, "ps", wifi_manager_power_save_name(ps));
+		cJSON_AddBoolToObject(root, "ps_none", ps == WIFI_PS_NONE);
+	}
 
 	return root;
 }

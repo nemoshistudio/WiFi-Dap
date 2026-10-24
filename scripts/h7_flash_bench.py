@@ -10,6 +10,13 @@ docs/h7-flash-profile.md and docs/h7-flash-speedup.md:
   verify   : `verify_image <bin>` (read-back comparison)
   full     : `flash write_image erase <bin>` + `verify_image <bin>` (wall time)
   read     : `dump_image` of <read-size> bytes (default 1 MiB) from flash base
+  step     : N single-instruction `step` operations (DAP small transactions)
+  smallread: N single-word `mdw` reads from RAM (DAP small transactions)
+  smallwrite: N single-word `mww` writes to RAM (DAP small transactions)
+
+The step/small* phases isolate the per-transaction cost of the DAP transport
+(one CMSIS-DAP command per operation) from the bulk flash phases, which is what
+the ESP32-side DAP copy optimisation (docs/dap-copy-budget.md) targets.
 
 Each phase runs as a *fresh* OpenOCD process so phase times include OpenOCD
 startup (measured separately by the `startup` phase; subtract it if you need
@@ -95,8 +102,15 @@ DEFAULT_VID_PID = "0xc251 0xf00a"
 # caller passes --expect-sha256.
 REFERENCE_SHA256 = "0a91d59dbe857f055d13a81380af235b277637f25202285e4ccfe210b45081c0"
 
-ALL_PHASES = ("startup", "erase", "program", "verify", "full", "read")
+ALL_PHASES = ("startup", "erase", "program", "verify", "full", "read",
+              "step", "smallread", "smallwrite")
+#: Default phase set (historical behaviour; the small-transaction phases
+#: are opt-in through --phases).
+DEFAULT_PHASES = ("startup", "erase", "program", "verify", "full", "read")
 DESTRUCTIVE_PHASES = {"erase", "program", "full"}
+#: Phases that count DAP operations instead of bytes.
+OPERATION_PHASES = {"step": "step_count", "smallread": "small_count",
+                    "smallwrite": "small_count"}
 # Phases whose throughput can be derived from a known byte count.
 PHASE_BYTES = {"program": "image", "verify": "image", "full": "image", "read": "read"}
 
@@ -175,6 +189,9 @@ class BenchConfig:
     compare: Path = None
     check_usbip: bool = False
     speed_sweep: list = field(default_factory=list)  # kHz values
+    step_count: int = 200
+    small_count: int = 400
+    small_addr: int = 0x20000000  # target RAM (H7 DTCM by default)
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +274,20 @@ def phase_tcl(cfg: BenchConfig, image: ImageInfo, phase: str,
     if phase == "read":
         return [f"dump_image {tcl_quote(str(read_tmp))} "
                 f"0x{cfg.read_addr:08x} 0x{cfg.read_size:08x}"]
+    if phase == "step":
+        # One DAP transaction (+ one halt/resume) per instruction.
+        return [f"for {{set i 0}} {{$i < {cfg.step_count}}} {{incr i}} {{ step }}"]
+    if phase in ("smallread", "smallwrite"):
+        # One word per CMSIS-DAP Transfer transaction; `mdw`/`mww` each map to
+        # exactly one DAP_Transfer, which is the granularity the ESP32-side
+        # copy optimisation changes.
+        addr = f"0x{cfg.small_addr:08x}"
+        if phase == "smallread":
+            command = f"mdw {addr}"
+        else:
+            command = f"mww {addr} 0x12345678"
+        return [f"for {{set i 0}} {{$i < {cfg.small_count}}} {{incr i}} "
+                f"{{ {command} }}"]
     raise ValueError(f"unknown phase {phase}")
 
 
@@ -391,6 +422,11 @@ def summarize(cfg: BenchConfig, image: ImageInfo, results: list) -> dict:
                 nbytes = sizes[0] if sizes else cfg.read_size
                 entry["bytes"] = nbytes
                 entry["throughput_kib_s"] = kib_per_s(nbytes, entry["min_s"])
+            elif phase in OPERATION_PHASES:
+                ops = getattr(cfg, OPERATION_PHASES[phase])
+                entry["ops"] = ops
+                entry["ops_per_s"] = ops / entry["min_s"] if entry["min_s"] else 0.0
+                entry["us_per_op"] = entry["min_s"] * 1e6 / ops if ops else 0.0
         phases[phase] = entry
     return {
         "schema": 1,
@@ -437,6 +473,9 @@ def print_summary(summary: dict) -> None:
             note = f"{stats.get('bytes', 0)} B read"
         elif "bytes" in stats:
             note = f"{stats['bytes']} B"
+        elif "ops" in stats:
+            note = (f"{stats['ops']} DAP ops, "
+                    f"{stats.get('us_per_op', 0.0):.0f} us/op")
         else:
             note = ""
         if stats.get("times_s"):
@@ -524,6 +563,27 @@ def self_test(cfg: BenchConfig, image: ImageInfo) -> int:
     assert "verify_image" in plan["full"][1]
     assert "dump_image" in plan["read"][0]
     assert plan["startup"] == []
+    assert plan["step"] and f"$i < {cfg.step_count}" in plan["step"][0]
+    assert plan["smallread"] and plan["smallread"][0].count("mdw 0x20000000") == 1
+    assert plan["smallwrite"] and "mww 0x20000000 0x12345678" in plan["smallwrite"][0]
+    checks += 3
+
+    # operation-count phases produce per-op latency metrics
+    fake_ops = [
+        {"phase": "step", "repeat": 0, "rc": 0, "seconds": 2.0,
+         "warmup": False, "log": ""},
+        {"phase": "smallread", "repeat": 0, "rc": 0, "seconds": 1.0,
+         "warmup": False, "log": ""},
+    ]
+    saved_phases = cfg.phases
+    cfg.phases = ["step", "smallread"]
+    ops_summary = summarize(cfg, image, fake_ops)
+    cfg.phases = saved_phases
+    assert ops_summary["phases"]["step"]["ops"] == cfg.step_count
+    assert abs(ops_summary["phases"]["step"]["us_per_op"]
+               - 2.0e6 / cfg.step_count) < 1e-6
+    assert ops_summary["phases"]["smallread"]["ops"] == cfg.small_count
+    checks += 2
 
     # summaries with synthetic runs
     fake = [
@@ -755,8 +815,19 @@ def parse_args(argv: list) -> BenchConfig:
                         help="dump_image address (default: flash base)")
     parser.add_argument("--read-size", default=f"0x{DEFAULT_READ_SIZE:x}",
                         help="dump_image size (default: 0x100000 = 1 MiB)")
-    parser.add_argument("--phases", default=",".join(ALL_PHASES),
-                        help=f"comma-separated phases (default: {','.join(ALL_PHASES)})")
+    parser.add_argument("--step-count", type=int, default=200,
+                        help="number of single-instruction steps for the "
+                             "'step' phase (default: 200)")
+    parser.add_argument("--small-count", type=int, default=400,
+                        help="number of single-word transfers for the "
+                             "'smallread'/'smallwrite' phases (default: 400)")
+    parser.add_argument("--small-addr", default="0x20000000",
+                        help="target RAM address for smallread/smallwrite "
+                             "(default: 0x20000000, H7 DTCM)")
+    parser.add_argument("--phases", default=",".join(DEFAULT_PHASES),
+                        help="comma-separated phases (valid: "
+                             f"{','.join(ALL_PHASES)}; default: "
+                             f"{','.join(DEFAULT_PHASES)})")
     parser.add_argument("--repeats", type=int, default=3,
                         help="measured repeats per phase (default: 3)")
     parser.add_argument("--warmup", type=int, default=0,
@@ -805,11 +876,16 @@ def parse_args(argv: list) -> BenchConfig:
         die("--repeats must be >= 1 and --warmup >= 0")
     if args.timeout < 5:
         die("--timeout must be >= 5 s")
+    if not 1 <= args.step_count <= 10000:
+        die("--step-count must be in 1..10000")
+    if not 1 <= args.small_count <= 10000:
+        die("--small-count must be in 1..10000")
     for value, name in ((args.base_addr, "--base-addr"),
                         (args.flash_size, "--flash-size"),
                         (args.sector_size, "--sector-size"),
                         (args.read_addr, "--read-addr"),
-                        (args.read_size, "--read-size")):
+                        (args.read_size, "--read-size"),
+                        (args.small_addr, "--small-addr")):
         try:
             int(value, 0)
         except ValueError:
@@ -843,6 +919,9 @@ def parse_args(argv: list) -> BenchConfig:
         compare=args.compare,
         check_usbip=args.check_usbip,
         speed_sweep=speeds,
+        step_count=args.step_count,
+        small_count=args.small_count,
+        small_addr=int(args.small_addr, 0),
     )
     return cfg
 

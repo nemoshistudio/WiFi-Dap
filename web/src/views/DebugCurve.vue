@@ -151,6 +151,34 @@
             />
             <span v-if="breakpointResolution?.ok" class="font-mono text-xs opacity-70">{{ formatHex32(breakpointResolution.address) }}</span>
           </label>
+          <!-- task-55：函数快照（选函数/地址 → 断点 → 首个命中帧冻结/标记） -->
+          <div v-if="localTrigger === 'breakpoint'" class="function-snapshot flex flex-wrap items-center gap-2 rounded border px-2 py-1 text-xs">
+            <span class="font-semibold">Function snapshot</span>
+            <InfoTip
+                content="Function snapshot: select a function/address and Arm. The first FPB hit (breakpoint sampling) freezes the chart and marks that sample with cursor A. Firmware one-shot (task-57) additionally records the trigger frame and captures N post-trigger frames, then auto-stops and keeps the ring; old firmware ignores that field and Web still freezes on the first hit frame. Boundary: only the selected variables sampled at the hit (plus PC when the frame carries it) are captured — no SWO trace, no call-stack backtrace, no RTOS task awareness. Stack-frame variables are valid only while their frame is active; hits are throttled by Min interval. With multiple groups one hit samples only one group, so other groups keep their last sampled values."
+                label="Boundary"
+            />
+            <el-checkbox v-model="snapshotFreezeOnHit" :disabled="sampling">Freeze on hit</el-checkbox>
+            <el-checkbox v-model="snapshotFirmwareOneShot" :disabled="sampling" title="Firmware one-shot snapshot (requires new firmware; old firmware ignores the field and Web falls back to first-hit freeze)">FW one-shot</el-checkbox>
+            <label v-if="snapshotFirmwareOneShot" class="flex items-center gap-1">
+              <span>post frames</span>
+              <el-input-number v-model="snapshotAfterFrames" :min="0" :max="CURVE_LOCAL_MAX_SNAPSHOT_AFTER" :controls="false" size="small" style="width: 4rem" :disabled="sampling"/>
+            </label>
+            <el-button size="small" :disabled="sampling || localStartDisabled" @click="armFunctionSnapshot">Arm snapshot</el-button>
+            <el-button size="small" :disabled="sampling || (!snapshotHit && !snapshotArmed)" @click="clearSnapshotMark">Clear mark</el-button>
+            <span v-if="snapshotArmed" class="snapshot-armed">ARMED · {{ snapshotFunctionName }} @ <span class="font-mono">{{ formatHex32(snapshotBoundaryAddr) }}</span></span>
+            <span v-else-if="snapshotHit" class="snapshot-hit">
+              HIT ≈{{ snapshotHitTime === null ? '-' : snapshotHitTime.toFixed(3) }}s
+              <template v-if="snapshotHitPc !== null"> · PC <span class="font-mono">{{ formatHex32(snapshotHitPc) }}</span></template>
+              <template v-if="snapshotSeq !== null"> · seq {{ snapshotSeq }}</template>
+            </span>
+            <span v-if="snapshotFirmwareState" class="opacity-70">
+              FW: {{ snapshotFirmwareState }}<template v-if="snapshotFirmwarePreFrames !== null"> · pre {{ snapshotFirmwarePreFrames }}</template><template v-if="snapshotFirmwarePostFrames !== null"> · post {{ snapshotFirmwarePostFrames }}</template>
+            </span>
+            <span v-else-if="snapshotFirmwareOneShot && sampling" class="opacity-70">
+              FW: no snapshot_* status yet (old firmware?) — first-hit freeze fallback
+            </span>
+          </div>
           <template v-if="localTrigger === 'watchpoint'">
             <label class="flex items-center gap-2">
               <span class="whitespace-nowrap">{{ translate('curve.watchpointAddress') }}</span>
@@ -166,11 +194,93 @@
             </label>
             <label class="flex items-center gap-2">
               <span>{{ translate('curve.watchpointAccess') }}</span>
-              <el-select v-model="watchAccess" size="small" style="width: 6.5rem" :disabled="sampling">
+              <el-select v-model="watchAccess" size="small" style="width: 7.5rem" :disabled="sampling">
                 <el-option value="write" :label="translate('curve.watchpointWrite')"/>
+                <el-option value="read" :label="translate('curve.watchpointRead')"/>
                 <el-option value="readwrite" :label="translate('curve.watchpointReadWrite')"/>
               </el-select>
             </label>
+            <!-- task-58：第二路 DWT comparator（固件 task-57；资源不足时原样显示固件错误） -->
+            <label class="watch-second-toggle inline-flex items-center gap-1">
+              <el-checkbox v-model="watchSecondEnabled" :disabled="sampling">{{ translate('curve.watchpointSecond') }}</el-checkbox>
+              <InfoTip :content="translate('curve.watchpointSecondHint')" :label="translate('common.details')"/>
+            </label>
+            <template v-if="watchSecondEnabled">
+              <span class="font-semibold text-xs">W2</span>
+              <label class="flex items-center gap-2">
+                <span class="whitespace-nowrap">{{ translate('curve.watchpointAddress') }}</span>
+                <el-input v-model="watch2AddressInput" size="small" style="width: 9.5rem" :disabled="sampling" placeholder="0x24001238"/>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>{{ translate('curve.watchpointSize') }}</span>
+                <el-select v-model="watch2Size" size="small" style="width: 4.5rem" :disabled="sampling">
+                  <el-option :value="1" label="1"/>
+                  <el-option :value="2" label="2"/>
+                  <el-option :value="4" label="4"/>
+                </el-select>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>{{ translate('curve.watchpointAccess') }}</span>
+                <el-select v-model="watch2Access" size="small" style="width: 7.5rem" :disabled="sampling">
+                  <el-option value="write" :label="translate('curve.watchpointWrite')"/>
+                  <el-option value="read" :label="translate('curve.watchpointRead')"/>
+                  <el-option value="readwrite" :label="translate('curve.watchpointReadWrite')"/>
+                </el-select>
+              </label>
+            </template>
+            <!-- task-62：第 3/4 路 DWT comparator（固件 task-60；最多 4 路）。资源不足时
+                 固件返回 err 原文（含 DWT_CTRL/空闲 comparator 信息），原样显示在下方。 -->
+            <span class="watch-extra-toggle inline-flex items-center gap-1">
+              <el-checkbox v-model="watchThird.enabled" :disabled="sampling">W3</el-checkbox>
+              <el-checkbox v-model="watchFourth.enabled" :disabled="sampling">W4</el-checkbox>
+              <InfoTip content="Firmware task-60 supports up to 4 DWT comparators. W3/W4 are sent via the canonical watchpoints array; old firmware ignores them and arms only W1/W2 (status watch_count shows the real value). Comparator shortage is reported verbatim from firmware (DWT_CTRL / free comparator info), not guessed in the UI." label="Boundary"/>
+            </span>
+            <template v-if="watchThird.enabled">
+              <span class="font-semibold text-xs">W3</span>
+              <label class="flex items-center gap-2">
+                <span class="whitespace-nowrap">{{ translate('curve.watchpointAddress') }}</span>
+                <el-input v-model="watchThird.addressInput" size="small" style="width: 9.5rem" :disabled="sampling" placeholder="0x2400123C"/>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>{{ translate('curve.watchpointSize') }}</span>
+                <el-select v-model="watchThird.size" size="small" style="width: 4.5rem" :disabled="sampling">
+                  <el-option :value="1" label="1"/>
+                  <el-option :value="2" label="2"/>
+                  <el-option :value="4" label="4"/>
+                </el-select>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>{{ translate('curve.watchpointAccess') }}</span>
+                <el-select v-model="watchThird.access" size="small" style="width: 7.5rem" :disabled="sampling">
+                  <el-option value="write" :label="translate('curve.watchpointWrite')"/>
+                  <el-option value="read" :label="translate('curve.watchpointRead')"/>
+                  <el-option value="readwrite" :label="translate('curve.watchpointReadWrite')"/>
+                </el-select>
+              </label>
+            </template>
+            <template v-if="watchFourth.enabled">
+              <span class="font-semibold text-xs">W4</span>
+              <label class="flex items-center gap-2">
+                <span class="whitespace-nowrap">{{ translate('curve.watchpointAddress') }}</span>
+                <el-input v-model="watchFourth.addressInput" size="small" style="width: 9.5rem" :disabled="sampling" placeholder="0x24001240"/>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>{{ translate('curve.watchpointSize') }}</span>
+                <el-select v-model="watchFourth.size" size="small" style="width: 4.5rem" :disabled="sampling">
+                  <el-option :value="1" label="1"/>
+                  <el-option :value="2" label="2"/>
+                  <el-option :value="4" label="4"/>
+                </el-select>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>{{ translate('curve.watchpointAccess') }}</span>
+                <el-select v-model="watchFourth.access" size="small" style="width: 7.5rem" :disabled="sampling">
+                  <el-option value="write" :label="translate('curve.watchpointWrite')"/>
+                  <el-option value="read" :label="translate('curve.watchpointRead')"/>
+                  <el-option value="readwrite" :label="translate('curve.watchpointReadWrite')"/>
+                </el-select>
+              </label>
+            </template>
             <span v-if="watchpointError" class="text-xs" style="color: #dc2626">{{ watchpointError }}</span>
           </template>
           <label class="flex items-center gap-2">
@@ -189,6 +299,18 @@
             {{ translate('curve.watchpointArmed') }}: <b>{{ watchpointArmed === null ? '-' : (watchpointArmed ? 'ON' : 'OFF') }}</b>
             · {{ translate('curve.watchpointHits') }}: <b>{{ watchpointHits ?? '-' }}</b>
             · {{ translate('curve.watchpointTriggerSeq') }}: <b>{{ watchTriggerSeq ?? '-' }}</b>
+            · {{ translate('curve.watchpointCount') }}: <b>{{ watchCount ?? '-' }}</b>
+            <template v-if="watchCount !== null && watchCount > 1">
+              · {{ translate('curve.watchpoint2Armed') }}: <b>{{ watchpoint2Armed === null ? '-' : (watchpoint2Armed ? 'ON' : 'OFF') }}</b>
+              · {{ translate('curve.watchpoint2Hits') }}: <b>{{ watchpoint2Hits ?? '-' }}</b>
+              <template v-if="watchpoint2Address !== null"> · W2 <span class="font-mono">{{ formatHex32(watchpoint2Address) }}</span></template>
+            </template>
+            <template v-for="row in extraWatchStatusRows" :key="row.index">
+              · {{ row.label }}: <b>{{ row.armed === null ? '-' : (row.armed ? 'ON' : 'OFF') }}</b>
+              · hits <b>{{ row.hits ?? '-' }}</b>
+              <template v-if="row.address !== null"> · <span class="font-mono">{{ formatHex32(row.address) }}</span></template>
+            </template>
+            · {{ translate('curve.watchpointLastIndex') }}: <b>{{ lastWatchIndex === null ? '-' : (lastWatchIndex === 0 ? translate('curve.watchpointLastNone') : lastWatchIndex) }}</b>
           </span>
           <span v-else>{{ translate('curve.localHits') }}: <b>{{ localStatusInfo?.hits ?? localHits ?? '-' }}</b></span>
           <span v-if="activePc !== null">PC: <b class="font-mono">0x{{ activePc.toString(16).toUpperCase() }}</b>
@@ -198,6 +320,16 @@
             <span v-if="pcLineStatusMessage" class="opacity-60"> · {{ pcLineStatusMessage }}</span>
           </span>
           <span>{{ translate('curve.localSeries') }}: <b>{{ seriesList.length }}/{{ seriesLimit }}</b></span>
+          <span v-if="sampling || totalStaleCount > 0" :title="'Per-series valid/stale tick slots from CVF2 per-series mask (firmware task-60). valid=' + totalValidCount + ', stale=' + totalStaleCount + (localSeriesStale === null ? '' : ', firmware series_stale=' + localSeriesStale)">
+            valid: <b>{{ totalValidCount }}</b> · stale: <b>{{ totalStaleCount }}</b>
+          </span>
+          <span v-if="localSampleEveryMax !== null" class="opacity-70" title="Firmware-confirmed maximum per-series sample_every for this session">sample_every max: <b>{{ localSampleEveryMax }}</b></span>
+          <span v-if="localStartTransport" class="opacity-70" :title="localStartTransport === 'bin'
+            ? 'Request transport: CBS1 streaming binary (POST /api/curve/start-bin, no 16 KiB contiguous heap)'
+            : ('Request transport: legacy JSON start (16384 B limit). ' + (localStartFallbackReason || ''))">
+            req: <b>{{ localStartTransport }}</b><template v-if="localStartRequestBytes !== null"> · {{ localStartRequestBytes }} B</template>
+            <template v-if="localStartTransport === 'json' && localStartFallbackReason"> · fallback</template>
+          </span>
           <span class="inline-flex items-center gap-1">{{ translate('curve.localGroups') }}: <b>{{ localActiveGroupCount }}</b>
             <InfoTip :content="translate('curve.localGroupingHint')" :label="translate('common.details')"/>
           </span>
@@ -251,7 +383,7 @@
           <InfoTip :content="translate('curve.localOutOfScopeHint')" :label="translate('common.details')"/>
         </span>
         <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
-        <span>{{ translate('curve.localGroupRate') }}: <b>{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
+        <span title="Average group rate = measured total frame rate / group count; per-group and per-variable ≈ rates are shown in the Selected rows and group-weight bar.">{{ translate('curve.localGroupRate') }}: <b>≈{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
         <span>{{ translate('curve.wsFrames') }}: <b>{{ wsFrames }}</b></span>
         <span>{{ translate('curve.wsDropped') }}: <b>{{ wsDropped }}</b></span>
         <span>{{ translate('curve.wsLatency') }}: <b>{{ wsLatencyMs.toFixed(1) }} ms</b></span>
@@ -265,6 +397,10 @@
         <el-button size="small" :disabled="watchTriggerSeq === null" @click="jumpToWatchTrigger(true)">{{ translate('curve.watchpointJumpPre') }}</el-button>
         <el-button size="small" :disabled="watchTriggerSeq === null" @click="jumpToWatchTrigger(false)">{{ translate('curve.watchpointJumpPost') }}</el-button>
         <span v-if="watchFramesTriggered" class="render-warning">{{ translate('curve.watchpointTriggered') }}</span>
+      </div>
+      <!-- task-58：资源不足/固件拒绝时**原样**显示固件 error（含 DWT_CTRL 实际值），不改写 -->
+      <div v-if="isLocalSource && localTrigger === 'watchpoint' && watchStartError" class="mt-1 text-xs curve-field-error">
+        {{ translate('curve.watchpointFirmwareError') }}: <code class="font-mono">{{ watchStartError }}</code>
       </div>
       <div v-if="isLocalSource" class="mt-2 rounded border border-gray-200 p-2 text-xs">
         <div class="flex flex-wrap items-center gap-2">
@@ -315,14 +451,19 @@
           </template>
         </div>
       </div>
-      <div v-if="isLocalSource && localActiveGroupCount > 1" class="group-weights mt-1 flex flex-wrap items-center gap-2 text-xs">
+      <div v-if="isLocalSource && (localActiveGroupCount > 1 || hasAnyRatePlan || hasRateTargets)" class="group-weights mt-1 flex flex-wrap items-center gap-2 text-xs">
         <span>{{ translate('curve.groupWeight') }}</span>
-        <label v-for="(weight, index) in groupWeights.slice(0, localActiveGroupCount)" :key="index" class="flex items-center gap-1">
-          <span>G{{ index + 1 }}</span>
+        <label
+            v-for="(weight, index) in effectiveGroupWeights.slice(0, Math.min(localActiveGroupCount, CURVE_LOCAL_MAX_GROUPS))"
+            :key="index"
+            class="flex items-center gap-1"
+        >
+          <span>G{{ index + 1 }}<template v-if="hasAnyRatePlan"> ÷{{ normalizeRateDivisor(plannedGroups[index]?.divisor ?? 1) }}</template></span>
           <el-input-number
+              v-if="!hasAnyRatePlan && !usePreciseSampleEvery"
               :model-value="weight"
               :min="1"
-              :max="8"
+              :max="CURVE_LOCAL_MAX_GROUP_WEIGHT"
               :step="1"
               size="small"
               :controls="false"
@@ -330,12 +471,24 @@
               style="width: 3.2rem"
               @change="(value: number) => setGroupWeight(index, value)"
           />
+          <span v-else class="font-mono">{{ weight }}</span>
         </label>
         <span class="opacity-70">Σ{{ localGroupWeightSum }} (≤64)</span>
-        <span v-if="localGroupWeightedRates.length" class="font-mono opacity-70">
-          {{ localGroupWeightedRates.map((rate) => rate.toFixed(1)).join(' / ') }} Hz
+        <span
+            v-if="localGroupActualRates.length"
+            class="font-mono opacity-70"
+            title="≈ actual group refresh rate = measured total frame rate × group weight share (firmware samples one group per tick); PC gating/out-of-scope can reduce valid samples."
+        >≈ {{ localGroupActualRates.map((rate) => formatRateHz(rate)).join(' / ') }} Hz</span>
+        <span v-if="hasAnyRatePlan" class="opacity-70">
+          target rates are group-weight shares of the global tick (not exact Hz)
+        </span>
+        <span v-if="usePreciseSampleEvery" class="opacity-70">
+          per-curve target Hz → firmware sample_every (integer division of group tick; actual/valid Hz shown per curve)
         </span>
       </div>
+      <div v-if="isLocalSource && ratePlanErrorText" class="mt-1 text-xs" style="color: #dc2626">{{ ratePlanErrorText }}</div>
+      <div v-if="isLocalSource && rateMismatchWarning" class="mt-1 text-xs render-warning">{{ rateMismatchWarning }}</div>
+      <div v-if="isLocalSource && preciseRateWarning" class="mt-1 text-xs render-warning">{{ preciseRateWarning }}</div>
     </section>
 
     <!-- ELF / DWARF 变量浏览器 -->
@@ -422,11 +575,14 @@
                 v-for="row in shownVariableRows"
                 :key="row.key"
                 v-memo="[row.key, row.kind, row.expanded, row.depth, selectedKeySet, variableListEpoch,
-                  onlySampleable, groupBy, variableSearch, samplingSource, row.groupLabel, row.groupCount]"
+                  onlySampleable, groupBy, variableSearch, samplingSource, row.groupLabel, row.groupCount,
+                  focusedVariableKey]"
+                :data-key="row.key"
                 :class="row.kind === 'group'
                   ? 'var-group-row'
                   : ['var-row', {selected: isRowSelected(row), unsampleable: !row.node.sampleable,
-                    selectable: nodeSelectable(row.node), 'pc-stale': activePc !== null && !nodeValidAtPc(row.node)}]"
+                    selectable: nodeSelectable(row.node), 'pc-stale': activePc !== null && !nodeValidAtPc(row.node),
+                    'focus-target': focusedVariableKey === row.key}]"
                 @click="row.kind === 'variable' ? onVariableRowClick(row, $event) : undefined"
             >
               <template v-if="row.kind === 'group'">
@@ -596,6 +752,27 @@
           {{ selectedCollapsed ? translate('curve.selectedExpand') : translate('curve.selectedCollapse') }}
         </el-button>
         <el-button size="small" type="danger" link :disabled="isLocalSource && sampling" @click="clearSelection">{{ translate('curve.clearSelection') }}</el-button>
+        <!-- task-55：批量设置目标刷新率（divisor 分桶 → 固件 group weight） -->
+        <template v-if="showRateControls">
+          <span class="inline-flex items-center gap-1">
+            <span class="text-xs" title="Set the target refresh rate for every selected curve (divisor of the global local tick; legacy firmware fallback)">Rate</span>
+            <el-select v-model="batchRateDivisor" size="small" style="width: 6.5rem" :disabled="sampling">
+              <el-option v-for="divisor in CURVE_LOCAL_RATE_DIVISORS" :key="divisor" :value="divisor" :label="rateDivisorLabel(divisor)" :title="rateDivisorTitle(divisor)"/>
+            </el-select>
+            <el-button size="small" :disabled="sampling || seriesList.length === 0" @click="applyBatchRate">{{ translate('common.apply') }}</el-button>
+          </span>
+          <!-- task-62：按目标 Hz 精确设置（固件 task-60 sample_every；未确认时 fallback） -->
+          <span class="inline-flex items-center gap-1" :title="localCapabilities.sampleEvery
+            ? 'Target refresh rate per curve in Hz: firmware per-series sample_every (actual = group tick Hz / round(tick/target), shown per curve)'
+            : 'Target refresh rate in Hz: firmware sample_every not confirmed yet; falls back to the nearest divisor group/weight mapping'">
+            <span class="text-xs">Hz</span>
+            <el-input-number v-model="batchTargetHz" size="small" :min="0.01" :max="100000" :step="1" :controls="false" style="width: 4.6rem" :disabled="sampling" placeholder="Hz"/>
+            <el-button size="small" :disabled="sampling || seriesList.length === 0" @click="applyBatchTargetHz">{{ translate('common.apply') }}</el-button>
+            <span class="text-xs" :class="localCapabilities.sampleEvery ? 'opacity-70' : 'render-warning'">
+              {{ localCapabilities.sampleEvery ? 'sample_every OK' : 'fallback' }}
+            </span>
+          </span>
+        </template>
         <el-button size="small" link :disabled="sampling" @click="addDerivedCurve('add')">{{ translate('curve.derivedAdd') }}</el-button>
         <el-button size="small" link :disabled="sampling" @click="addDerivedCurve('sub')">{{ translate('curve.derivedSub') }}</el-button>
         <el-input v-model="presetName" size="small" style="width: 9rem" :placeholder="translate('curve.presetName')"/>
@@ -611,18 +788,47 @@
             v-for="item in shownSelectedSeries"
             :key="item.id"
             class="selected-row"
+            :class="{'with-rate': showRateControls}"
         >
           <el-checkbox :model-value="item.visible" size="small" @change="toggleVisible(item)"/>
           <span class="series-dot" :style="{background: seriesDisplayColor(item.color)}"></span>
           <span class="truncate jump-source" :title="translate('curve.sourceViewSource')" @click.stop="jumpToSource(item.key)">{{ item.name }}</span>
           <span class="truncate text-xs opacity-70" :title="item.typeName">{{ item.typeName || translate('curve.unknownType') }}</span>
           <span class="font-mono text-xs opacity-70" :title="item.location ? addressExprText(item.location) : ''">{{ item.location ? addressExprText(item.location) : formatHex32(item.address) }}</span>
+          <!-- task-55/62：每变量目标 Hz / divisor + 计划/实测刷新率（仅设备本地采样） -->
+          <span v-if="showRateControls" class="rate-cell">
+            <el-input-number
+                :model-value="item.rateTargetHz ?? undefined"
+                size="small"
+                class="rate-hz"
+                :controls="false"
+                :min="0.01"
+                :max="100000"
+                :disabled="sampling"
+                placeholder="Hz"
+                :title="seriesRateTitle(item)"
+                @change="(value: number | undefined) => setSeriesTargetHz(item, value)"
+            />
+            <el-select
+                :model-value="normalizeRateDivisor(item.rateDivisor)"
+                size="small"
+                class="rate-select"
+                :disabled="sampling"
+                :title="rateDivisorTitle(item.rateDivisor)"
+                @change="(value: number) => setSeriesRateDivisor(item, value)"
+            >
+              <el-option v-for="divisor in CURVE_LOCAL_RATE_DIVISORS" :key="divisor" :value="divisor" :label="rateDivisorLabel(divisor)"/>
+            </el-select>
+            <span class="rate-actual" :title="seriesRateTitle(item)">{{ seriesRateLabel(item) }}</span>
+          </span>
           <el-select v-model="item.format" size="small" style="width: 5.5rem" @change="onSeriesFormatChange(item)">
             <el-option v-for="format in FORMATS" :key="format" :value="format" :label="format"/>
           </el-select>
-          <el-button link size="small" :disabled="seriesList[0]?.id === item.id" @click="moveSeries(item, -1)">↑</el-button>
-          <el-button link size="small" :disabled="seriesList[seriesList.length - 1]?.id === item.id" @click="moveSeries(item, 1)">↓</el-button>
-          <el-button type="danger" link size="small" @click="removeSeries(item.id)">×</el-button>
+          <span class="selected-actions">
+            <el-button link size="small" :disabled="seriesList[0]?.id === item.id" @click="moveSeries(item, -1)">↑</el-button>
+            <el-button link size="small" :disabled="seriesList[seriesList.length - 1]?.id === item.id" @click="moveSeries(item, 1)">↓</el-button>
+            <el-button type="danger" link size="small" @click="removeSeries(item.id)">×</el-button>
+          </span>
         </div>
         <div v-if="remainingSelected > 0" class="show-more-row">
           <el-button size="small" @click="selectedShowAll = true">
@@ -755,6 +961,125 @@
       </div>
     </section>
 
+    <!-- task-58：固件调试数据（目标 UART trace + 帧指针 backtrace，固件 task-57 原型） -->
+    <section v-if="isLocalSource" class="curve-card debug-data-panel advanced-control">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 class="inline-flex items-center gap-1 text-lg font-bold">{{ translate('curve.debugDataTitle') }}
+          <InfoTip :content="translate('curve.debugDataBoundary')" :label="translate('common.details')"/>
+        </h2>
+      </div>
+
+      <!-- 目标 UART trace：只有字节流 + 字节序号，无目标时间戳/行切分 -->
+      <div class="debug-subpanel mt-2">
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="text-sm font-semibold">{{ translate('curve.traceTitle') }}</span>
+          <el-tag size="small" :type="traceActive ? 'success' : 'info'">{{ traceActive ? translate('curve.traceActive') : translate('curve.traceInactive') }}</el-tag>
+          <el-tag size="small" type="info">{{ traceSource === 'lines' ? 'FW lines' : 'raw bytes' }}</el-tag>
+          <InfoTip :content="translate('curve.traceBoundary')" :label="translate('common.details')"/>
+          <el-button size="small" :loading="traceBusy" :disabled="traceBusy" @click="startTraceCapture">{{ translate('curve.traceStart') }}</el-button>
+          <el-button size="small" :loading="traceBusy" :disabled="traceBusy || !traceActive" @click="stopTraceCapture">{{ translate('curve.traceStop') }}</el-button>
+          <el-button size="small" :disabled="!traceHasContent" @click="clearTraceView">{{ translate('curve.traceClear') }}</el-button>
+          <label class="flex items-center gap-1">
+            <span>{{ translate('curve.traceView') }}</span>
+            <el-select v-model="traceView" size="small" style="width: 5rem">
+              <el-option value="text" :label="translate('curve.traceText')"/>
+              <el-option value="hex" :label="translate('curve.traceHex')"/>
+              <el-option value="line" label="line"/>
+            </el-select>
+          </label>
+          <label class="flex items-center gap-1">
+            <span>{{ translate('curve.tracePoll') }}</span>
+            <el-select v-model="tracePollMs" size="small" style="width: 4.8rem">
+              <el-option v-for="option in TRACE_POLL_OPTIONS" :key="option" :value="option" :label="option + ' ms'"/>
+            </el-select>
+          </label>
+          <!-- task-62：固件 task-60 行触发（仅 lines 接口支持；旧固件忽略 body 字段） -->
+          <label class="flex items-center gap-1" title="Line trigger (firmware task-60 lines interface): the line containing this pattern sets triggered/trigger_seq. Old firmware ignores the body.">
+            <span>Trigger</span>
+            <el-input v-model="traceTriggerPattern" size="small" style="width: 8rem" :disabled="traceActive" placeholder="PATTERN"/>
+            <el-checkbox v-model="traceTriggerStopAfter" :disabled="traceActive">stop after</el-checkbox>
+          </label>
+          <span v-if="traceSource === 'lines'" class="font-mono">{{ traceCounterText }}</span>
+          <template v-else>
+            <span>{{ translate('curve.traceSeq') }}: <b class="font-mono">{{ traceSeq }}</b></span>
+            <span>{{ translate('curve.traceTotal') }}: <b>{{ traceTotal ?? '-' }}</b></span>
+            <span>{{ translate('curve.traceDropped') }}: <b>{{ traceDropped ?? '-' }}</b></span>
+            <span class="opacity-60">ring {{ CURVE_LOCAL_TRACE_RING_BYTES }} B</span>
+          </template>
+          <span v-if="traceSource === 'lines' && traceTriggered" class="render-success">triggered @ line {{ traceTriggerSeq ?? '-' }}</span>
+          <span v-if="traceSource === 'lines' && traceDroppedLines !== null" class="opacity-70">dropped lines: <b>{{ traceDroppedLines }}</b></span>
+          <span v-if="traceSource === 'lines'" class="opacity-60">ring 32 lines · max 8/request</span>
+          <span v-if="traceGap" class="render-warning">{{ translate('curve.traceGap') }}</span>
+        </div>
+        <div v-if="traceError" class="mt-1 text-xs curve-field-error">{{ traceError }}</div>
+        <div v-if="traceLinesError" class="mt-1 text-xs render-warning">lines probe failed: {{ traceLinesError }} (fallback to raw bytes)</div>
+        <div v-if="traceSource === 'raw' && !traceHeadersAvailable" class="mt-1 text-xs render-warning">{{ translate('curve.traceHeadersUnavailable') }}</div>
+        <p v-if="traceSource === 'lines'" class="mt-1 text-xs opacity-70">
+          Lines and t_us come from firmware (line end time on the ESP32 esp_timer, not target MCU time); Δt in the line view is relative to the first displayed line. Missing lines are never reconstructed.
+        </p>
+        <pre v-if="traceHasContent" class="debug-pre mt-1">{{ traceContent }}</pre>
+        <p v-else class="mt-1 text-xs opacity-70">{{ traceActive ? translate('curve.traceEmptyActive') : translate('curve.traceEmpty') }}</p>
+        <p class="mt-1 text-xs opacity-70">{{ translate('curve.traceSharedUart') }}</p>
+      </div>
+
+      <!-- 帧指针 backtrace：命中后由固件保存最近一次 PC 链，ELF 符号/行表映射 -->
+      <div class="debug-subpanel mt-3">
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="text-sm font-semibold">{{ translate('curve.backtraceTitle') }}</span>
+          <InfoTip :content="translate('curve.backtraceBoundary')" :label="translate('common.details')"/>
+          <el-checkbox
+              v-model="backtraceEnabled"
+              :disabled="sampling || !backtraceTriggerAvailable"
+              :title="backtraceTriggerAvailable ? translate('curve.backtraceBoundary') : translate('curve.backtraceRequiresTrigger')"
+          >{{ translate('curve.backtraceEnable') }}</el-checkbox>
+          <span v-if="!backtraceTriggerAvailable" class="opacity-70">{{ translate('curve.backtraceRequiresTrigger') }}</span>
+          <el-button size="small" :loading="backtraceLoading" @click="fetchBacktrace(true)">{{ translate('curve.backtraceRefresh') }}</el-button>
+          <span v-if="backtraceData?.valid">{{ translate('curve.backtraceFrames', {count: backtraceData.count}) }}</span>
+          <span v-if="backtraceData?.valid && backtraceData.truncated" class="render-warning">{{ translate('curve.backtraceTruncated', {count: CURVE_LOCAL_MAX_BACKTRACE_FRAMES}) }}</span>
+        </div>
+        <div v-if="backtraceError" class="mt-1 text-xs curve-field-error">{{ backtraceError }}</div>
+        <table v-if="backtraceFrames.length > 0" class="delta-table mt-1">
+          <thead>
+          <tr>
+            <th>#</th>
+            <th>PC</th>
+            <th>{{ translate('curve.backtraceFunction') }}</th>
+            <th>{{ translate('curve.backtraceSource') }}</th>
+          </tr>
+          </thead>
+          <tbody>
+          <tr v-for="backtraceFrame in backtraceFrames" :key="backtraceFrame.index">
+            <td class="font-mono">{{ backtraceFrame.index }}</td>
+            <td class="font-mono">
+              {{ formatHex32(backtraceFrame.pc) }}
+              <span class="opacity-60">{{ backtraceFrame.returnAddress ? translate('curve.backtraceReturn') : translate('curve.backtraceHalted') }}</span>
+            </td>
+            <td class="font-mono">
+              <template v-if="backtraceFrame.functionName">
+                {{ backtraceFrame.functionName }}<template v-if="backtraceFrame.functionOffset"> +0x{{ backtraceFrame.functionOffset.toString(16) }}</template>
+                <span v-if="!backtraceFrame.functionExact" class="render-warning">{{ translate('curve.backtraceInexact') }}</span>
+              </template>
+              <span v-else class="opacity-70">{{ translate('curve.backtraceNoSymbols') }}</span>
+            </td>
+            <td class="font-mono">
+              <template v-if="backtraceFrame.file">{{ backtraceFrame.file }}:{{ backtraceFrame.line ?? '?' }}</template>
+              <span v-else class="opacity-70">{{ lineIndex ? translate('curve.backtraceNoLine') : translate('curve.backtraceNoLineIndex') }}</span>
+            </td>
+          </tr>
+          </tbody>
+        </table>
+        <p v-else-if="!backtraceError && !backtraceData" class="mt-1 text-xs opacity-70">{{ translate('curve.backtraceEmpty') }}</p>
+        <p v-if="backtraceData && !backtraceData.valid && !backtraceError" class="mt-1 text-xs render-warning">{{ translate('curve.backtraceInvalid') }}</p>
+      </div>
+
+      <!-- 未实现能力边界：只说明，不提供伪功能控件 -->
+      <div class="debug-boundaries mt-3 text-xs opacity-80">
+        <div class="font-semibold">{{ translate('curve.debugUnavailableTitle') }}</div>
+        <p>{{ translate('curve.swoUnavailable') }}</p>
+        <p>{{ translate('curve.rtosUnavailable') }}</p>
+      </div>
+    </section>
+
     <!-- FFT 频谱（简单 DFT） -->
     <section v-if="fftOpen && fftData" class="curve-card advanced-control fft-panel">
       <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -884,6 +1209,7 @@
 
 <script setup lang="ts">
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
+import {useRoute} from 'vue-router'
 import CurveFramesWorker from '../utils/curveFramesWorker?worker&inline'
 import CurveChartWorker from '../utils/curveChartWorker?worker&inline'
 import {ElMessageBox} from 'element-plus'
@@ -965,24 +1291,78 @@ import {
   resolveBreakpointWithOffset,
   type FunctionSymbol,
 } from '@/utils/elfFunctionSymbols'
+import {buildBacktraceFrames} from '@/utils/curveBacktrace'
+import {
+  appendTraceBytes,
+  appendTraceLines,
+  decodeTraceText,
+  formatRawTraceLineView,
+  formatTraceHexDump,
+  formatTraceLinesHex,
+  formatTraceLinesText,
+  formatTraceLinesView,
+  type TraceLineLike,
+} from '@/utils/curveDebugText'
+import type {ChartDrawMessage, ChartGeometry} from '@/utils/curveChartCore'
+import {
+  DAP_COMMAND_INDEX_EVENT,
+  DAP_COMMAND_INDEX_VERSION_KEY,
+  DAP_COMMAND_INDEX_WINDOW_KEY,
+  DAP_FOCUS_VARIABLE_EVENT,
+  buildDapCommandIndex,
+  emptyDapCommandIndex,
+  findCommandIndexVariable,
+  type DapCommandIndex,
+  type DapCommandIndexVariable,
+} from '@/utils/elfCommandIndex'
 import {
   CURVE_LOCAL_FLASH_END,
   CURVE_LOCAL_FLASH_START,
   CURVE_LOCAL_FRAMES_DEFAULT,
   CURVE_LOCAL_FRAMES_PATH,
+  CURVE_LOCAL_MAX_BACKTRACE_FRAMES,
+  CURVE_LOCAL_MAX_GROUP_WEIGHT,
+  CURVE_LOCAL_MAX_SNAPSHOT_AFTER,
+  CURVE_LOCAL_RATE_DIVISORS,
+  CURVE_LOCAL_TRACE_RING_BYTES,
+  CURVE_LOCAL_TRACE_DISPLAY_LINES,
+  CURVE_LOCAL_TRACE_LINES_MAX,
+  CURVE_LOCAL_MAX_SAMPLE_EVERY,
+  CURVE_LOCAL_MAX_WATCHPOINTS,
   deviceApiUrl,
+  detectLocalCurveCapabilities,
+  isFrameSeriesValid,
+  planSampleEvery,
   decodeCurveFrames,
   CURVE_LOCAL_MAX_GROUPS,
   CURVE_LOCAL_MAX_SERIES_PER_GROUP,
   CURVE_LOCAL_MAX_SAMPLE_BYTES,
   CURVE_LOCAL_MAX_TOTAL_SERIES,
   CurveLocalError,
+  getLocalCurveBacktrace,
+  getLocalCurveTrace,
+  getLocalCurveTraceLines,
+  isDuplicateWatchpoint,
+  normalizeRateDivisor,
+  planLocalRateGroups,
   splitSeriesIntoGroups,
+  startLocalCurveTrace,
+  stopLocalCurveTrace,
+  type CurveLocalBacktrace,
   type CurveLocalLocationVariant,
+  type CurveLocalRateDivisor,
+  type CurveLocalTraceChunk,
+  type CurveLocalTraceLine,
+  type CurveLocalTraceLinesChunk,
+  type LocalCurveTraceStartOptions,
+  type LocalCurveCapabilities,
+  type CurveLocalWatchAccess,
+  type LocalRateGroupPlan,
   getLocalCurveFrames,
   getLocalCurveStatus,
   parseBreakpointAddressInput,
   startLocalCurve,
+  startLocalCurveAuto,
   stopLocalCurve,
   type CurveConditionSpec,
   type CurveLocalFrame,
@@ -1038,6 +1418,10 @@ const LOCAL_UI_FLUSH_MS = 1000
 /** 本地帧轮询周期（契约要求 20–50 ms）。 */
 const LOCAL_POLL_MS = 20
 const LOCAL_POLL_MAX_FRAMES = 64
+/** task-58：目标 UART trace 轮询间隔（ms；固件只保存 2 KiB ring，属于轮询快照语义）。 */
+const TRACE_POLL_OPTIONS = [100, 250, 500, 1000]
+/** task-58：trace 显示窗口上限（只影响 UI 文本，不改变固件 ring / 字节序号）。 */
+const TRACE_DISPLAY_MAX_BYTES = 4096
 /** 采样管线深度：允许同时在途的 WS-DAP 采样请求数（固件按序回包）。 */
 const PIPELINE_DEPTH = 8
 const AUTO_MIN_RATE = 10
@@ -1105,6 +1489,17 @@ interface CurveSeries {
   loclistMulti?: boolean
   /** loclist 多段变体（协议 v2：随系列下发，固件按 PC 选择） */
   pcVariants?: CurveLocalLocationVariant[]
+  /**
+   * 每变量目标刷新率分频（task-55）：缺省/1 = 跟随全局 interval（默认 20ms/50Hz）；
+   * 2/4/8 = 通过 groups+weights 相对降速。仅设备本地采样使用。
+   */
+  rateDivisor?: CurveLocalRateDivisor
+  /**
+   * 每变量目标刷新率（Hz，task-62）：设置后新固件（confirmed sample_every）按
+   * `sample_every = round(group tick Hz / target Hz)` 精确下发；旧固件 fallback 到
+   * 最近的 divisor 分桶 + 组权重。与 rateDivisor 互斥（设置一个会清另一个）。
+   */
+  rateTargetHz?: number
   /** 简单派生曲线：A+B / A-B（不参与采集，只用于显示/导出）。 */
   derived?: {a: number; b: number; op: 'add' | 'sub'}
 }
@@ -1144,14 +1539,135 @@ const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 /** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
 const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : MAX_CURVE_SERIES))
-/** 本地 v2：按每组 64 路自动分组（groups 1..8，总 256；运行后以固件 group_count 为准）。 */
-const localPlannedGroups = computed(() => Math.max(1, Math.ceil(seriesList.value.length / CURVE_LOCAL_MAX_SERIES_PER_GROUP)))
+/** 本地可采集系列（派生曲线不参与采集）。 */
+const localRateSeries = computed(() => seriesList.value.filter((item) => !item.derived))
+/** 有任意曲线设置了非全速目标（divisor≠1）→ 启用“目标率分桶 + 组权重”路径。 */
+const hasRateOverrides = computed(() => localRateSeries.value.some((item) => normalizeRateDivisor(item.rateDivisor) !== 1))
+/**
+ * 固件能力（task-60）：从 status 回读探测。`sampleEvery` = 固件支持 series.sample_every
+ * （精确每变量速率）；未知/旧固件 → 继续用 groups+weight divisor 分桶 fallback。
+ */
+const localCapabilities = ref<LocalCurveCapabilities>({sampleEvery: false, watchpoints4: false, traceLines: false})
+const localCapabilitiesKnown = ref(false)
+async function refreshLocalCapabilities(): Promise<void> {
+  try {
+    const status = await getLocalCurveStatus()
+    localCapabilities.value = detectLocalCurveCapabilities(status)
+    localCapabilitiesKnown.value = true
+  } catch {
+    // 设备离线/旧固件接口异常：保持保守 fallback（不假设新字段被接受）。
+  }
+}
+/** 用户设置了目标 Hz（>0）的曲线。 */
+const hasRateTargets = computed(() => localRateSeries.value.some((item) => (item.rateTargetHz ?? 0) > 0))
+/** 精确 sample_every 模式：固件确认支持 + 至少一条曲线设了目标 Hz。 */
+const usePreciseSampleEvery = computed(() => localCapabilities.value.sampleEvery && hasRateTargets.value)
+/** 名义 tick 率（1000/interval）与计划组数：sample_every 是相对所属 group tick 的抽取。 */
+const nominalTickHz = computed(() => (localIntervalMs.value > 0 ? 1000 / localIntervalMs.value : 0))
+/** 兼容 fallback：目标 Hz → 最近的 divisor（1/2/4/8），用于旧固件 group weight 路径。 */
+function legacyDivisorForTarget(targetHz: number): CurveLocalRateDivisor {
+  const tick = nominalTickHz.value
+  if (!(targetHz > 0) || !(tick > 0)) return 1
+  let best: CurveLocalRateDivisor = 1
+  let bestError = Number.POSITIVE_INFINITY
+  for (const divisor of CURVE_LOCAL_RATE_DIVISORS) {
+    const actual = tick / divisor
+    const error = Math.abs(actual - targetHz)
+    if (error < bestError) {
+      bestError = error
+      best = divisor
+    }
+  }
+  return best
+}
+/** 实际用于分组/下发 divisor 的取值（优先目标 Hz 的 fallback，其次手选 divisor）。 */
+function effectiveRateDivisor(item: CurveSeries): CurveLocalRateDivisor {
+  const target = item.rateTargetHz ?? 0
+  if (target > 0 && !usePreciseSampleEvery.value) return legacyDivisorForTarget(target)
+  return normalizeRateDivisor(item.rateDivisor)
+}
+/** 目标 Hz → sample_every 计划（仅在精确模式有意义；旧固件 fallback 见 effectiveRateDivisor）。 */
+interface SeriesSampleEveryPlanEntry { sampleEvery: number; actualHz: number; targetHz: number; capped: boolean }
+const sampleEveryPlanBySeriesId = computed<Map<number, SeriesSampleEveryPlanEntry>>(() => {
+  const map = new Map<number, SeriesSampleEveryPlanEntry>()
+  if (!usePreciseSampleEvery.value) return map
+  const groups = plannedPreciseGroups.value
+  const tickPerGroup = groups.length > 0 ? nominalTickHz.value / groups.length : nominalTickHz.value
+  for (const group of groups) {
+    for (const item of group.items) {
+      const target = item.rateTargetHz ?? 0
+      if (!(target > 0)) continue
+      const plan = planSampleEvery(target, tickPerGroup, CURVE_LOCAL_MAX_SAMPLE_EVERY)
+      map.set(item.id, {sampleEvery: plan.sampleEvery, actualHz: plan.actualHz, targetHz: target, capped: plan.capped})
+    }
+  }
+  return map
+})
+/** 精确模式下的分组：按容量顺序切分（64 路/组/256B/8 组），权重恒 1。 */
+const plannedPreciseGroups = computed<Array<{items: CurveSeries[]}>>(() => {
+  const split = splitSeriesIntoGroups(localRateSeries.value, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS, {
+    sizeOf: (item) => Math.max(1, Math.min(8, item.sample.size)),
+    maxBytes: CURVE_LOCAL_MAX_SAMPLE_BYTES,
+  })
+  return split.groups.map((items) => ({items}))
+})
+/** 精确模式容量错误（>8 组 / sum(size) 超限）：启动前明确拒绝，不静默丢系列。 */
+const preciseGroupsError = computed(() => {
+  if (!usePreciseSampleEvery.value) return ''
+  const split = splitSeriesIntoGroups(localRateSeries.value, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS, {
+    sizeOf: (item) => Math.max(1, Math.min(8, item.sample.size)),
+    maxBytes: CURVE_LOCAL_MAX_SAMPLE_BYTES,
+  })
+  if (split.error === 'too_many_series') {
+    return `Precise rate plan needs ${split.groupCount} groups (> firmware max ${CURVE_LOCAL_MAX_GROUPS}); reduce variables.`
+  }
+  if (split.error === 'too_many_bytes') {
+    return `A single series payload exceeds ${CURVE_LOCAL_MAX_SAMPLE_BYTES} bytes (firmware group limit); cannot send.`
+  }
+  return ''
+})
+/**
+ * 每变量目标刷新率分桶计划（task-55，纯函数）：按 divisor 分桶、桶内按 64 路/256B
+ * 再切分、权重 8/4/2/1（∝1/divisor）。容量不足时 error 明确拒绝（不丢系列/不伪造）。
+ */
+const ratePlan = computed<LocalRateGroupPlan<CurveSeries>>(() => planLocalRateGroups(localRateSeries.value, {
+  sizeOf: (item) => Math.max(1, Math.min(8, item.sample.size)),
+  divisorOf: (item) => effectiveRateDivisor(item),
+  perGroup: CURVE_LOCAL_MAX_SERIES_PER_GROUP,
+  maxGroups: CURVE_LOCAL_MAX_GROUPS,
+  maxBytes: CURVE_LOCAL_MAX_SAMPLE_BYTES,
+  maxTotal: CURVE_LOCAL_MAX_TOTAL_SERIES,
+}))
+/** 是否需要速率计划（手选 divisor 或目标 Hz）；精确 sample_every 模式不走分桶。 */
+const hasAnyRatePlan = computed(() => (hasRateOverrides.value || hasRateTargets.value) && !usePreciseSampleEvery.value)
+/**
+ * 实际下发的计划分组：
+ *  - 精确模式（固件支持 sample_every 且设置了目标 Hz）：按容量顺序等权分组，
+ *    每 series 单独下发 sample_every（组 tick 率 / sample_every = 目标档位）；
+ *  - 旧固件/手选 divisor：沿用 task-55 的 divisor 分桶 + 组 weight（fallback）；
+ *  - 未设置目标：旧的等权 64 路自动分组（默认行为/负载不变）。
+ */
+const plannedGroups = computed<Array<{divisor: CurveLocalRateDivisor; weight: number; items: CurveSeries[]}>>(() => {
+  if (usePreciseSampleEvery.value) {
+    return plannedPreciseGroups.value.map((group) => ({divisor: 1 as CurveLocalRateDivisor, weight: 1, items: group.items}))
+  }
+  if (hasAnyRatePlan.value) {
+    return ratePlan.value.groups.map((group) => ({divisor: group.divisor, weight: group.weight, items: group.items}))
+  }
+  const split = splitSeriesIntoGroups(localRateSeries.value, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS, {
+    sizeOf: (item) => Math.max(1, Math.min(8, item.sample.size)),
+    maxBytes: CURVE_LOCAL_MAX_SAMPLE_BYTES,
+  })
+  return split.groups.map((items, index) => ({divisor: 1 as CurveLocalRateDivisor, weight: groupWeights.value[index] ?? 1, items}))
+})
+/** 本地计划组数（最多 8 组）；采样后以固件回读 group_count 为准。 */
+const localPlannedGroups = computed(() => Math.max(1, plannedGroups.value.length))
 const localActiveGroupCount = computed(() => (sampling.value && localGroupCount.value > 0 ? localGroupCount.value : localPlannedGroups.value))
-/** 每组刷新率 = 1/(组数 × interval)；总帧率仍约 1/interval（每组轮转）。 */
+/** 组平均刷新率 = 总帧率/组数（总帧率优先用实测帧率）；逐组速率见 localGroupActualRates。 */
 const localGroupRefreshRate = computed(() => {
   const groups = localActiveGroupCount.value
-  if (groups <= 0 || localIntervalMs.value <= 0) return 0
-  return 1000 / (groups * localIntervalMs.value)
+  if (groups <= 0) return 0
+  return localTotalFrameRateHz.value / groups
 })
 
 const localModeHintText = computed(() => (localTrigger.value === 'breakpoint'
@@ -1200,6 +1716,31 @@ const remainingVariableRows = computed(() => Math.max(0, variableRows.value.leng
 
 /** Phase 2 触发方式：periodic（周期）或 breakpoint（FPB 命中触发）。 */
 const localTrigger = ref<CurveLocalTrigger>('periodic')
+// ---- task-55：每变量目标刷新率 / 函数快照 ---------------------------------
+/** 批量设置目标刷新率时使用的 divisor（1=全速/跟随全局）。 */
+const batchRateDivisor = ref<CurveLocalRateDivisor>(1)
+/**
+ * 函数快照状态（task-55）：arm → 断点采样 → 首个命中帧/固件 snapshot 完成后冻结显示
+ * 并在图表上标记。只使用现有 breakpoint 采样 + （新固件的可选 snapshot_after），
+ * 不伪造 SWO/backtrace/RTOS 数据。
+ */
+const snapshotArmed = ref(false)
+const snapshotHit = ref(false)
+const snapshotHitTime = ref<number | null>(null)
+const snapshotHitPc = ref<number | null>(null)
+const snapshotSeq = ref<number | null>(null)
+const snapshotFunctionName = ref('')
+const snapshotBoundaryAddr = ref(0)
+const snapshotFreezeOnHit = ref(true)
+/** 固件一次性快照：首命中后采集 N 帧并自动停止（缺省关闭以兼容旧固件）。 */
+const snapshotFirmwareOneShot = ref(false)
+const snapshotAfterFrames = ref(8)
+const snapshotFirmwareState = ref<LocalCurveStatus['snapshotState']>(undefined)
+const snapshotFirmwarePreFrames = ref<number | null>(null)
+const snapshotFirmwarePostFrames = ref<number | null>(null)
+let snapshotFinalizeTimer = 0
+/** 本次会话是否已向固件下发 snapshot_after（用于识别 firmware 自动停止，避免无限轮询）。 */
+let snapshotFirmwareRun = false
 /** 断点地址输入（十六进制，可带/不带 0x；Thumb bit0 忽略）。 */
 const localBreakpointInput = ref('')
 /** 从 ELF 解析出的 Flash 函数符号（局部断点选择器数据）。 */
@@ -1229,8 +1770,16 @@ const localBreakpointError = computed(() => {
 const localStartDisabled = computed(() => {
   if (seriesList.value.length === 0) return true
   if (!isLocalSource.value) return false
+  // task-55：目标刷新率分桶超出固件容量（>8 组 / >256 路）时禁止 Start（面板有明确原因）。
+  if (hasRateOverrides.value && ratePlan.value.error) return true
   if (localTrigger.value === 'breakpoint') return breakpointResolution.value?.ok !== true
-  if (localTrigger.value === 'watchpoint') return watchpointSpec.value === null
+  if (localTrigger.value === 'watchpoint') {
+    if (watchpointSpec.value === null) return true
+    if (conditionEnabled.value && conditionSpec.value === null) return true
+    if (!watchSecondEnabled.value) return false
+    if (watchpoint2Spec.value === null) return true
+    return isDuplicateWatchpoint(watchpointSpec.value, watchpoint2Spec.value)
+  }
   if (conditionEnabled.value && conditionSpec.value === null) return true
   return false
 })
@@ -1300,13 +1849,83 @@ const targetError = ref('')
 const elfFlashRange = shallowRef<[number, number] | null>(null)
 const watchAddressInput = ref('')
 const watchSize = ref<1 | 2 | 4>(4)
-const watchAccess = ref<'write' | 'readwrite'>('write')
+const watchAccess = ref<CurveLocalWatchAccess>('write')
 /** watchpoint 触发状态（task-38）。 */
 const watchTriggerSeq = ref<number | null>(null)
 const watchpointArmed = ref<boolean | null>(null)
 const watchpointHits = ref<number | null>(null)
 const watchFramesTriggered = ref(false)
 const jumpFrames = ref(10)
+/** task-58：第二路 DWT comparator（固件 task-57；目标需 ≥2 个空闲 comparator）。 */
+const watchSecondEnabled = ref(false)
+const watch2AddressInput = ref('')
+const watch2Size = ref<1 | 2 | 4>(4)
+const watch2Access = ref<CurveLocalWatchAccess>('write')
+/** 多 comparator / watchpoint2_* 状态（status 回读）。 */
+const watchCount = ref<number | null>(null)
+const watchpoint2Armed = ref<boolean | null>(null)
+const watchpoint2Address = ref<number | null>(null)
+const watchpoint2Hits = ref<number | null>(null)
+const lastWatchIndex = ref<number | null>(null)
+/**
+ * task-62 固件 task-60：第 3/4 路 DWT comparator（通用槽位；最多 4 路）。
+ * 只保存配置，实际资源是否足够由固件回读/错误原文决定（不猜测）。
+ */
+interface ExtraWatchSlot {
+  enabled: boolean
+  addressInput: string
+  size: 1 | 2 | 4
+  access: CurveLocalWatchAccess
+}
+function newExtraWatchSlot(): ExtraWatchSlot {
+  return {enabled: false, addressInput: '', size: 4, access: 'readwrite'}
+}
+const watchThird = ref<ExtraWatchSlot>(newExtraWatchSlot())
+const watchFourth = ref<ExtraWatchSlot>(newExtraWatchSlot())
+/** status 回读的 canonical watchpoints 数组（若有）；否则用 legacy watchpointN_* 字段。 */
+const watchpoint3Armed = ref<boolean | null>(null)
+const watchpoint3Address = ref<number | null>(null)
+const watchpoint3Hits = ref<number | null>(null)
+const watchpoint4Armed = ref<boolean | null>(null)
+const watchpoint4Address = ref<number | null>(null)
+const watchpoint4Hits = ref<number | null>(null)
+/** 最近一次 watchpoint start 失败时固件返回的原文（资源不足，不改写/不复述为猜测）。 */
+const watchStartError = ref('')
+/** task-58：帧指针 backtrace（固件 task-57；仅 breakpoint/watchpoint 命中后可用）。 */
+const backtraceEnabled = ref(false)
+const backtraceLoading = ref(false)
+const backtraceError = ref('')
+const backtraceData = shallowRef<CurveLocalBacktrace | null>(null)
+/** task-58：目标 UART trace（文本/hex 只是显示；字节序号来自固件，无目标时间戳）。 */
+const traceActive = ref(false)
+const traceBusy = ref(false)
+const traceError = ref('')
+const traceSeq = ref(0)
+const traceGap = ref(false)
+const traceTotal = ref<number | null>(null)
+const traceDropped = ref<number | null>(null)
+/** 固件 X-Curve-Trace-* 响应头是否可读（不可读时不伪报 gap/active/dropped）。 */
+const traceHeadersAvailable = ref(true)
+const traceView = ref<'text' | 'hex' | 'line'>('text')
+const tracePollMs = ref(250)
+const traceBuffer = shallowRef(new Uint8Array(0))
+/** traceBuffer 第一个字节的字节序号（buffer 会被裁到显示窗口，序号仍真实）。 */
+const traceBaseSeq = ref(0)
+// ---- task-62：固件 task-60 trace v2（/api/curve/trace/lines，JSON 行 + 固件时间戳） ----
+/** trace 数据源：raw=旧字节流（兼容）；lines=固件行接口（行/时间来自固件）。 */
+const traceSource = ref<'raw' | 'lines'>('raw')
+/** 行游标（固件 line seq；不是字节序号）。 */
+const traceLineSeq = ref(0)
+const traceLines = shallowRef<TraceLineLike[]>([])
+const traceTotalLines = ref<number | null>(null)
+const traceDroppedLines = ref<number | null>(null)
+const traceTriggered = ref(false)
+const traceTriggerSeq = ref<number | null>(null)
+/** trace v2 行触发配置（start body；仅 lines 模式/固件支持时下发）。 */
+const traceTriggerPattern = ref('')
+const traceTriggerStopAfter = ref(false)
+const traceLinesSupported = ref(false)
+const traceLinesError = ref('')
 /** task-45 条件触发 UI/状态（可与 periodic/breakpoint/watchpoint 组合）。 */
 const conditionEnabled = ref(false)
 const conditionAddressInput = ref('')
@@ -1354,6 +1973,15 @@ const diagnosticsOpen = ref(false)
 const diagnosticsCopied = ref(false)
 const lastElfName = ref('')
 const lastElfBytes = ref(0)
+// ---- task-62 P1-17：命令面板数据源（ELF → window.__dapCommandIndex + 事件） ----
+/** 当前 ELF 的命令索引（空索引也发布，命令面板据此隐藏变量/函数段）。 */
+const commandIndex = shallowRef<DapCommandIndex>(emptyDapCommandIndex())
+let commandIndexVersion = 0
+/** 由 ?focusVar= 或 dap:focus-variable 事件请求聚焦的变量 path（ELF 未解析时暂存）。 */
+let pendingFocusVar = ''
+const focusedVariableKey = ref('')
+let focusScrollTimer = 0
+const route = useRoute()
 /** IndexedDB 录制/回放。 */
 const recordings = ref<RecordingMeta[]>([])
 const selectedRecordingId = ref('')
@@ -1561,6 +2189,15 @@ let localRunId = 0
 let localPollTimer = 0
 let localStatusTimer = 0
 let localDrawLoopTimer = 0
+/** task-58：UART trace 轮询/backtrace 自动抓取定时器（事件驱动 + 去抖）。 */
+let traceTimer = 0
+let tracePollInFlight = false
+/** 连续 trace 轮询失败次数（3 次后停止轮询，避免错误刷屏）。 */
+let traceErrorStreak = 0
+/** 已处理的 backtrace status 指纹（valid:count），避免 1 Hz status 轮询重复抓取。 */
+let lastBacktraceStatusKey = ''
+let backtraceTimer = 0
+let lastBacktraceFetchAt = 0
 /** 同时在途的 frames 请求数（允许 2–3 个，提升有效取帧率）。 */
 const LOCAL_POLL_MAX_IN_FLIGHT = 3
 let localPollsInFlightCount = 0
@@ -1572,6 +2209,24 @@ let localSince = 0
 let localBaseTimestampUs = 0
 let localLastPollAt = 0
 let localRateTimestamps: number[] = []
+/** task-62：per-series 有效/stale 采样计数（非响应式；1 Hz 用 validCountVersion 触发 UI 刷新）。 */
+interface SeriesValidCounter {valid: number; stale: number}
+const seriesValidCounters = new Map<number, SeriesValidCounter>()
+const validCountVersion = ref(0)
+/** 本次会话已应用的最新帧时间（秒，自会话起点）；有效刷新率窗口。 */
+const validCountWindowSeconds = ref(0)
+/** 固件 status.series_stale（本会话累计 stale 槽数；旧固件缺省）。 */
+const localSeriesStale = ref<number | null>(null)
+/** 本会话是否真正按 sample_every 精确采样（start 响应 sample_every_max 确认）。 */
+const localPreciseActive = ref(false)
+/** 本会话固件回读的 sample_every_max（undefined=旧固件未确认）。 */
+const localSampleEveryMax = ref<number | null>(null)
+/** P0-1：本次启动实际使用的请求编码（bin=CBS1，json=旧固件回退）与原因/字节数。 */
+const localStartTransport = ref<'bin' | 'json' | null>(null)
+const localStartRequestBytes = ref<number | null>(null)
+const localStartFallbackReason = ref('')
+/** 目标 Hz 的批量输入框值。 */
+const batchTargetHz = ref<number | null>(null)
 /** 本地运行时的系列顺序（carry values 对齐图表 series）。 */
 let localSeriesOrder: CurveSeries[] = []
 /** 协议 v2 group 映射：group id -> 该组内 series 在 localSeriesOrder 中的下标与字节数。 */
@@ -1941,6 +2596,8 @@ function flushStats(): void {
   if (isLocalSource.value) {
     const rate = localRateTimestamps.length
     if (effectiveRate.value !== rate) effectiveRate.value = rate
+    // task-62：1 Hz 刷新 per-series valid/stale 显示（计数本身在帧路径里非响应式累加）。
+    validCountVersion.value += 1
     return
   }
   effectiveRate.value = recentCompletions.length
@@ -2294,10 +2951,66 @@ async function refreshLocalStatus(): Promise<void> {
   watchpointArmed.value = status.watchpointArmed ?? null
   watchpointHits.value = status.watchpointHits ?? null
   if (status.triggerSeq !== undefined) watchTriggerSeq.value = status.triggerSeq
+  // task-58：多 DWT comparator 状态 + UART trace 摘要 + backtrace 摘要（旧固件字段缺省）。
+  watchCount.value = status.watchCount ?? null
+  watchpoint2Armed.value = status.watchpoint2Armed ?? null
+  watchpoint2Address.value = status.watchpoint2Address ?? null
+  watchpoint2Hits.value = status.watchpoint2Hits ?? null
+  // task-62：固件 task-60 的 3/4 路 comparator 状态（旧固件缺省 → null，不伪报）。
+  watchpoint3Armed.value = status.watchpoint3Armed ?? null
+  watchpoint3Address.value = status.watchpoint3Address ?? null
+  watchpoint3Hits.value = status.watchpoint3Hits ?? null
+  watchpoint4Armed.value = status.watchpoint4Armed ?? null
+  watchpoint4Address.value = status.watchpoint4Address ?? null
+  watchpoint4Hits.value = status.watchpoint4Hits ?? null
+  lastWatchIndex.value = status.lastWatchIndex ?? null
+  if (status.traceActive !== undefined) traceActive.value = status.traceActive
+  if (status.seriesStale !== undefined) localSeriesStale.value = status.seriesStale
+  if (status.traceBytes !== undefined) traceTotal.value = status.traceBytes
+  if (status.traceDropped !== undefined) traceDropped.value = status.traceDropped
+  if (status.traceActive === true && !traceTimer) scheduleTracePoll()
+  // task-58：backtrace 摘要变化（valid/count）才抓取 PC 列表，避免 1 Hz 轮询重复请求。
+  if (status.backtraceValid !== undefined) {
+    const backtraceKey = `${status.backtraceValid}:${status.backtraceCount ?? 0}`
+    if (backtraceKey !== lastBacktraceStatusKey) {
+      lastBacktraceStatusKey = backtraceKey
+      if (status.backtraceValid) scheduleBacktraceFetch()
+    }
+  }
   conditionArmed.value = status.conditionArmed ?? null
   conditionMet.value = status.conditionMet ?? null
   conditionHits.value = status.conditionHits ?? null
   if (status.conditionTriggerSeq !== undefined) conditionTriggerSeq.value = status.conditionTriggerSeq
+  // task-55：固件一次性函数快照（task-57 固件；旧固件无这些字段 → undefined，
+  // 仍走“首个命中帧冻结”的降级路径，界面明确标注固件是否支持）。
+  if (status.snapshotState !== undefined) snapshotFirmwareState.value = status.snapshotState
+  if (status.snapshotAfter !== undefined) snapshotAfterFrames.value = status.snapshotAfter
+  if (status.snapshotPreFrames !== undefined) snapshotFirmwarePreFrames.value = status.snapshotPreFrames
+  if (status.snapshotPostFrames !== undefined) snapshotFirmwarePostFrames.value = status.snapshotPostFrames
+  if (snapshotFirmwareRun && (status.snapshotState === 'complete' || status.snapshotState === 'aborted')) {
+    // 固件已命中并自动停止（或中止）：用固件 trigger seq 定位标记帧；若帧尚未取回，
+    // 用当前最新数据时间标记并保留“≈”。随后等待在途帧落地，再仅关闭前端轮询。
+    snapshotFirmwareRun = false
+    if (!snapshotHit.value) {
+      const order = ringOrderForDeviceSeq(status.snapshotTriggerSeq ?? null)
+      const time = order >= 0 ? timestamps[ringSlot(order)] : lastDataTimestamp()
+      markSnapshotHit(time, latestFramePc, status.snapshotTriggerSeq ?? undefined)
+    }
+    snapshotArmed.value = false
+    if (status.snapshotState === 'complete') {
+      notice.value = {type: 'success', title: snapshotFirmwareCompleteText()}
+    } else {
+      notice.value = {type: 'warning', title: 'Function snapshot aborted by firmware (session stopped).'}
+    }
+    if (!snapshotFinalizeTimer) {
+      const finalizeRunId = localRunId
+      snapshotFinalizeTimer = window.setTimeout(() => {
+        snapshotFinalizeTimer = 0
+        // 只在同一采样会话内收尾，避免迟到的定时器影响后续重新 Start 的会话。
+        if (sampling.value && localRunId === finalizeRunId) stopLocalSampling(false)
+      }, 500)
+    }
+  }
   if (status.running !== true && status.error > 0) {
     localGap.value = true
   }
@@ -2317,8 +3030,8 @@ async function postLocalStop(): Promise<void> {
   }
 }
 
-/** 停止设备本地采样：本地先置 stopped，再 best-effort POST /api/curve/stop。 */
-function stopLocalSampling(): void {
+/** 停止设备本地采样：本地先置 stopped，再 best-effort POST /api/curve/stop（postStop=false 用于固件已自动停止的快照）。 */
+function stopLocalSampling(postStop = true): void {
   const wasActive = localActive.value
   sampling.value = false
   localRunId += 1
@@ -2328,9 +3041,226 @@ function stopLocalSampling(): void {
   stopCurveWs()
   localPollsInFlightCount = 0
   localFrameBuffer.clear()
-  if (wasActive) void postLocalStop()
+  if (snapshotFinalizeTimer) { window.clearTimeout(snapshotFinalizeTimer); snapshotFinalizeTimer = 0 }
+  snapshotFirmwareRun = false
+  // 未命中的 armed 状态在停止后取消；命中的标记保留供查看/下次 Start 时重置。
+  if (snapshotArmed.value && !snapshotHit.value) snapshotArmed.value = false
+  if (wasActive && postStop) void postLocalStop()
   flushStats()
   scheduleDraw()
+}
+
+// ---- task-58/62：目标 UART trace（旧 raw 字节流 + 固件 task-60 lines 接口） ------
+/**
+ * 调度下一次 trace 轮询（只在 active 时自循环）。
+ * 轮询快照语义；raw 模式只有字节序号，lines 模式的行/时间戳全部来自固件字段。
+ */
+function scheduleTracePoll(): void {
+  if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
+  if (!traceActive.value) return
+  traceTimer = window.setTimeout(() => {
+    traceTimer = 0
+    void pollTraceOnce()
+  }, Math.max(100, Math.round(tracePollMs.value)))
+}
+
+/** 拉取一次 since 之后的 trace 数据；失败显示固件/网络原文，不伪造空数据。 */
+async function pollTraceOnce(): Promise<void> {
+  if (tracePollInFlight || !traceActive.value) return
+  tracePollInFlight = true
+  try {
+    if (traceSource.value === 'lines') {
+      const chunk = await getLocalCurveTraceLines(traceLineSeq.value, CURVE_LOCAL_TRACE_LINES_MAX)
+      traceErrorStreak = 0
+      applyTraceLinesChunk(chunk)
+      traceError.value = ''
+    } else {
+      const chunk = await getLocalCurveTrace(traceSeq.value)
+      traceErrorStreak = 0
+      applyTraceChunk(chunk)
+      traceError.value = ''
+    }
+  } catch (error) {
+    traceErrorStreak += 1
+    traceError.value = translate('curve.traceReadFailed', {err: localErrorText(error)})
+    // 404 = 固件无 trace 接口（旧固件/未启用）：停止轮询并保留原文，不显示伪数据。
+    const missingEndpoint = error instanceof CurveLocalError && error.httpStatus === 404
+    if (missingEndpoint || traceErrorStreak >= 3) {
+      traceActive.value = false
+      if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
+    } else if (traceActive.value) {
+      scheduleTracePoll()
+    }
+  } finally {
+    tracePollInFlight = false
+  }
+}
+
+/** 合并固件 lines 响应：行/时间戳/seq 全部用固件字段；gap 时清空显示窗口（不补缺失行）。 */
+function applyTraceLinesChunk(chunk: CurveLocalTraceLinesChunk): void {
+  if (chunk.active !== null) traceActive.value = chunk.active
+  if (chunk.totalLines !== null) traceTotalLines.value = chunk.totalLines
+  if (chunk.droppedLines !== null) traceDroppedLines.value = chunk.droppedLines
+  if (chunk.triggered !== null && chunk.triggered) traceTriggered.value = true
+  if (chunk.triggerSeq !== null) traceTriggerSeq.value = chunk.triggerSeq
+  const previousLast = traceLines.value.length > 0 ? traceLines.value[traceLines.value.length - 1].seq : -1
+  const firstIncoming = chunk.lines.length > 0 ? chunk.lines[0].seq : null
+  const jumped = chunk.gap === true
+    || (firstIncoming !== null && firstIncoming > previousLast + 1)
+  if (jumped) traceGap.value = true
+  traceLines.value = appendTraceLines(
+    jumped ? [] : traceLines.value,
+    chunk.lines,
+    CURVE_LOCAL_TRACE_DISPLAY_LINES,
+  )
+  traceLineSeq.value = chunk.nextSeq
+  if (traceActive.value) scheduleTracePoll()
+}
+
+/** 把一次响应并入显示窗口（gap/序号不连续时重置窗口，仍按真实字节序号标注）。 */
+function applyTraceChunk(chunk: CurveLocalTraceChunk): void {
+  traceHeadersAvailable.value = chunk.headersAvailable
+  if (chunk.active !== null) traceActive.value = chunk.active
+  if (chunk.total !== null) traceTotal.value = chunk.total
+  if (chunk.dropped !== null) traceDropped.value = chunk.dropped
+  if (chunk.gap !== null) traceGap.value = chunk.gap
+  if (chunk.bytes.length > 0) {
+    const incomingBase = chunk.nextSeq - chunk.bytes.length
+    const previousEnd = traceBaseSeq.value + traceBuffer.value.length
+    const reset = chunk.gap === true || traceBuffer.value.length === 0 || incomingBase !== previousEnd
+    const merged = appendTraceBytes(
+      reset ? new Uint8Array(0) : traceBuffer.value,
+      chunk.bytes,
+      TRACE_DISPLAY_MAX_BYTES,
+    )
+    traceBuffer.value = merged
+    traceBaseSeq.value = Math.max(0, chunk.nextSeq - merged.length)
+  }
+  traceSeq.value = chunk.nextSeq
+  // active 从 status/header 回读为 false（例如固件侧 stop）时停止轮询。
+  if (traceActive.value) scheduleTracePoll()
+}
+
+async function startTraceCapture(): Promise<void> {
+  if (traceBusy.value) return
+  traceBusy.value = true
+  traceError.value = ''
+  traceLinesError.value = ''
+  try {
+    // task-62：行触发配置只在非空时下发（旧固件忽略未知 body 字段）。
+    const options: LocalCurveTraceStartOptions = {}
+    const pattern = traceTriggerPattern.value.trim()
+    if (pattern) {
+      options.trigger = pattern
+      options.stopAfter = traceTriggerStopAfter.value
+    }
+    const started = await startLocalCurveTrace(options)
+    traceErrorStreak = 0
+    traceActive.value = started.active
+    traceSeq.value = 0
+    traceBuffer.value = new Uint8Array(0)
+    traceBaseSeq.value = 0
+    traceLineSeq.value = 0
+    traceLines.value = []
+    traceGap.value = false
+    traceTotal.value = 0
+    traceDropped.value = 0
+    traceTotalLines.value = null
+    traceDroppedLines.value = null
+    traceTriggered.value = false
+    traceTriggerSeq.value = null
+    traceHeadersAvailable.value = true
+    // 探测固件 task-60 行接口：成功则用 lines（行/时间戳来自固件），404 回退旧 raw。
+    try {
+      const probe = await getLocalCurveTraceLines(0, CURVE_LOCAL_TRACE_LINES_MAX)
+      traceLinesSupported.value = true
+      traceSource.value = 'lines'
+      // probe 只用于探测接口：真实游标从 0 开始按 next_seq 连续拉取（probe 的行不丢弃）。
+      if (probe.lines.length > 0) {
+        traceLines.value = probe.lines.slice(0, CURVE_LOCAL_TRACE_DISPLAY_LINES)
+        traceLineSeq.value = probe.nextSeq
+      }
+    } catch (probeError) {
+      traceLinesSupported.value = false
+      traceSource.value = 'raw'
+      if (!(probeError instanceof CurveLocalError && probeError.httpStatus === 404)) {
+        traceLinesError.value = localErrorText(probeError)
+      }
+    }
+    scheduleTracePoll()
+    globalNotify(translate('curve.traceStarted') + (traceSource.value === 'lines' ? ' (lines)' : ' (raw bytes)'), 'success')
+  } catch (error) {
+    // 旧固件无该接口时返回 404 "unknown /api/curve action"：原样展示固件 error。
+    traceActive.value = false
+    traceError.value = translate('curve.traceStartFailed', {err: localErrorText(error)})
+  } finally {
+    traceBusy.value = false
+  }
+}
+
+async function stopTraceCapture(): Promise<void> {
+  if (traceBusy.value) return
+  traceBusy.value = true
+  if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
+  try {
+    await stopLocalCurveTrace()
+    traceError.value = ''
+  } catch (error) {
+    traceError.value = translate('curve.traceStopFailed', {err: localErrorText(error)})
+  } finally {
+    traceActive.value = false
+    traceBusy.value = false
+  }
+}
+
+/** 清空显示窗口（不改变固件 trace 状态/字节序号）。 */
+function clearTraceView(): void {
+  // raw：从当前字节游标重新显示；lines：从当前行游标继续（固件不重发旧行，不伪造）。
+  traceBuffer.value = new Uint8Array(0)
+  traceBaseSeq.value = traceSeq.value
+  traceLines.value = []
+  traceGap.value = false
+}
+
+/** 轮询间隔改变后按新周期重新调度（仅捕获中）。 */
+watch(tracePollMs, () => {
+  if (traceActive.value) scheduleTracePoll()
+})
+
+// ---- task-58：帧指针 backtrace（固件 task-57 原型） --------------------------
+/** task-58：命中后延迟去抖抓取一次 backtrace（固件在 halt 时已保存最近一次链）。 */
+function scheduleBacktraceFetch(): void {
+  if (!backtraceEnabled.value || !backtraceTriggerAvailable.value) return
+  if (backtraceTimer) return
+  const wait = Math.max(300, 800 - (performance.now() - lastBacktraceFetchAt))
+  backtraceTimer = window.setTimeout(() => {
+    backtraceTimer = 0
+    void fetchBacktrace(false)
+  }, wait)
+}
+/** 抓取 GET /api/curve/backtrace；自动抓取静默失败（设备忙），手动抓取展示原文。 */
+async function fetchBacktrace(manual: boolean): Promise<void> {
+  if (backtraceLoading.value) return
+  backtraceLoading.value = true
+  lastBacktraceFetchAt = performance.now()
+  if (manual) backtraceError.value = ''
+  try {
+    const result = await getLocalCurveBacktrace()
+    backtraceData.value = result
+    if (manual) backtraceError.value = ''
+  } catch (error) {
+    if (manual) backtraceError.value = translate('curve.backtraceLoadFailed', {err: localErrorText(error)})
+  } finally {
+    backtraceLoading.value = false
+  }
+}
+
+/** 清空 backtrace 显示（切换触发模式/重新 Start 时，避免旧命中误导）。 */
+function resetBacktraceState(): void {
+  if (backtraceTimer) { window.clearTimeout(backtraceTimer); backtraceTimer = 0 }
+  backtraceData.value = null
+  backtraceError.value = ''
+  lastBacktraceStatusKey = ''
 }
 
 async function startLocalSampling(): Promise<void> {
@@ -2343,37 +3273,49 @@ async function startLocalSampling(): Promise<void> {
     notice.value = {type: 'error', title: translate('curve.derivedNeedTwo')}
     return
   }
-  // v2：自动按每组 32 路切分（最多 8 组/256 路）；超出明确提示，不伪造。
-  const split = splitSeriesIntoGroups(snapshot, CURVE_LOCAL_MAX_SERIES_PER_GROUP, CURVE_LOCAL_MAX_GROUPS, {sizeOf: (item) => Math.max(1, Math.min(8, item.sample.size)), maxBytes: CURVE_LOCAL_MAX_SAMPLE_BYTES})
-  if (split.error === 'empty') return
-  if (split.error === 'too_many_bytes') {
-    notice.value = {type: 'error', title: translate('curve.localGroupLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES})}
+  // task-62：启动前确认固件能力（sample_every / watchpoints4）。未知时保持保守 fallback，
+  // 不用“假设固件接受新字段”的方式伪造精确速率。
+  if (!localCapabilitiesKnown.value) await refreshLocalCapabilities()
+  // task-55：设置了每变量目标刷新率时走“divisor 分桶 + 组权重”；task-62 新固件
+  // 支持 sample_every 时按目标 Hz 精确下发。三条路径共用 64/组、256B/组、8 组、256 路限制。
+  if (usePreciseSampleEvery.value && preciseGroupsError.value) {
+    notice.value = {type: 'error', title: preciseGroupsError.value}
     return
   }
-  if (split.error === 'too_many_series') {
-    notice.value = {type: 'error', title: translate('curve.localGroupLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES})}
+  if (hasAnyRatePlan.value && ratePlan.value.error) {
+    notice.value = {type: 'error', title: ratePlanErrorText.value || 'Rate plan exceeds firmware group capacity'}
     return
   }
+  const groupPlan = plannedGroups.value
+  if (groupPlan.length === 0) return
+  if (hasAnyRatePlan.value) {
+    // 权重由 divisor 决定；写回 groupWeights 让下方 weight payload 行/旧 UI 保持一致。
+    groupWeights.value = groupPlan.map((group) => group.weight).slice(0, CURVE_LOCAL_MAX_GROUPS)
+  }
+  ensureGroupWeights(groupPlan.length)
   const groupSpecs: Array<{id: number; weight: number; series: CurveLocalSeriesSpec[]}> = []
-  ensureGroupWeights(split.groupCount)
   const groupEntries: Array<Array<{index: number; item: CurveSeries; size: number}>> = []
-  let flatIndex = 0
+  const snapshotIndexById = new Map(snapshot.map((item, index) => [item.id, index]))
   let needsHalt = false
   let hasVariants = false
-  for (const group of split.groups) {
+  for (const group of groupPlan) {
     const series: CurveLocalSeriesSpec[] = []
     const entries: Array<{index: number; item: CurveSeries; size: number}> = []
-    for (const item of group) {
-      const built = buildLocalSeriesSpec(item, series.length, flatIndex)
+    for (const item of group.items) {
+      const built = buildLocalSeriesSpec(item, series.length, snapshotIndexById.get(item.id) ?? 0)
       if (!built) {
         notice.value = {type: 'error', title: translate('curve.localRegisterUnsupported')}
         return
+      }
+      // task-62：精确模式按目标 Hz 下发 per-series sample_every（= group tick Hz / target）。
+      if (usePreciseSampleEvery.value) {
+        const ratePlanEntry = sampleEveryPlanBySeriesId.value.get(item.id)
+        if (ratePlanEntry && ratePlanEntry.sampleEvery > 1) built.spec.sampleEvery = ratePlanEntry.sampleEvery
       }
       series.push(built.spec)
       entries.push({index: built.entry.index, item: built.entry.item, size: built.entry.size})
       if (built.entry.needsHalt) needsHalt = true
       if ((built.spec.variants?.length ?? 0) > 0) hasVariants = true
-      flatIndex += 1
     }
     groupSpecs.push({id: groupSpecs.length, weight: groupWeights.value[groupSpecs.length] ?? 1, series})
     groupEntries.push(entries)
@@ -2383,6 +3325,10 @@ async function startLocalSampling(): Promise<void> {
   const trigger = localTrigger.value
   let breakpointAddress: number | undefined
   let watchpoint: CurveLocalWatchpointSpec | undefined
+  let watch2: CurveLocalWatchpointSpec | undefined
+  let watch3: CurveLocalWatchpointSpec | undefined
+  let watch4: CurveLocalWatchpointSpec | undefined
+  let watchpointsArray: CurveLocalWatchpointSpec[] | undefined
   if (trigger === 'breakpoint') {
     const resolution = breakpointResolution.value
     if (!resolution || !resolution.ok) {
@@ -2396,6 +3342,41 @@ async function startLocalSampling(): Promise<void> {
       return
     }
     watchpoint = watchpointSpec.value
+    // task-58/62：第 2/3/4 路 comparator 可选；启用但配置非法时本地拒绝（不静默少发）。
+    if (watchSecondEnabled.value) {
+      if (!watchpoint2Spec.value) {
+        notice.value = {type: 'error', title: translate('curve.watchpointInvalid')}
+        return
+      }
+      if (isDuplicateWatchpoint(watchpoint, watchpoint2Spec.value)) {
+        notice.value = {type: 'error', title: translate('curve.watchpointDuplicatesFirst')}
+        return
+      }
+      watch2 = watchpoint2Spec.value
+    }
+    if (watchThird.value.enabled) {
+      if (!watchpoint3Spec.value) {
+        notice.value = {type: 'error', title: translate('curve.watchpointInvalid')}
+        return
+      }
+      watch3 = watchpoint3Spec.value
+    }
+    if (watchFourth.value.enabled) {
+      if (!watchpoint4Spec.value) {
+        notice.value = {type: 'error', title: translate('curve.watchpointInvalid')}
+        return
+      }
+      watch4 = watchpoint4Spec.value
+    }
+    if (watchpointError.value) {
+      notice.value = {type: 'error', title: watchpointError.value}
+      return
+    }
+    // 固件 task-60 两种编码互斥：确认新固件（4 路能力）时用 canonical watchpoints
+    // 数组；未知/旧固件用 legacy root+watch2/watch3/watch4（旧固件忽略 W3/W4，优雅
+    // 降级为 1-2 路，start 响应 watch_count 会如实反映）。
+    const requested = requestedWatchpoints.value
+    if (localCapabilities.value.watchpoints4) watchpointsArray = requested
   }
   if (conditionEnabled.value && !conditionSpec.value) {
     notice.value = {type: 'error', title: translate('curve.conditionInvalid')}
@@ -2410,15 +3391,36 @@ async function startLocalSampling(): Promise<void> {
     trigger,
     breakpointAddress,
     watchpoint,
+    // task-58/62：第 2-4 路 DWT comparator（固件 task-57/60）；旧固件忽略未知字段。
+    watch2,
+    watch3,
+    watch4,
+    watchpoints: watchpointsArray,
+    // task-58：帧指针 backtrace（仅 breakpoint/watchpoint；固件 task-57 原型）。
+    backtrace: backtraceEnabled.value && backtraceTriggerAvailable.value ? true : undefined,
     triggerCondition: conditionEnabled.value ? (conditionSpec.value ?? undefined) : undefined,
+    // 函数快照（task-55）：仅在 breakpoint + armed + 固件一次性快照开关时下发
+    // snapshot_after；旧固件忽略未知字段 → 仍按“首帧冻结”降级。
+    snapshotAfter: trigger === 'breakpoint' && snapshotArmed.value && snapshotFirmwareOneShot.value
+      ? Math.min(CURVE_LOCAL_MAX_SNAPSHOT_AFTER, Math.max(0, Math.round(Number(snapshotAfterFrames.value) || 0)))
+      : undefined,
     // variants 必须 halt（契约 §9.4）；固定地址仅在有寄存器表达式时 halt。breakpoint 忽略 halt。
     halt: trigger === 'periodic' ? (hasVariants ? true : needsHalt) : undefined,
   }
+  // task-58：清空上一轮固件错误原文/backtrace 摘要，避免旧命中误导。
+  watchStartError.value = ''
+  // P0-1：本次启动编码由 startOnce 结果回填；先清空避免显示上一轮。
+  localStartTransport.value = null
+  localStartRequestBytes.value = null
+  localStartFallbackReason.value = ''
+  resetBacktraceState()
   let started
+  // P0-1：优先 CBS1 start-bin（256 series ≈5.9 KiB 流式、不占 16 KiB 连续堆）；旧固件
+  // 404/400/415/405/501 时函数内部自动回退旧 JSON start（16384 上限），结果带 transport。
   const startOnce = () => (groupSpecs.length === 1 && !hasVariants
-    // 单组且无 variants：旧 root-series 请求（兼容旧固件）；多组/variants：v2 groups 请求。
-    ? startLocalCurve({...requestBase, series: groupSpecs[0].series})
-    : startLocalCurve({...requestBase, groups: groupSpecs}))
+    // 单组且无 variants：旧 root-series 语义（兼容旧固件）；多组/variants：groups 语义。
+    ? startLocalCurveAuto({...requestBase, series: groupSpecs[0].series})
+    : startLocalCurveAuto({...requestBase, groups: groupSpecs}))
   try {
     started = await startOnce()
   } catch (error) {
@@ -2431,13 +3433,41 @@ async function startLocalSampling(): Promise<void> {
         started = await startOnce()
       } catch (retryError) {
         statusError.value = true
+        if (trigger === 'watchpoint') watchStartError.value = localErrorText(retryError)
         notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(retryError)})}
         return
       }
     } else {
       statusError.value = true
+      // task-58：DWT 资源不足（comparator 忙/不足）时固件 error 原文（含 DWT_CTRL 值）
+      // 原样保留在 watchpoint 面板，不做二次改写。
+      if (trigger === 'watchpoint') watchStartError.value = localErrorText(error)
       notice.value = {type: 'error', title: translate('curve.localStartFailed', {err: localErrorText(error)})}
       return
+    }
+  }
+  // P0-1：记录本次启动实际编码（bin=CBS1 / json=旧固件回退）供状态与诊断显示。
+  localStartTransport.value = started.transport ?? null
+  localStartRequestBytes.value = started.requestBytes ?? null
+  localStartFallbackReason.value = started.binFallbackReason ?? ''
+  // task-62：核对固件是否真正按 sample_every 采样（start 响应 sample_every_max）。
+  localSampleEveryMax.value = started.sampleEveryMax ?? null
+  localPreciseActive.value = usePreciseSampleEvery.value && started.sampleEveryMax !== undefined
+  if (usePreciseSampleEvery.value) {
+    const requestedMax = Math.max(1, ...[...sampleEveryPlanBySeriesId.value.values()].map((plan) => plan.sampleEvery))
+    if (started.sampleEveryMax === undefined) {
+      // 固件忽略未知字段（旧固件）：不伪报精确速率，改为显示真实组速率。
+      localCapabilities.value = {...localCapabilities.value, sampleEvery: false}
+      notice.value = {type: 'warning', title: 'Firmware did not confirm series.sample_every (fixed target Hz may be ignored). Falling back to groups+weights divisor mapping; per-curve "valid" rate shows the real received rate.'}
+    } else if (started.sampleEveryMax < requestedMax) {
+      notice.value = {type: 'warning', title: `Firmware reports sample_every_max=${started.sampleEveryMax} (requested ${requestedMax}); actual per-curve rates are shown as plan ≈ / valid`}
+    }
+  }
+  // task-62：固件实际配置的 comparator 数少于请求（旧固件忽略 W3/W4）时明确提示。
+  if (trigger === 'watchpoint' && started.watchCount !== undefined) {
+    const requestedCount = requestedWatchpoints.value.length
+    if (started.watchCount < requestedCount) {
+      notice.value = {type: 'warning', title: `Firmware configured ${started.watchCount} of ${requestedCount} DWT watchpoints (old firmware ignores W3/W4 aliases). W1/W2 keep working; update firmware for 4 comparators.`}
     }
   }
   // 设备时间戳与既有 ring 时间轴不同源：清空旧数据，按帧时间戳重新累积。
@@ -2459,12 +3489,34 @@ async function startLocalSampling(): Promise<void> {
   watchTriggerSeq.value = null
   watchpointArmed.value = null
   watchpointHits.value = null
+  watchCount.value = null
+  watchpoint2Armed.value = null
+  watchpoint2Address.value = null
+  watchpoint2Hits.value = null
+  lastWatchIndex.value = null
+  watchpoint3Armed.value = null
+  watchpoint3Address.value = null
+  watchpoint3Hits.value = null
+  watchpoint4Armed.value = null
+  watchpoint4Address.value = null
+  watchpoint4Hits.value = null
   watchFramesTriggered.value = false
   conditionArmed.value = null
   conditionMet.value = null
   conditionHits.value = null
   conditionTriggerSeq.value = null
   conditionFramesTriggered.value = false
+  // task-55：函数快照标记按本次运行重置（armed 由 Arm 按钮设置，Start 时保留）。
+  snapshotHit.value = false
+  snapshotHitTime.value = null
+  snapshotHitPc.value = null
+  snapshotSeq.value = null
+  // 固件是否真正支持 snapshot_after 以 status.snapshot_state 回读为准（旧固件无该字段）。
+  snapshotFirmwareState.value = undefined
+  snapshotFirmwareRun = requestBase.snapshotAfter !== undefined
+  snapshotFirmwarePreFrames.value = null
+  snapshotFirmwarePostFrames.value = null
+  if (snapshotFinalizeTimer) { window.clearTimeout(snapshotFinalizeTimer); snapshotFinalizeTimer = 0 }
   wsTransport.value = 'http'
   wsFrames.value = 0
   wsDropped.value = 0
@@ -2473,6 +3525,7 @@ async function startLocalSampling(): Promise<void> {
   wsWindowStart = 0
   wsWindowFrames = 0
   localRateTimestamps = []
+  resetValidCounters()
   localFramesReceived.value = 0
   localInvalidCount.value = 0
   localOverwrittenCount.value = 0
@@ -2546,6 +3599,25 @@ function issueLocalPoll(runId: number): void {
 }
 
 /** 单帧映射：group payload -> series ring（CVF1 单组/CVF2 按 frame.group）。 */
+function seriesValidCounter(id: number): SeriesValidCounter {
+  let counter = seriesValidCounters.get(id)
+  if (!counter) {
+    counter = {valid: 0, stale: 0}
+    seriesValidCounters.set(id, counter)
+  }
+  return counter
+}
+function resetValidCounters(): void {
+  seriesValidCounters.clear()
+  validCountWindowSeconds.value = 0
+  validCountVersion.value += 1
+  localSeriesStale.value = null
+}
+/** 该 series 在当前帧是否 valid（无 per-series mask = 旧 CVF2，一律 valid）。 */
+function frameSlotValid(frame: CurveLocalFrame, slot: number): boolean {
+  return isFrameSeriesValid(frame, slot)
+}
+
 function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
   if (frame.pc !== undefined) latestFramePc = frame.pc
   if (localBaseTimestampUs === 0) localBaseTimestampUs = frame.timestampUs
@@ -2560,8 +3632,17 @@ function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
     localPendingInvalid += 1
     return false
   }
+  // task-60：per-series valid/stale。stale tick 的 payload 字节为 0（固件约定），
+  // 这里保持上一次有效值（sample-and-hold）并把该 tick 记入 stale 计数——绝不把
+  // 0 当成真实采样点画进曲线；有效刷新率按 valid 计数单独显示。
   groupEntries.forEach((entry, slot) => {
-    localLatestValues.set(entry.item.id, parts[slot] ?? new Uint8Array(entry.size))
+    const counter = seriesValidCounter(entry.item.id)
+    if (frameSlotValid(frame, slot)) {
+      counter.valid += 1
+      localLatestValues.set(entry.item.id, parts[slot] ?? new Uint8Array(entry.size))
+    } else {
+      counter.stale += 1
+    }
   })
   // 多组轮转：本轮未采样的组沿用最近值，保持图表连续（不写假 0）。
   const rawValues = localSeriesOrder.map((item) => {
@@ -2569,10 +3650,17 @@ function applyLocalFrame(frame: CurveLocalFrame, version: number): boolean {
     return latest ?? new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
   })
   const seconds = (frame.timestampUs - localBaseTimestampUs) / 1e6
+  if (seconds > validCountWindowSeconds.value) validCountWindowSeconds.value = seconds
   pushSample(seconds, rawValues, localSeriesOrder, groupIndex, frame.seq)
   localRateTimestamps.push(seconds)
   trimLocalRateWindow(seconds)
   localPendingGroup = groupIndex
+  // task-55：断点触发下，首个被应用/绘制的采样帧就是一次 FPB 命中 → 冻结/标记。
+  // 旧固件没有 snapshot_* 字段时这是唯一的“命中后冻结”来源；新固件一次性快照
+  // 仍会在 status 中回报 complete（见 refreshLocalStatus）。
+  if (snapshotArmed.value && localTrigger.value === 'breakpoint' && !snapshotHit.value) {
+    markSnapshotHit(seconds, frame.pc ?? latestFramePc, frame.seq)
+  }
   return true
 }
 
@@ -2584,6 +3672,8 @@ function handleLocalFramesPage(page: CurveLocalFramesPage): void {
   localPollCounter += 1
   if (page.triggered) {
     watchFramesTriggered.value = true
+    // task-58：breakpoint/watchpoint 命中的同一时刻固件已保存帧指针 backtrace。
+    scheduleBacktraceFetch()
     void refreshLocalStatus()
   }
   if (page.conditionTriggered) {
@@ -2665,6 +3755,9 @@ async function onSamplingSourceChange(): Promise<void> {
     localSampled.value = null
     localOutOfScopeCount.value = 0
     localGap.value = false
+  } else if (hasRateOverrides.value) {
+    // 每变量目标刷新率依赖设备本地 groups+weights；Web-DAP 路径没有分组协议。
+    globalNotify('Per-variable target refresh rates only apply to Device-local sampling; Web DAP mode ignores them.', 'info')
   }
   scheduleDraw()
 }
@@ -2689,7 +3782,119 @@ function onLocalTriggerChange(): void {
   localHits.value = null
   localSampled.value = null
   localStatusInfo.value = null
+  // 函数快照只在 breakpoint 触发下有意义；切走后清空 arm/命中标记避免误导。
+  if (localTrigger.value !== 'breakpoint') resetSnapshotState()
+  // task-58：backtrace 仅对 breakpoint/watchpoint 有效；离开时清除显示但保留开关偏好。
+  if (!backtraceTriggerAvailable.value) {
+    backtraceEnabled.value = false
+    resetBacktraceState()
+  }
+  watchStartError.value = ''
   scheduleDraw()
+}
+
+// ---- task-55：函数快照（breakpoint → 首个命中帧冻结/标记） -----------------
+/**
+ * 清空函数快照状态（arm + 命中标记）。图表冻结是独立开关，由用户 Unfreeze；
+ * 不在这里改 chartFrozen，避免用户手动冻结被意外解除。
+ */
+function resetSnapshotState(): void {
+  snapshotArmed.value = false
+  snapshotHit.value = false
+  snapshotHitTime.value = null
+  snapshotHitPc.value = null
+  snapshotSeq.value = null
+  snapshotFirmwareState.value = undefined
+  snapshotFirmwarePreFrames.value = null
+  snapshotFirmwarePostFrames.value = null
+  snapshotFirmwareRun = false
+  if (snapshotFinalizeTimer) { window.clearTimeout(snapshotFinalizeTimer); snapshotFinalizeTimer = 0 }
+}
+
+/** ring 中 device seq → order 下标（-1=未找到；用于定位固件快照 trigger frame）。 */
+function ringOrderForDeviceSeq(seq: number | null): number {
+  if (seq === null || ringCount === 0) return -1
+  for (let order = ringCount - 1; order >= 0; order--) {
+    if (slotDeviceSeq[ringSlot(order)] === seq) return order
+  }
+  return -1
+}
+
+/** 快照命中的简短说明：明确只有“命中时刻的已采样变量 + 可选 PC”，无 SWO/backtrace/RTOS。 */
+function snapshotHitNoticeText(): string {
+  const timeText = snapshotHitTime.value === null ? '-' : `${snapshotHitTime.value.toFixed(3)}s`
+  const pcText = snapshotHitPc.value === null ? '' : `, PC 0x${(snapshotHitPc.value >>> 0).toString(16).toUpperCase()}`
+  const freezeText = snapshotFreezeOnHit.value ? 'display frozen' : 'marked on chart (freeze off)'
+  return `Function snapshot hit at ≈${timeText}${pcText} — ${freezeText}. Captured only the selected variables at the FPB hit (throttled by Min interval); no SWO trace, call-stack backtrace or RTOS task data; with multiple groups one hit samples only one group (others keep their last values).`
+}
+
+function snapshotFirmwareCompleteText(): string {
+  const post = snapshotFirmwarePostFrames.value
+  const pre = snapshotFirmwarePreFrames.value
+  return `Function snapshot complete (firmware one-shot${post === null ? '' : `, ${post} post frames`}${pre === null ? '' : `, ${pre} pre-hit frames retained`}). Device stopped sampling; chart is frozen and the trigger sample is marked.`
+}
+
+/**
+ * 标记函数快照命中：冻结图表（可选）并把现有双光标 A 放到命中样本上。
+ * 数据来源 = 首个命中断点帧（或固件 snapshot_trigger_seq 已知时定位该帧）；
+ * 不生成额外寄存器/栈/RTOS 数据，也不宣称精确的命中 PC（帧里没有 PC 时不显示）。
+ */
+function markSnapshotHit(timeSeconds: number, pc?: number, seq?: number): void {
+  if (snapshotHit.value) return
+  snapshotHit.value = true
+  snapshotHitTime.value = Number.isFinite(timeSeconds) ? timeSeconds : lastDataTimestamp()
+  snapshotHitPc.value = typeof pc === 'number' && Number.isFinite(pc) ? (pc >>> 0) : null
+  snapshotSeq.value = typeof seq === 'number' && Number.isFinite(seq) ? seq : null
+  snapshotArmed.value = false
+  if (snapshotFreezeOnHit.value) {
+    // 先排队一次重绘（scheduleDraw 在冻结后直接返回），再冻结显示；采样继续。
+    invalidateYRange()
+    scheduleDraw()
+    chartFrozen.value = true
+  }
+  if (ringCount > 0) {
+    const order = Math.min(ringCount - 1, Math.max(0, lowerBoundTime(snapshotHitTime.value)))
+    cursorA.value = {index: order, time: timestamps[ringSlot(order)]}
+    cursorB.value = null
+    cursorPulse.value += 1
+    scheduleHoverDraw()
+  }
+  notice.value = {type: 'info', title: snapshotHitNoticeText()}
+}
+
+/**
+ * Arm 函数快照并立即开始断点采样：选函数/地址 → 设断点 → 采样 → 命中后冻结/标记。
+ * 需要 breakpoint trigger；若关闭 Freeze on hit 则只标记不冻结。
+ */
+function armFunctionSnapshot(): void {
+  if (!isLocalSource.value || sampling.value) return
+  if (localTrigger.value !== 'breakpoint') {
+    localTrigger.value = 'breakpoint'
+    onLocalTriggerChange()
+  }
+  const resolution = breakpointResolution.value
+  if (!resolution || !resolution.ok) {
+    notice.value = {type: 'error', title: translate('curve.localBreakpointInvalid')}
+    return
+  }
+  if (seriesList.value.length === 0) {
+    notice.value = {type: 'error', title: translate('curve.localSelectHint')}
+    return
+  }
+  resetSnapshotState()
+  const symbol = selectedFunctionAddress.value === null
+    ? null
+    : chooseBreakpointFunction(elfFunctionSymbols.value, selectedFunctionAddress.value)
+  snapshotFunctionName.value = symbol ? symbol.displayName : formatHex32(resolution.address)
+  snapshotBoundaryAddr.value = resolution.address
+  snapshotArmed.value = true
+  void startLocalSampling()
+}
+
+function clearSnapshotMark(): void {
+  resetSnapshotState()
+  if (chartFrozen.value) toggleFreeze()
+  clearCursors()
 }
 
 function startSampling(): void {
@@ -2887,6 +4092,8 @@ function pushSample(time: number, rawValues: Uint8Array[], snapshot: readonly Cu
     const values = seriesValues.get(item.id)
     if (values) values[slot] = decodeNumber(item, bits.lo, bits.hi)
   }
+  // task-62 P1-15：把本次采样增量同步给图表 Worker 自己的 ring（小消息；不复制整窗）。
+  postChartSampleToWorker(time, slot, snapshot)
   ringHead = (ringHead + 1) % MAX_POINTS
   if (ringCount < MAX_POINTS) ringCount += 1
   sampleSeq += 1
@@ -2907,6 +4114,8 @@ function clearData(): void {
   ringHead = 0
   ringCount = 0
   sampleSeq = 0
+  // 主线程 ring 与 Worker ring 同步复位（否则 order/seq 映射错位）。
+  resetChartWorkerRing()
   droppedPending = 0
   if (statsTimer) { window.clearTimeout(statsTimer); statsTimer = 0 }
   sampleCount.value = 0
@@ -3152,6 +4361,8 @@ const variableRows = computed<VariableRow[]>(() => {
   }
   return rows
 })
+/** W3/W4 状态行（W1/W2 保留原有 translate 文案行，避免重复）。 */
+const extraWatchStatusRows = computed(() => watchStatusRows.value.filter((row) => row.index >= 3))
 
 const visibleVariableCount = computed(() => variableRows.value.filter((row) => row.kind === 'variable').length)
 const unsampleableCount = computed(() => {
@@ -3720,6 +4931,68 @@ const watchpointSpec = computed<CurveLocalWatchpointSpec | null>(() => {
   if (address % watchSize.value !== 0) return null
   return {address, size: watchSize.value, access: watchAccess.value}
 })
+/** task-58：第二路 comparator 配置（未勾选时不下发）。 */
+const watchpoint2Spec = computed<CurveLocalWatchpointSpec | null>(() => {
+  if (!watchSecondEnabled.value) return null
+  const address = parseWatchAddressInput(watch2AddressInput.value)
+  if (address === null) return null
+  if (address % watch2Size.value !== 0) return null
+  return {address, size: watch2Size.value, access: watch2Access.value}
+})
+/** task-62：第 3/4 路 comparator 配置（未勾选/地址非法时 null）。 */
+function extraWatchSpec(slot: ExtraWatchSlot): CurveLocalWatchpointSpec | null {
+  if (!slot.enabled) return null
+  const address = parseWatchAddressInput(slot.addressInput)
+  if (address === null) return null
+  if (address % slot.size !== 0) return null
+  return {address, size: slot.size, access: slot.access}
+}
+const watchpoint3Spec = computed<CurveLocalWatchpointSpec | null>(() => extraWatchSpec(watchThird.value))
+const watchpoint4Spec = computed<CurveLocalWatchpointSpec | null>(() => extraWatchSpec(watchFourth.value))
+/** 本地下发的全部 watchpoint（按 1..4 顺序；最多 4 路，固件 task-60）。 */
+const requestedWatchpoints = computed<CurveLocalWatchpointSpec[]>(() => {
+  const list: CurveLocalWatchpointSpec[] = []
+  if (watchpointSpec.value) list.push(watchpointSpec.value)
+  if (watchpoint2Spec.value) list.push(watchpoint2Spec.value)
+  if (watchpoint3Spec.value) list.push(watchpoint3Spec.value)
+  if (watchpoint4Spec.value) list.push(watchpoint4Spec.value)
+  return list.slice(0, CURVE_LOCAL_MAX_WATCHPOINTS)
+})
+/** 已启用的 comparator 配置数（含非法地址的槽位也计入，用于报错）。 */
+const enabledWatchpointSlotCount = computed(() => {
+  let count = 1
+  if (watchSecondEnabled.value) count += 1
+  if (watchThird.value.enabled) count += 1
+  if (watchFourth.value.enabled) count += 1
+  return count
+})
+/** 状态显示：优先 canonical status.watchpoints 数组，否则用 legacy watchpointN_* 字段。 */
+interface WatchStatusRow {index: number; label: string; armed: boolean | null; address: number | null; hits: number | null}
+const watchStatusRows = computed<WatchStatusRow[]>(() => {
+  void validCountVersion.value
+  const status = localStatusInfo.value
+  const rows: WatchStatusRow[] = []
+  const canonical = status?.watchpoints
+  const legacy: Array<{armed: boolean | null; address: number | null; hits: number | null; fallbackAddress: number | null}> = [
+    {armed: watchpointArmed.value, address: status?.watchpointAddress ?? null, hits: watchpointHits.value, fallbackAddress: watchpointSpec.value?.address ?? null},
+    {armed: watchpoint2Armed.value, address: watchpoint2Address.value, hits: watchpoint2Hits.value, fallbackAddress: watchpoint2Spec.value?.address ?? null},
+    {armed: watchpoint3Armed.value, address: watchpoint3Address.value, hits: watchpoint3Hits.value, fallbackAddress: watchpoint3Spec.value?.address ?? null},
+    {armed: watchpoint4Armed.value, address: watchpoint4Address.value, hits: watchpoint4Hits.value, fallbackAddress: watchpoint4Spec.value?.address ?? null},
+  ]
+  const count = Math.max(1, Math.min(CURVE_LOCAL_MAX_WATCHPOINTS, watchCount.value ?? enabledWatchpointSlotCount.value))
+  for (let index = 0; index < count; index++) {
+    const entry = canonical?.find((item) => item.index === index + 1) ?? canonical?.[index]
+    const row: WatchStatusRow = {
+      index: index + 1,
+      label: `W${index + 1}`,
+      armed: entry?.armed ?? legacy[index]?.armed ?? null,
+      address: entry?.address ?? legacy[index]?.address ?? legacy[index]?.fallbackAddress ?? null,
+      hits: entry?.hits ?? legacy[index]?.hits ?? null,
+    }
+    rows.push(row)
+  }
+  return rows
+})
 const conditionSpec = computed<CurveConditionSpec | null>(() => {
   if (!conditionEnabled.value) return null
   const address = parseWatchAddressInput(conditionAddressInput.value)
@@ -3746,7 +5019,68 @@ const watchpointError = computed(() => {
   if (!isLocalSource.value || localTrigger.value !== 'watchpoint') return ''
   if (!watchAddressInput.value.trim()) return translate('curve.watchpointAddressRequired')
   if (watchpointSpec.value === null) return translate('curve.watchpointInvalid')
+  if (watchSecondEnabled.value) {
+    if (!watch2AddressInput.value.trim()) return translate('curve.watchpointAddressRequired')
+    if (watchpoint2Spec.value === null) return translate('curve.watchpointInvalid')
+    if (isDuplicateWatchpoint(watchpointSpec.value, watchpoint2Spec.value)) {
+      return translate('curve.watchpointDuplicatesFirst')
+    }
+  }
+  // task-62：legacy 编码要求 comparator slot 连续（firmware: "requires the previous
+  // watchpoint slot to be configured"）；canonical 数组也按连续槽位下发，故 UI 统一要求。
+  if (watchThird.value.enabled && !watchSecondEnabled.value) {
+    return 'W3 requires W2 to be enabled (DWT comparator slots must be contiguous)'
+  }
+  if (watchFourth.value.enabled && !watchThird.value.enabled) {
+    return 'W4 requires W3 to be enabled (DWT comparator slots must be contiguous)'
+  }
+  // task-62：第 3/4 路（固件 task-60，最多 4 路）。资源是否足够由固件原文报错。
+  for (const [slotIndex, slot] of [[3, watchThird.value], [4, watchFourth.value]] as const) {
+    if (!slot.enabled) continue
+    if (!slot.addressInput.trim()) return translate('curve.watchpointAddressRequired')
+    const spec = extraWatchSpec(slot)
+    if (spec === null) return translate('curve.watchpointInvalid')
+    for (const [offset, other] of requestedWatchpoints.value.entries()) {
+      if (offset >= slotIndex - 1) break
+      if (isDuplicateWatchpoint(other, spec)) return `W${slotIndex} duplicates W${offset + 1}`
+    }
+  }
+  if (enabledWatchpointSlotCount.value > CURVE_LOCAL_MAX_WATCHPOINTS) {
+    return `Firmware supports at most ${CURVE_LOCAL_MAX_WATCHPOINTS} DWT watchpoints`
+  }
   return ''
+})
+/** task-58：backtrace 仅对 breakpoint/watchpoint 触发有效（固件契约）。 */
+const backtraceTriggerAvailable = computed(() => localTrigger.value === 'breakpoint' || localTrigger.value === 'watchpoint')
+/** trace text 视图：lines 模式用固件行；raw 模式 UTF-8 尽力解码字节流。 */
+const traceTextContent = computed(() => (traceSource.value === 'lines'
+  ? formatTraceLinesText(traceLines.value)
+  : decodeTraceText(traceBuffer.value)))
+/** trace hex 视图：lines 模式逐行显示固件 t_us + 行字节；raw 模式按字节序号 dump。 */
+const traceHexContent = computed(() => (traceSource.value === 'lines'
+  ? formatTraceLinesHex(traceLines.value)
+  : formatTraceHexDump(traceBuffer.value, traceBaseSeq.value)))
+/** trace 行视图：lines 模式 = 固件行 seq + Δt(固件 esp_timer)；raw 模式 = 目标 '\n' 切分 + 字节序号。 */
+const traceLineContent = computed(() => (traceSource.value === 'lines'
+  ? formatTraceLinesView(traceLines.value)
+  : formatRawTraceLineView(traceBuffer.value, traceBaseSeq.value)))
+/** 当前 trace 视图内容（text/hex/line）。 */
+const traceContent = computed(() => {
+  if (traceView.value === 'hex') return traceHexContent.value
+  if (traceView.value === 'line') return traceLineContent.value
+  return traceTextContent.value
+})
+/** 当前是否有可显示 trace 数据（lines 行数或 raw 字节数）。 */
+const traceHasContent = computed(() => (traceSource.value === 'lines' ? traceLines.value.length > 0 : traceBuffer.value.length > 0))
+/** trace 行/字节统计文案（不统一混用 seq 语义）。 */
+const traceCounterText = computed(() => (traceSource.value === 'lines'
+  ? `lines: ${traceLines.value.length} / total ${traceTotalLines.value ?? '-'} · seq ${traceLineSeq.value}`
+  : `bytes: ${traceBuffer.value.length} · seq ${traceSeq.value}`))
+/** backtrace PC -> ELF 函数/源码行（纯函数映射；无符号/无行表时如实留空）。 */
+const backtraceFrames = computed(() => {
+  const data = backtraceData.value
+  if (!data || !data.valid) return []
+  return buildBacktraceFrames(data.pcs, elfFunctionSymbols.value, lineIndex.value, CURVE_LOCAL_MAX_BACKTRACE_FRAMES)
 })
 
 function jumpToTriggerSeq(targetSeq: number | null, preTrigger: boolean): void {
@@ -3927,15 +5261,146 @@ function ringSlotToOrder(slot: number): number {
   return (slot - ringHead + ringCount + MAX_POINTS) % MAX_POINTS
 }
 
-// ---- task-37：group weight / 预设 / watch / 光标 / 派生 / 诊断 -----------
-const localGroupWeightSum = computed(() => groupWeights.value.slice(0, localActiveGroupCount.value).reduce((sum, weight) => sum + weight, 0))
-/** 每组实际帧刷新率 = interval 总节拍按 weight 分配。 */
-const localGroupWeightedRates = computed(() => {
+// ---- task-37 / task-55：group weight / 每变量刷新率 / 预设 / watch / 光标 / 派生 / 诊断 ----
+/** 总帧率（Hz）：采样中优先用实测帧率（≈），否则用名义值 1000/interval。 */
+const localTotalFrameRateHz = computed(() => {
+  if (sampling.value && effectiveRate.value > 0) return effectiveRate.value
+  return localIntervalMs.value > 0 ? 1000 / localIntervalMs.value : 0
+})
+/**
+ * 每组生效权重：目标率分桶路径由 divisor 决定（不可手改）；默认路径沿用现有
+ * 手改的 groupWeights。下标与下发 groups 顺序一致。
+ */
+const effectiveGroupWeights = computed<number[]>(() => {
+  const count = localPlannedGroups.value
+  const source = plannedGroups.value.map((group) => group.weight ?? 1)
+  return Array.from({length: count}, (_, index) => Math.min(CURVE_LOCAL_MAX_GROUP_WEIGHT, Math.max(1, source[index] ?? 1)))
+})
+/** Σ weight（固件限制 ≤64）。 */
+const localGroupWeightSum = computed(() => effectiveGroupWeights.value.slice(0, localActiveGroupCount.value).reduce((sum, weight) => sum + weight, 0))
+/** 每组实际帧刷新率 ≈ 总帧率 × weight/Σweight（实测总帧率优先，标注为 ≈ 不伪造精确值）。 */
+const localGroupActualRates = computed(() => {
   const count = localActiveGroupCount.value
   const total = localGroupWeightSum.value
-  if (total <= 0 || localIntervalMs.value <= 0) return [] as number[]
-  return Array.from({length: count}, (_, index) => (1000 / localIntervalMs.value) * (groupWeights.value[index] ?? 1) / total)
+  if (total <= 0 || localTotalFrameRateHz.value <= 0) return [] as number[]
+  return effectiveGroupWeights.value.slice(0, count).map((weight) => localTotalFrameRateHz.value * weight / total)
 })
+/** series.id → 所属计划 group 下标（用于 Selected 行每变量实际刷新率）。 */
+const rateGroupIndexBySeriesId = computed(() => {
+  const map = new Map<number, number>()
+  plannedGroups.value.forEach((group, index) => {
+    for (const item of group.items) map.set(item.id, index)
+  })
+  return map
+})
+/** 名义目标刷新率（未设置=全局 1000/interval；divisor=2/4/8 依次降低）。 */
+function targetRateForDivisor(divisor: unknown): number {
+  const base = localIntervalMs.value > 0 ? 1000 / localIntervalMs.value : 0
+  return base / normalizeRateDivisor(divisor)
+}
+/** 人类可读速率（整数省略小数；≤1 位小数足够，12.5/6.25 保留）。 */
+function formatRateHz(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0'
+  const rounded = Math.round(value * 100) / 100
+  return String(rounded)
+}
+/** target 下拉标签：纯数字/单位（不新增 locale key）。 */
+function rateDivisorLabel(divisor: number): string {
+  return `${formatRateHz(targetRateForDivisor(divisor))} Hz (÷${normalizeRateDivisor(divisor)})`
+}
+function rateDivisorTitle(divisor: unknown): string {
+  return `Target refresh rate: global tick ${formatRateHz(1000 / Math.max(1, localIntervalMs.value))} Hz ÷ ${normalizeRateDivisor(divisor)}. Implemented as firmware group weight (no per-variable firmware divisor field).`
+}
+/** 每条曲线的目标刷新率：优先用户 Hz 目标；否则由 divisor 推导（缺省=全局 tick 率）。 */
+function seriesTargetHz(item: CurveSeries): number {
+  const target = item.rateTargetHz ?? 0
+  if (target > 0) return target
+  return targetRateForDivisor(effectiveRateDivisor(item))
+}
+/** 每条曲线的计划有效刷新率估计（≈ 组帧率 / sample_every；PC 门控会进一步降低）。 */
+function seriesActualRateHz(item: CurveSeries): number | null {
+  const index = rateGroupIndexBySeriesId.value.get(item.id)
+  if (index === undefined) return null
+  const weights = effectiveGroupWeights.value
+  const total = weights.reduce((sum, weight) => sum + weight, 0)
+  if (!(total > 0)) return null
+  const groupRate = localTotalFrameRateHz.value * (weights[index] ?? 1) / total
+  const precise = sampleEveryPlanBySeriesId.value.get(item.id)
+  if (localPreciseActive.value && precise) return groupRate / Math.max(1, precise.sampleEvery)
+  return groupRate
+}
+/** 实测有效刷新率（按收到帧的 valid 计数/时间窗口；未知返回 null，不猜）。 */
+function seriesValidRateHz(item: CurveSeries): number | null {
+  const counter = seriesValidCounters.get(item.id)
+  if (!counter || counter.valid <= 0) return null
+  const elapsed = validCountWindowSeconds.value
+  if (!(elapsed > 0)) return null
+  return counter.valid / elapsed
+}
+/** 本次会话累计有效/ stale 采样槽（每 series 每个 tick-slot 记一次）。 */
+const totalValidCount = computed(() => {
+  void validCountVersion.value
+  let sum = 0
+  for (const counter of seriesValidCounters.values()) sum += counter.valid
+  return sum
+})
+const totalStaleCount = computed(() => {
+  void validCountVersion.value
+  let sum = 0
+  for (const counter of seriesValidCounters.values()) sum += counter.stale
+  return sum
+})
+function seriesRateLabel(item: CurveSeries): string {
+  const hz = seriesActualRateHz(item)
+  const valid = seriesValidRateHz(item)
+  const precise = sampleEveryPlanBySeriesId.value.get(item.id)
+  const preciseTag = localPreciseActive.value && precise ? `÷${precise.sampleEvery} ` : ''
+  const validText = valid === null ? '' : ` · valid ${formatRateHz(valid)} Hz`
+  return hz === null ? (validText ? validText.replace(/^ · /, '') : '-') : `${preciseTag}≈${formatRateHz(hz)} Hz${validText}`
+}
+function seriesRateTitle(item: CurveSeries): string {
+  const groupIndex = rateGroupIndexBySeriesId.value.get(item.id)
+  const target = seriesTargetHz(item)
+  const precise = sampleEveryPlanBySeriesId.value.get(item.id)
+  const weight = groupIndex === undefined ? '-' : `${effectiveGroupWeights.value[groupIndex] ?? '-'} / Σ${localGroupWeightSum.value || '-'}`
+  const actual = seriesActualRateHz(item)
+  const valid = seriesValidRateHz(item)
+  const counter = seriesValidCounters.get(item.id)
+  const mode = localPreciseActive.value
+    ? `firmware per-series sample_every=${precise?.sampleEvery ?? 1} (exact integer division of group tick; reported max ${localSampleEveryMax.value ?? '-'})`
+    : 'legacy groups+weight fallback (firmware did not confirm sample_every)'
+  return `Target ${formatRateHz(target)} Hz · ${mode} · group weight ${weight} · plan ≈${actual === null ? '-' : formatRateHz(actual)} Hz`
+    + ` · measured valid ${valid === null ? '-' : formatRateHz(valid)} Hz (${counter?.valid ?? 0} valid / ${counter?.stale ?? 0} stale tick-slots).`
+    + ' sample_every samples this series once per N group ticks; the other ticks are stale and hold the last valid value on the chart.'
+}
+/** 设置单条曲线目标 Hz（≤0/NaN = 清除，跟随全局 tick 率）。 */
+function setSeriesTargetHz(item: CurveSeries, value: unknown): void {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : Number(value)
+  item.rateTargetHz = Number.isFinite(numeric) && numeric > 0 ? Math.min(100000, numeric) : undefined
+}
+/** 设置单条曲线目标 divisor（1=清除/跟随全局）。 */
+function setSeriesRateDivisor(item: CurveSeries, value: unknown): void {
+  const divisor = normalizeRateDivisor(value)
+  item.rateDivisor = divisor === 1 ? undefined : divisor
+  if (divisor !== 1) item.rateTargetHz = undefined
+}
+/** 批量设置当前已选曲线的目标 Hz（精确模式）；旧固件自动映射到最近 divisor fallback。 */
+function applyBatchRate(): void {
+  const divisor = normalizeRateDivisor(batchRateDivisor.value)
+  for (const item of seriesList.value) {
+    if (item.derived) continue
+    item.rateDivisor = divisor === 1 ? undefined : divisor
+    if (divisor !== 1) item.rateTargetHz = undefined
+  }
+}
+/** 批量设置目标 Hz。 */
+function applyBatchTargetHz(): void {
+  const target = Number(batchTargetHz.value)
+  for (const item of seriesList.value) {
+    if (item.derived) continue
+    item.rateTargetHz = Number.isFinite(target) && target > 0 ? target : undefined
+  }
+}
 
 function ensureGroupWeights(count: number): void {
   const next = groupWeights.value.slice(0, Math.max(1, count))
@@ -3948,9 +5413,57 @@ watch(localActiveGroupCount, (count) => ensureGroupWeights(count), {immediate: t
 function setGroupWeight(index: number, value: number): void {
   if (index < 0 || index >= groupWeights.value.length) return
   const next = [...groupWeights.value]
-  next[index] = Math.min(8, Math.max(1, Math.round(Number(value) || 1)))
+  next[index] = Math.min(CURVE_LOCAL_MAX_GROUP_WEIGHT, Math.max(1, Math.round(Number(value) || 1)))
   groupWeights.value = next
 }
+
+/** 容量错误（>8 组 / >256 路等）：明确拒绝，不静默丢系列。 */
+const ratePlanErrorText = computed(() => {
+  if (!hasAnyRatePlan.value) return ''
+  const plan = ratePlan.value
+  switch (plan.error) {
+    case 'too_many_groups':
+      return `Rate plan needs ${plan.groupCount} groups (> firmware max ${CURVE_LOCAL_MAX_GROUPS}); reduce variables or use fewer rate buckets. Series: ${plan.seriesCount}/${CURVE_LOCAL_MAX_TOTAL_SERIES}.`
+    case 'too_many_series':
+      return `Rate plan has ${plan.seriesCount} series (> firmware max ${CURVE_LOCAL_MAX_TOTAL_SERIES}); reduce variables.`
+    case 'too_many_bytes':
+      return `A single series payload exceeds ${CURVE_LOCAL_MAX_SAMPLE_BYTES} bytes (firmware group limit); cannot send rate plan.`
+    default:
+      return ''
+  }
+})
+/**
+ * 目标速率 ≠ 可实现速率提示：固件一个 tick 只采样一个 group，组帧率只能按
+ * weight 份额归一化，所以绝对 Hz 不保证（尤其只有一个 divisor>1 桶时）。
+ */
+const rateMismatchWarning = computed(() => {
+  if (!hasAnyRatePlan.value || ratePlan.value.error) return ''
+  const mismatched: string[] = []
+  for (const [index, group] of plannedGroups.value.entries()) {
+    if (group.divisor === 1) continue
+    const target = targetRateForDivisor(group.divisor)
+    if (target <= 0) continue
+    const nominalActual = localIntervalMs.value > 0
+      ? (1000 / localIntervalMs.value) * ((effectiveGroupWeights.value[index] ?? 1) / Math.max(1, localGroupWeightSum.value))
+      : 0
+    if (Math.abs(nominalActual - target) > Math.max(0.01 * target, 0.02)) {
+      mismatched.push(`÷${group.divisor} target ${formatRateHz(target)} Hz → ≈${formatRateHz(nominalActual)} Hz`)
+    }
+  }
+  if (mismatched.length === 0) return ''
+  return `Group weights are relative shares of the global tick, so absolute target rates cannot be guaranteed (${mismatched.join('; ')}). Keep a ÷1 bucket for full rate, and increase Local interval if you need lower absolute rates.`
+})
+/** task-62：精确模式下目标 Hz 高于 group tick 率时无法更快（sample_every=1 封顶）。 */
+const preciseRateWarning = computed(() => {
+  if (!usePreciseSampleEvery.value) return ''
+  const capped = [...sampleEveryPlanBySeriesId.value.values()].filter((plan) => plan.capped)
+  if (capped.length === 0) return ''
+  const tickPerGroup = nominalTickHz.value / Math.max(1, plannedPreciseGroups.value.length)
+  return `${capped.length} curve(s) target above the group tick rate (${formatRateHz(tickPerGroup)} Hz); firmware cannot sample faster than sample_every=1. Increase the global interval or lower the target.`
+})
+/** 每变量刷新率界面仅在设备本地采样模式显示（Web-DAP 路径没有 groups/weights）。 */
+const showRateControls = computed(() => isLocalSource.value)
+
 
 /** PC 是否落入变量/变体的半开区间（无 PC 信息时不判定为 stale）。 */
 function pcRangeContains(low: number | undefined, high: number | undefined, pc: number): boolean {
@@ -4307,8 +5820,19 @@ const diagnosticsData = computed(() => {
       intervalUs: status.intervalUs,
       sampleBytes: status.sampleBytes,
       error: status.error,
+      // task-62：固件 task-60 per-series 速率/stale 摘要（旧固件缺省）。
+      sampleEveryMax: status.sampleEveryMax ?? null,
+      seriesStale: status.seriesStale ?? null,
+      heapFree: status.heapFree ?? null,
+      heapLargest: status.heapLargest ?? null,
     } : null,
     ring: {points: ringCount, selected: seriesList.value.length, maxSeries: seriesLimit.value},
+    // P0-1：启动请求编码（CBS1 流式二进制 / 旧 JSON 回退）与字节数。
+    startRequest: {
+      transport: localStartTransport.value,
+      bytes: localStartRequestBytes.value,
+      fallbackReason: localStartFallbackReason.value || null,
+    },
     render: {
       yAxisMode: yAxisMode.value,
       renderAll: renderAll.value,
@@ -4316,6 +5840,13 @@ const diagnosticsData = computed(() => {
       pollsPerSecond: Math.round(pollCounterState.pollsPerSecond * 10) / 10,
       avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
       draws: perfCounter.draws,
+    },
+    // task-62 P1-15：Worker 内 ring + 绘制统计（主线程不再每帧复制整窗曲线）。
+    chartWorker: {
+      mode: chartRenderMode.value,
+      samplePosts: chartSamplePosts,
+      last: chartWorkerStats,
+      derivedFallback: drawnSeriesList.value.some((item) => item.derived),
     },
     recording: {active: recordingActive.value, rows: recordRowCount.value, saved: recordings.value.length},
     activeFrame: {
@@ -4334,9 +5865,105 @@ const diagnosticsData = computed(() => {
       warning: targetFlashWarning.value,
     },
     lineIndex: lineIndex.value ? {files: lineIndex.value.files.length, rows: lineIndex.value.rows.length} : null,
-    watchpoint: {armed: watchpointArmed.value, hits: watchpointHits.value, triggerSeq: watchTriggerSeq.value},
+    watchpoint: {
+      armed: watchpointArmed.value,
+      hits: watchpointHits.value,
+      triggerSeq: watchTriggerSeq.value,
+      count: watchCount.value,
+      second: {
+        enabled: watchSecondEnabled.value,
+        armed: watchpoint2Armed.value,
+        address: watchpoint2Address.value !== null ? `0x${watchpoint2Address.value.toString(16).toUpperCase()}` : null,
+        hits: watchpoint2Hits.value,
+      },
+      lastWatchIndex: lastWatchIndex.value,
+      // task-62：W3/W4（固件 task-60）状态行 + 本地下发的 comparator 数。
+      rows: watchStatusRows.value,
+      requested: requestedWatchpoints.value.length,
+      // 固件 start 失败原文（DWT 资源不足等）；未失败为 null。
+      startError: watchStartError.value || null,
+    },
+    // task-58：固件 task-57 调试能力摘要（不含伪造的 SWO/RTOS 数据）。
+    uartTrace: {
+      source: traceSource.value,
+      active: traceActive.value,
+      nextByteSeq: traceSeq.value,
+      totalBytes: traceTotal.value,
+      droppedBytes: traceDropped.value,
+      gap: traceGap.value,
+      headersAvailable: traceHeadersAvailable.value,
+      displayBytes: traceBuffer.value.length,
+      // task-62：固件 task-60 lines 接口（行/时间来自固件，不是 Web 生成）。
+      linesSupported: traceLinesSupported.value,
+      nextLineSeq: traceLineSeq.value,
+      displayLines: traceLines.value.length,
+      totalLines: traceTotalLines.value,
+      droppedLines: traceDroppedLines.value,
+      triggered: traceTriggered.value,
+      triggerSeq: traceTriggerSeq.value,
+      triggerPattern: traceTriggerPattern.value || null,
+      view: traceView.value,
+      pollMs: tracePollMs.value,
+    },
+    backtrace: {
+      enabled: backtraceEnabled.value,
+      valid: backtraceData.value?.valid ?? null,
+      count: backtraceData.value?.count ?? null,
+      truncated: backtraceData.value?.truncated ?? null,
+      frames: backtraceFrames.value.map((frame) => ({
+        pc: `0x${frame.pc.toString(16).toUpperCase()}`,
+        lookupPc: `0x${frame.lookupPc.toString(16).toUpperCase()}`,
+        returnAddress: frame.returnAddress,
+        function: frame.functionName,
+        functionOffset: frame.functionOffset,
+        functionExact: frame.functionExact,
+        file: frame.file,
+        line: frame.line,
+      })),
+    },
+    unavailableFeatures: [
+      'SWO/ITM trace (no SWO pin; SWO_FUNCTION_ENABLE=0)',
+      'RTOS task awareness (not implemented)',
+    ],
     playbackState: {active: playbackMode.value, index: playbackIndex.value},
     cursor: {a: cursorA.value?.time ?? null, b: cursorB.value?.time ?? null},
+    // task-55：每变量刷新率计划（divisor 分桶 + 权重份额）与函数快照状态。
+    rateGroups: {
+      overrides: hasRateOverrides.value,
+      baseRateHz: localIntervalMs.value > 0 ? 1000 / localIntervalMs.value : 0,
+      groups: plannedGroups.value.map((group) => ({divisor: group.divisor, weight: group.weight, series: group.items.length})),
+      totalWeight: localGroupWeightSum.value,
+      actualRates: localGroupActualRates.value.map((rate) => Math.round(rate * 100) / 100),
+      error: ratePlan.value.error,
+      mismatchWarning: rateMismatchWarning.value || null,
+      // task-62：固件 task-60 sample_every 精确模式 + CVF valid/stale 计数。
+      precise: usePreciseSampleEvery.value,
+      preciseActive: localPreciseActive.value,
+      sampleEveryMax: localSampleEveryMax.value,
+      sampleEveryPlan: [...sampleEveryPlanBySeriesId.value.values()].length,
+      cappedTargets: [...sampleEveryPlanBySeriesId.value.values()].filter((plan) => plan.capped).length,
+      preciseWarning: preciseRateWarning.value || null,
+      validSlots: totalValidCount.value,
+      staleSlots: totalStaleCount.value,
+    },
+    commandIndex: {
+      variables: commandIndex.value.variables.length,
+      functions: commandIndex.value.functions.length,
+      version: commandIndexVersion,
+      focusedPath: focusedVariableKey.value || null,
+    },
+    functionSnapshot: {
+      armed: snapshotArmed.value,
+      hit: snapshotHit.value,
+      hitTime: snapshotHitTime.value,
+      pc: snapshotHitPc.value,
+      deviceSeq: snapshotSeq.value,
+      freezeOnHit: snapshotFreezeOnHit.value,
+      firmwareOneShot: snapshotFirmwareOneShot.value,
+      firmwareState: snapshotFirmwareState.value ?? null,
+      preFrames: snapshotFirmwarePreFrames.value,
+      postFrames: snapshotFirmwarePostFrames.value,
+    },
     watch: watchKeys.value.length,
     presets: presets.value.length,
     userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
@@ -4698,6 +6325,106 @@ function openElfDialog(): void {
   elfInputRef.value?.click()
 }
 
+// ---- task-62 P1-17：命令索引发布 + ?focusVar= 聚焦 ---------------------------
+/** 构建并发布命令索引：window.__dapCommandIndex + `dap:command-index` 事件。 */
+function publishCommandIndex(): void {
+  const index = elfInfo.value
+    ? buildDapCommandIndex(elfInfo.value.variables, elfFunctionSymbols.value)
+    : emptyDapCommandIndex()
+  commandIndex.value = index
+  commandIndexVersion += 1
+  const scope = window as unknown as Record<string, unknown>
+  scope[DAP_COMMAND_INDEX_WINDOW_KEY] = index
+  scope[DAP_COMMAND_INDEX_VERSION_KEY] = commandIndexVersion
+  try {
+    window.dispatchEvent(new CustomEvent(DAP_COMMAND_INDEX_EVENT, {detail: index}))
+  } catch {
+    // 极旧环境无 CustomEvent：window 属性仍已更新（命令面板读当前值即可）。
+  }
+  // ELF 刚解析完：如果有暂存的 focusVar，现在尝试聚焦。
+  tryFocusPendingVariable()
+}
+
+/** 聚焦一个命令索引变量：加入曲线（若未选）并高亮/滚动变量行。 */
+function focusVariableEntry(entry: DapCommandIndexVariable): void {
+  const info = elfInfo.value
+  if (!info) return
+  const byPath = info.variables.find((candidate) => {
+    const qualified = (candidate.qualifiedName || '').trim() || candidate.name
+    return qualified === entry.path && (candidate.address >>> 0) === (entry.address >>> 0)
+  })
+  const node = byPath ?? info.variables.find((candidate) => candidate.name === entry.name
+    && (candidate.address >>> 0) === (entry.address >>> 0))
+  if (!node) {
+    globalNotify(`Variable "${entry.path}" not found in the current ELF`, 'warning')
+    return
+  }
+  // 变量树顶层 path 就是 node.name；series key = `name@address`（与变量树去重键一致）。
+  const key = nodeKey(node.name, node)
+  focusedVariableKey.value = key
+  const existing = seriesList.value.find((item) => item.key === key)
+  if (existing) {
+    existing.visible = true
+    invalidateYRange()
+    scheduleDraw()
+    globalNotify(`Focused "${entry.path}" (already selected)`, 'info')
+  } else if (isLocalSource.value && sampling.value) {
+    globalNotify(`Focused "${entry.path}" — stop sampling to add it as a curve`, 'warning')
+  } else {
+    const series = newSeries(node.shortName || node.name, key, node.typeName || '', node)
+    if (series) globalNotify(`Focused "${entry.path}" — added to curves`, 'success')
+    else globalNotify(`Variable "${entry.path}" cannot be sampled in the current source/mode`, 'warning')
+  }
+  // 让变量行出现在当前过滤结果里并滚动到可见（不改变 ELF/采样状态）。
+  void nextTick(() => {
+    variableSearch.value = node.name
+    variableSearchInput.value = node.name
+    variableDisplayLimit.value = Math.max(variableDisplayLimit.value, VARIABLE_PAGE_SIZE)
+    if (focusScrollTimer) { window.clearTimeout(focusScrollTimer); focusScrollTimer = 0 }
+    focusScrollTimer = window.setTimeout(() => {
+      focusScrollTimer = 0
+      const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+        ? CSS.escape(key)
+        : key.replace(/"/g, '\\"')
+      document.querySelector(`[data-key="${escaped}"]`)?.scrollIntoView({block: 'center', behavior: 'smooth'})
+    }, 80)
+  })
+}
+
+/** 解析 ?focusVar= / dap:focus-variable 事件：ELF 未就绪时暂存，解析后自动应用。 */
+function applyFocusVariable(raw: unknown): void {
+  const text = typeof raw === 'string' ? raw : ''
+  if (!text.trim()) return
+  let decoded = text.trim()
+  try {
+    decoded = decodeURIComponent(decoded)
+  } catch {
+    // 非法编码：按原字符串匹配（不伪造）。
+  }
+  pendingFocusVar = decoded
+  tryFocusPendingVariable()
+}
+
+function tryFocusPendingVariable(): void {
+  if (!pendingFocusVar || !elfInfo.value) return
+  const path = pendingFocusVar
+  pendingFocusVar = ''
+  const match = findCommandIndexVariable(commandIndex.value, path)
+  if (!match) {
+    globalNotify(`Variable "${path}" not found in current ELF command index`, 'warning')
+    return
+  }
+  focusVariableEntry(match)
+}
+
+function onDapFocusVariable(event: Event): void {
+  const detail = (event as CustomEvent<{path?: string}>).detail
+  applyFocusVariable(detail?.path)
+}
+
+/** ?focusVar= 变化（命令面板跳转）→ 等 ELF 就绪后聚焦。 */
+watch(() => route.query.focusVar, (value) => applyFocusVariable(value), {immediate: true})
+
 /**
  * 解析 ELF：手工上传、SourceBrowser 项目内自动发现/手工选择共用同一流程。
  * 成功后刷新变量树、函数符号、搜索索引与选中状态。
@@ -4740,12 +6467,15 @@ async function parseElfFile(file: File): Promise<void> {
     if (result.variables.length === 0) {
       elfError.value = translate('curve.noSymbols')
     }
+    // task-62 P1-17：发布命令面板索引（变量/函数）并应用暂存的 focusVar。
+    publishCommandIndex()
   } catch (error) {
     elfInfo.value = null
     elfFunctionSymbols.value = []
     selectedFunctionAddress.value = null
     const message = error instanceof Error ? error.message : 'unknown error'
     elfError.value = translate('curve.elfInvalid', {err: message})
+    publishCommandIndex()
   } finally {
     elfParsing.value = false
   }
@@ -5391,30 +7121,11 @@ function formatYTick(value: number): string {
   return formatAxisValue(value)
 }
 
-// ---- OffscreenCanvas 图表 Worker（task-47；失败自动回退主线程 drawChartLocal） ----
-interface ChartWorkerSeries {id: string; color: string; values: Float32Array}
-interface ChartWorkerScene {
-  requestId: number
-  width: number
-  height: number
-  dpr: number
-  padding: {left: number; right: number; top: number; bottom: number}
-  xMin: number
-  xMax: number
-  times: Float32Array
-  series: ChartWorkerSeries[]
-  yMode: YAxisMode
-  smoothingWindow: number
-  palette: {bg: string; grid: string; text: string; axis: string}
-}
-interface ChartWorkerGeometry {
-  padding: {left: number; right: number; top: number; bottom: number}
-  plotWidth: number; plotHeight: number
-  xMin: number; xMax: number
-  minValue: number; maxValue: number
-  yMode: YAxisMode
-  ranges: Record<string, [number, number]>
-}
+// ---- OffscreenCanvas 图表 Worker（task-47 → task-62 P1-15） ------------------
+// Worker 内自己维护 ring（ChartRingStore）：主线程在 pushSample 时只发增量小消息
+// （time + ids + values），不再每帧把整窗曲线复制/transfer 给 Worker；Y 范围、
+// 变换、平滑、像素列 min/max 降采样与光栅都在 Worker 内完成（见 utils/curveChartWorker.ts）。
+// 存在派生曲线时 Worker 无派生值可画 → 回退主线程 drawChartLocal（数据功能不受影响）。
 let chartWorker: Worker | null = null
 let chartWorkerReady = false
 let chartWorkerFailed = false
@@ -5422,6 +7133,10 @@ let chartWorkerInFlight = false
 let chartWorkerSuspended = false
 let chartRequestId = 0
 const chartRenderMode = ref<'offscreen' | 'main'>('main')
+/** 采样消息计数 + 最近一次 Worker 绘制统计（只用于 __curveDebug 测量，不影响逻辑）。 */
+let chartSamplePosts = 0
+let chartWorkerEmptyStreak = 0
+let chartWorkerStats: {series: number; decimated: boolean; segments: number; columnsDrawn: number; startOrder: number; drawMs: number} | null = null
 
 function initChartWorker(): void {
   if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') {
@@ -5432,12 +7147,13 @@ function initChartWorker(): void {
     const worker = new CurveChartWorker()
     chartWorker = worker
     worker.onmessage = (event: MessageEvent<{
-      type: 'bitmap' | 'error' | 'geometry'
+      type: 'bitmap' | 'error'
       requestId: number
       bitmap?: ImageBitmap
       drawMs?: number
       error?: string
-      geometry?: ChartWorkerGeometry
+      geometry?: ChartGeometry
+      stats?: {series?: number; decimated?: number; segments?: number; columnsDrawn?: number; startOrder?: number}
     }>) => {
       const message = event.data
       if (message.type === 'error') {
@@ -5451,14 +7167,32 @@ function initChartWorker(): void {
       }
       if (message.type !== 'bitmap') return
       const geometry = message.geometry
+      if (message.stats) {
+        chartWorkerStats = {
+          series: message.stats.series ?? 0,
+          decimated: (message.stats.decimated ?? 0) !== 0,
+          segments: message.stats.segments ?? 0,
+          columnsDrawn: message.stats.columnsDrawn ?? 0,
+          startOrder: message.stats.startOrder ?? 0,
+          drawMs: message.drawMs ?? 0,
+        }
+      }
       if (!geometry) {
-        // Worker 无法产出几何（空窗口/全部 NaN）：结束 in-flight 并回退主线程。
+        // Worker 无法产出几何（窗口内全部 NaN，或 Worker ring 与主线程不同步）。
         chartWorkerInFlight = false
         if (message.bitmap) message.bitmap.close()
-        chartDirty = true
+        chartWorkerEmptyStreak += 1
+        if (chartWorkerEmptyStreak >= 3) {
+          // 连续空几何：判定 Worker ring 失步/退化，永久回退主线程渲染（数据/功能不变）。
+          chartWorkerFailed = true
+          chartWorkerReady = false
+          chartRenderMode.value = 'main'
+        }
+        // 主线程 ring 是权威数据源：直接主线程画一次（不额外标记 dirty，避免循环）。
         drawChartLocal()
         return
       }
+      chartWorkerEmptyStreak = 0
       const canvas = canvasRef.value
       const wrap = chartWrapRef.value
       if (canvas && wrap) {
@@ -5512,6 +7246,8 @@ function initChartWorker(): void {
       chartDirty = true
       scheduleDraw()
     }
+    // 主线程 ring 容量固定 MAX_POINTS：Worker 用同一容量保持 order/seq 语义一致。
+    worker.postMessage({type: 'reset', maxPoints: MAX_POINTS})
     chartWorkerReady = true
     chartRenderMode.value = 'offscreen'
   } catch {
@@ -5519,6 +7255,32 @@ function initChartWorker(): void {
     chartWorkerReady = false
     chartRenderMode.value = 'main'
   }
+}
+
+/**
+ * 把一次 pushSample 的数值增量发给 Worker（不阻塞、失败静默回退主线程）。
+ * Worker ring 与主线程 ring 的写入次数/顺序严格一致；payload 为空时也发（seq 对齐）。
+ */
+function postChartSampleToWorker(time: number, slot: number, snapshot: readonly CurveSeries[]): void {
+  const worker = chartWorker
+  if (!worker || !chartWorkerReady || chartWorkerFailed) return
+  const ids: number[] = []
+  const values: number[] = []
+  for (const item of snapshot) {
+    const seriesBuffer = seriesValues.get(item.id)
+    if (!seriesBuffer) continue
+    ids.push(item.id)
+    values.push(seriesBuffer[slot])
+  }
+  chartSamplePosts += 1
+  worker.postMessage({type: 'samples', time, ids, values})
+}
+
+/** Worker ring 复位（clearData 时；与主线程 ring 同一步清空）。 */
+function resetChartWorkerRing(): void {
+  if (!chartWorker || !chartWorkerReady || chartWorkerFailed) return
+  chartWorker.postMessage({type: 'reset', maxPoints: MAX_POINTS})
+  chartWorkerStats = null
 }
 
 function sendChartToWorker(): boolean {
@@ -5529,35 +7291,22 @@ function sendChartToWorker(): boolean {
   const visible = visibleSeriesList.value
   const drawn = drawnSeriesList.value
   if (ringCount === 0 || visible.length === 0 || drawn.length === 0) return false
-  // 大系列数时 OffscreenCanvas 场景传输/软件光栅在部分环境会退化；
-  // 阈值内走 worker，超过后使用已优化的主线程 drawChartLocal。
-  if (drawn.length > 48) return false
+  // 派生曲线的值由主线程推算，Worker ring 里没有 → 含派生曲线时用主线程渲染。
+  if (drawn.some((item) => item.derived)) return false
   const width = Math.max(1, Math.floor(wrap.clientWidth))
   const height = Math.max(1, Math.floor(wrap.clientHeight))
   if (width < 40 || height < 40) return false
   const lastTime = lastDataTimestamp()
   const {xMin, xMax} = currentXRange(lastTime)
-  const startOrder = lowerBoundTime(xMin)
-  if (startOrder >= ringCount) return false
-  const count = ringCount - startOrder
-  const times = new Float32Array(count)
-  for (let index = 0; index < count; index++) times[index] = timestamps[ringSlot(startOrder + index)]
-  const series: ChartWorkerSeries[] = []
-  const transfers: Transferable[] = [times.buffer]
-  for (const item of drawn) {
-    const values = seriesValues.get(item.id)
-    if (!values) continue
-    const snapshot = new Float32Array(count)
-    for (let index = 0; index < count; index++) {
-      const slot = ringSlot(startOrder + index)
-      snapshot[index] = slotSeq[slot] >= item.startSeq && Number.isFinite(values[slot]) ? values[slot] : Number.NaN
-    }
-    series.push({id: String(item.id), color: seriesDisplayColor(item.color), values: snapshot})
-    transfers.push(snapshot.buffer)
-  }
-  if (series.length === 0) return false
+  if (lowerBoundTime(xMin) >= ringCount) return false
+  const series = drawn.map((item) => ({
+    id: item.id,
+    color: seriesDisplayColor(item.color),
+    startSeq: item.startSeq,
+  }))
   const palette = chartPalette()
-  const scene: ChartWorkerScene = {
+  const scene: ChartDrawMessage = {
+    type: 'draw',
     requestId: ++chartRequestId,
     width,
     height,
@@ -5565,18 +7314,17 @@ function sendChartToWorker(): boolean {
     padding: {left: 58, right: 14, top: 12, bottom: 26},
     xMin,
     xMax,
-    times,
-    series,
     yMode: yAxisMode.value,
     smoothingWindow: smoothingWindow.value,
     palette,
+    series,
   }
   if (chartWorkerInFlight) {
     chartDirty = true
     return true
   }
   chartWorkerInFlight = true
-  worker.postMessage(scene, transfers)
+  worker.postMessage(scene)
   return true
 }
 
@@ -6140,6 +7888,18 @@ function installDebugSnapshot(): void {
     pollsInFlight: localPollsInFlightCount,
     drawIntervalMs: adaptiveDrawIntervalMs(),
     renderMode: chartRenderMode.value,
+    chartSamplePosts,
+    chartWorkerStats,
+    localCapabilities: localCapabilities.value,
+    preciseRates: localPreciseActive.value,
+    sampleEveryMax: localSampleEveryMax.value,
+    startTransport: localStartTransport.value,
+    startRequestBytes: localStartRequestBytes.value,
+    validSamples: totalValidCount.value,
+    staleSamples: totalStaleCount.value,
+    traceSource: traceSource.value,
+    traceLines: traceLines.value.length,
+    traceLinesSupported: traceLinesSupported.value,
     lastDrawMs: Math.round(perfCounter.lastDrawMs * 100) / 100,
     avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
     drawn: drawnSeriesList.value.length,
@@ -6163,7 +7923,23 @@ onMounted(() => {
   initFramesWorker()
   initChartWorker()
   void refreshTargetInfo()
+  // task-62：探测固件能力（sample_every / 4 路 watchpoint / trace lines）；失败保持 fallback。
+  void refreshLocalCapabilities()
+  // task-62 P1-17：先发布空命令索引（本页 ELF 状态是组件内状态；无 ELF 时命令面板不显示变量段）。
+  publishCommandIndex()
+  // task-58：设备上若已有 UART trace 捕获（其他客户端/上一会话启动），按 status 如实
+  // 显示并继续轮询；读不到 status 时保持 Stopped 默认态，不伪报 active/字节数。
+  void getLocalCurveStatus().then((status) => {
+    if (status.traceActive !== true) return
+    traceActive.value = true
+    if (status.traceBytes !== undefined) traceTotal.value = status.traceBytes
+    if (status.traceDropped !== undefined) traceDropped.value = status.traceDropped
+    traceSeq.value = 0
+    if (!traceTimer) scheduleTracePoll()
+  }).catch(() => { /* 设备离线/旧固件：保持 Stopped，不伪报 */ })
   window.addEventListener('keydown', onGlobalKeydown)
+  // task-62 P1-17：接收命令面板/其他页面的变量聚焦事件。
+  window.addEventListener(DAP_FOCUS_VARIABLE_EVENT, onDapFocusVariable as EventListener)
   resizeObserver = new ResizeObserver(() => scheduleDraw())
   if (chartWrapRef.value) resizeObserver.observe(chartWrapRef.value)
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -6182,8 +7958,26 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopSampling()
+  // task-58：清理 trace/backtrace 定时器；页面离开时结束本页启动的 UART trace 捕获
+  // （避免设备一直占用 UART RX 订阅），best-effort 且不阻塞卸载。
+  if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
+  if (backtraceTimer) { window.clearTimeout(backtraceTimer); backtraceTimer = 0 }
+  if (traceActive.value) void stopLocalCurveTrace().catch(() => { /* best effort */ })
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener(DAP_FOCUS_VARIABLE_EVENT, onDapFocusVariable as EventListener)
+  if (focusScrollTimer) { window.clearTimeout(focusScrollTimer); focusScrollTimer = 0 }
+  // task-62 P1-17：页面卸载后 ELF 状态不存在了，发布空索引避免命令面板继续显示旧变量。
+  {
+    const empty = emptyDapCommandIndex()
+    const scope = window as unknown as Record<string, unknown>
+    scope[DAP_COMMAND_INDEX_WINDOW_KEY] = empty
+    commandIndexVersion += 1
+    scope[DAP_COMMAND_INDEX_VERSION_KEY] = commandIndexVersion
+    try {
+      window.dispatchEvent(new CustomEvent(DAP_COMMAND_INDEX_EVENT, {detail: empty}))
+    } catch { /* ignore */ }
+  }
   stopPlayback()
   if (framesWorker) { framesWorker.terminate(); framesWorker = null }
   if (chartWorker) { chartWorker.terminate(); chartWorker = null }
@@ -6405,12 +8199,57 @@ onBeforeUnmount(() => {
 
 .selected-row {
   display: grid;
-  grid-template-columns: 1.5rem 0.75rem minmax(0, 1.5fr) minmax(0, 1fr) 6.5rem 5.5rem 1.5rem;
+  grid-template-columns: 1.5rem 0.75rem minmax(0, 1.5fr) minmax(0, 1fr) 6.5rem 5.5rem 4.5rem;
   align-items: center;
   gap: 0.375rem;
   font-size: 0.75rem;
   padding: 0.125rem 0;
   color: var(--bb-text, #151a21);
+}
+
+/* task-55：本地模式多一列“目标/实际刷新率”（divisor 下拉 + ≈ 实际 Hz）。 */
+.selected-row.with-rate {
+  grid-template-columns: 1.5rem 0.75rem minmax(0, 1.5fr) minmax(0, 1fr) 6.5rem 6.6rem 5.5rem 4.5rem;
+}
+
+.rate-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.05rem;
+  line-height: 1.15;
+}
+
+.rate-cell .rate-select {
+  width: 5.8rem;
+}
+
+.rate-actual {
+  font-size: 0.66rem;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.selected-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.05rem;
+}
+
+.function-snapshot {
+  border-color: var(--bb-border, #dde1e8);
+  color: var(--bb-text-secondary, #3d4552);
+}
+
+.snapshot-armed {
+  color: #d97706;
+  font-weight: 600;
+}
+
+.snapshot-hit {
+  color: #2563eb;
+  font-weight: 600;
 }
 
 .series-dot {
@@ -6459,6 +8298,20 @@ onBeforeUnmount(() => {
 
 .watch-star.active { color: #d97706; }
 
+/* task-62：?focusVar= 聚焦的变量行高亮（命令面板跳转） */
+.var-row.focus-target {
+  outline: 1px solid #0ea5e9;
+  outline-offset: -1px;
+  background: rgba(14, 165, 233, 0.08);
+}
+/* task-62：每变量目标 Hz 输入框（窄） */
+.rate-cell .rate-hz {
+  width: 3.6rem;
+}
+.rate-cell .rate-hz :deep(.el-input__wrapper) {
+  padding-left: 4px;
+  padding-right: 4px;
+}
 .stale-dot {
   color: #dc2626;
   font-size: 0.55rem;
@@ -6512,6 +8365,34 @@ onBeforeUnmount(() => {
   line-height: 1.35;
 }
 
+/* task-58：固件调试数据（UART trace / 帧指针 backtrace）面板 */
+.debug-subpanel {
+  border-top: 1px solid #eef0f3;
+  padding-top: 0.45rem;
+}
+
+.debug-subpanel:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.debug-pre {
+  max-height: 14rem;
+  overflow: auto;
+  border-radius: 0.375rem;
+  background: #f8fafc;
+  padding: 0.5rem;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.debug-boundaries {
+  border-top: 1px dashed #e5e7eb;
+  padding-top: 0.45rem;
+}
+
 .playback-range { flex: 1; min-width: 8rem; }
 
 
@@ -6540,6 +8421,11 @@ onBeforeUnmount(() => {
 
 .render-warning {
   color: var(--bb-warning, #b45309);
+}
+
+/* task-62：trace 行触发命中（固件 triggered/trigger_seq 回读） */
+.render-success {
+  color: var(--bb-success, #16a34a);
 }
 
 .show-more-row {

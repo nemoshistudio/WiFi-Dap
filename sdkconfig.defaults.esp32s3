@@ -459,9 +459,9 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
 # CONFIG_ESP_CONSOLE_UART_CUSTOM is not set
 # CONFIG_ESP_CONSOLE_NONE is not set
-# CONFIG_ESP_CONSOLE_SECONDARY_NONE is not set
-CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED is not set
 CONFIG_ESP_CONSOLE_UART=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
@@ -533,9 +533,18 @@ CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
 CONFIG_ESP_WIFI_ENABLE_SAE_PK=y
 CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=y
 CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=y
+# DAP latency (docs/wifi-no-power-save.md): no Wi-Fi power save.  The runtime
+# contract is WIFI_PS_NONE (wifi_manager applies + verifies it); these Kconfig
+# values make sure no config-time power-save feature can re-introduce sleep:
+#   - PM_ENABLE off (no automatic light sleep / tickless idle),
+#   - SLP_IRAM_OPT / SLP_BEACON_LOST_OPT off (modem-sleep optimisations),
+#   - STA_DISCONNECTED_PM off (disconnected-state power save, S3/C3 default y).
+# Power cost: the radio stays in active RX while associated.  This is the
+# documented trade-off for DAP transport latency; idle-supply current rises
+# (expect tens of mA, measure on the target board, see the doc).
 # CONFIG_ESP_WIFI_SLP_IRAM_OPT is not set
 # CONFIG_ESP_WIFI_FTM_ENABLE is not set
-CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
+# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is not set
 # CONFIG_ESP_WIFI_GCMP_SUPPORT is not set
 # CONFIG_ESP_WIFI_GMAC_SUPPORT is not set
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
@@ -1208,3 +1217,26 @@ CONFIG_WIFI_PROV_STA_FAST_SCAN=y
 #
 # ESP32-S3 default board: WiFi Dap ZXR DAP S3 (status LEDs + WiFi LED).
 CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3=y
+
+
+#
+# Unified wired + wireless firmware (default S3 build)
+#
+# USB-OTG/NCM and WiFi coexist in one image: the device exposes the USB-NCM
+# network 192.168.7.1/24 for a direct cable while keeping the WiFi AP/STA and
+# all Web/DAP services.  USB-Serial/JTAG must stay off because it shares the
+# USB PHY with OTG; use UART0 or Web/OTA for console/recovery.
+CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y
+CONFIG_TINYUSB_NET_MODE_NCM=y
+CONFIG_TINYUSB_TASK_AFFINITY_CPU0=y
+CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK=y
+CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID=y
+CONFIG_TINYUSB_DESC_USE_DEFAULT_PID=y
+CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="WiFi Dap"
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="WiFi Dap (NCM + WiFi)"
+CONFIG_TINYUSB_DEBUG_LEVEL=0
+CONFIG_TINYUSB_TASK_PRIORITY=5
+CONFIG_TINYUSB_TASK_STACK_SIZE=4096
+CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=1
+CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=1
+CONFIG_TINYUSB_MODE_DMA=y

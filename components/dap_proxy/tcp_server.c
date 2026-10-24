@@ -20,6 +20,7 @@
  * @copyright Copyright (c) 2020
  *
  */
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "sdkconfig.h"
@@ -61,6 +62,15 @@ void tcp_server_kick_session(void)
         printf("tcp_server: kicking active DAP session fd=%d\r\n", fd);
         shutdown(fd, SHUT_RDWR);
     }
+}
+
+/* Read-only counterpart of tcp_server_kick_session(): report whether a proxy
+ * session socket is currently accepted.  This intentionally does NOT touch the
+ * socket or the DAP state, so diagnostics (GET /api/target/status) can be
+ * sampled while an OpenOCD/Ozone/WS-DAP client is connected. */
+bool tcp_server_session_active(void)
+{
+    return kSock >= 0;
 }
 
 /*

@@ -183,7 +183,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | 项 | 默认值 | 归属/说明 |
 |---|---|---|
 | 默认 board | `BOARD_ZXR_DAP_S3` | 本组件；Kconfig `BIRDIEBOT_BOARD` |
-| mDNS 主机名 | `wifi-dap` | WiFi/mDNS 契约（`docs/wifi-credential-memory.md` 所属 wave）；对外用 `wifi-dap.local` |
+| mDNS 主机名 | `wifi-dap-XXXX.local` | XXXX = STA MAC 最后两个字节（4 位小写十六进制），与 AP SSID `WiFi-Dap-XXXX` 同后缀；见 `wt_mdns_config.c` |
 | AP SSID 前缀 | `WiFi-Dap-` | 后缀为 STA MAC 末 2 字节大写 hex（如 `WiFi-Dap-A1B2`），规则见 WiFi 多凭据契约 |
 | SWD 默认时钟 | **2 MHz** | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ=2000000`；真机 STM32F407 验证稳定；4MHz/10MHz 无额外吞吐收益（USBIP/WiFi 延迟为瓶颈） |
 | UART 桥端口 | **1346** | `BIRDIEBOT_UART_BRIDGE_PORT`（旧 A 的 1234 已废弃） |

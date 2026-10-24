@@ -10,6 +10,8 @@
 #   dap_proxy     - DAP hand-off (dap_handle_request_reset/wait_reset,
 #                   tcp_server_kick_session)
 #   web_server    - WEB_URI_MODULE_REGISTER + web_host_guard
+#   uart_service  - target UART owner (P1.8.3 trace capture prototype taps its
+#                   RX fan-out; no UART reconfiguration here)
 #   esp_http_server, json (cJSON), esp_timer
 #
 # The URI modules register themselves through web_server's constructor
@@ -19,9 +21,13 @@ set(srcs
     "src/curve_engine.c"
     "src/curve_expr.c"
     "src/curve_json.c"
+    "src/curve_bin.c"
     "src/curve_ring.c"
     "src/curve_status.c"
     "src/curve_cvf2.c"
+    "src/curve_backtrace.c"
+    "src/curve_trace.c"
+    "src/curve_trace_core.c"
     "src/curve_ws.c"
     "src/curve_ws_core.c"
     "src/curve_http.c"
@@ -33,6 +39,7 @@ idf_component_register(
         target_flash
         dap_proxy
         web_server
+        uart_service
         esp_http_server
         json
         esp_timer

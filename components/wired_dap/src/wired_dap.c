@@ -66,6 +66,42 @@ const char *birdiebot_wired_dap_device_ip(void)
     return "192.168.7.1";
 }
 
+bool birdiebot_wired_dap_ncm_active(void)
+{
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+    return birdiebot_wired_ncm_is_active();
+#else
+    return false;
+#endif
+}
+
+bool birdiebot_wired_dap_dhcp_active(void)
+{
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+    return birdiebot_wired_ncm_dhcp_is_active();
+#else
+    return false;
+#endif
+}
+
+int birdiebot_wired_dap_dhcp_error(void)
+{
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+    return birdiebot_wired_ncm_dhcp_error();
+#else
+    return -1;
+#endif
+}
+
+int birdiebot_wired_dap_dhcp_state(void)
+{
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+    return birdiebot_wired_ncm_dhcp_state();
+#else
+    return -1;
+#endif
+}
+
 esp_err_t birdiebot_wired_dap_init(void)
 {
 #if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)

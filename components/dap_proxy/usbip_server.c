@@ -242,10 +242,11 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
     int dap_req_num = 0;
 
     /*
-     * `length` is the capacity of the TCP receive buffer (1500 bytes in
-     * tcp_server.c).  It has to hold the stage2 header plus at least one DAP
-     * packet because handle_dap_data_request() copies DAP_PACKET_SIZE bytes
-     * behind the header for every OUT URB.
+     * `length` is the capacity of the TCP receive buffer (4096 bytes in
+     * tcp_server.c).  It has to hold the stage2 header plus a full DAP packet
+     * because handle_dap_data_request() forwards DAP_PACKET_SIZE bytes behind
+     * the header (the received payload plus a zero-filled tail) straight from
+     * this buffer into the DAP request ring.
      */
     if (unlikely(length < sizeof(usbip_stage2_header) + DAP_PACKET_SIZE)) {
         printf("usbip: RX buffer too small: %lu (need >= %lu)\r\n",
@@ -258,9 +259,9 @@ static int usbip_urb_process(uint8_t *base, uint32_t length)
     /*
      * Maximum OUT payload accepted from the network:
      *   - must fit behind the stage2 header in the caller's RX buffer,
-     *   - must not exceed the hard 1500-byte buffer limit (1500 - 48),
-     *   - and must stay within one DAP packet because the DAP handler consumes
-     *     a fixed-size packet from this buffer.
+     *   - must not exceed the hard USBIP_STAGE2_MAX_OUT_DATA limit,
+     *   - and must stay within one DAP packet because the DAP request ring and
+     *     DAP_ProcessCommand consume exactly DAP_PACKET_SIZE bytes per request.
      */
     payload_capacity = length - (uint32_t)sizeof(usbip_stage2_header);
     if (payload_capacity > USBIP_STAGE2_MAX_OUT_DATA)
@@ -505,6 +506,33 @@ void send_stage2_submit_data_fast(usbip_stage2_header *req_header, const void *c
     if (data)
         memcpy(&send_buf[sizeof(usbip_stage2_header)], data, data_length);
     usbip_network_send(kSock, send_buf, sizeof(usbip_stage2_header) + data_length, 0);
+}
+
+/*
+ * B1 hot path: the staging slot already contains the (raw, network-order,
+ * not yet unpacked) 48-byte request header at offset 0 and the DAP response
+ * payload at offset sizeof(usbip_stage2_header).  Patch/zero the return fields
+ * in place - exactly like send_stage2_submit_data_fast() - and send the whole
+ * slot as one TCP write.  This removes the second payload copy that
+ * send_stage2_submit_data_fast() would do (docs/dap-copy-budget.md).
+ *
+ * The slot must be at least sizeof(usbip_stage2_header)+data_length bytes
+ * (usbip_pipeline.c provides USBIP_PL_SCRATCH_SIZE = 48 + DAP_PACKET_SIZE).
+ */
+void send_stage2_submit_data_inplace(usbip_stage2_header *req_header, int32_t data_length)
+{
+    if (data_length < 0 || data_length > (int32_t)DAP_PACKET_SIZE) {
+        printf("usbip: inplace reply length %ld out of range\r\n", (long)data_length);
+        return;
+    }
+
+    req_header->base.command = PP_HTONL(USBIP_STAGE2_RSP_SUBMIT);
+    req_header->base.direction = htonl(!(req_header->base.direction));
+
+    memset(&(req_header->u.ret_submit), 0, sizeof(usbip_stage2_header_ret_submit));
+    req_header->u.ret_submit.data_length = htonl(data_length);
+
+    usbip_network_send(kSock, req_header, sizeof(usbip_stage2_header) + (size_t)data_length, 0);
 }
 
 

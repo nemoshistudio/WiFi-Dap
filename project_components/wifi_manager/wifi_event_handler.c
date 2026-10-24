@@ -182,6 +182,9 @@ void wifi_event_handler(void *handler_arg __attribute__((unused)),
 	}
 	case WIFI_EVENT_STA_START:
 		printf("event: WIFI_EVENT_STA_START\n");
+		/* The driver starts the station with the default power mode; the boot
+		 * pre-start set_ps() may not survive this event (DAP latency). */
+		wifi_manager_apply_no_power_save("WIFI_EVENT_STA_START");
 		break;
 	case WIFI_EVENT_STA_CONNECTED: {
 		wifi_event_sta_connected_t *event = event_data;
@@ -192,6 +195,9 @@ void wifi_event_handler(void *handler_arg __attribute__((unused)),
 #ifdef CONFIG_EXAMPLE_IPV6
 		tcpip_adapter_create_ip6_linklocal(TCPIP_ADAPTER_IF_STA);
 #endif
+		/* Re-assert WIFI_PS_NONE on every (re)association so the first DAP
+		 * transaction after a reconnect never pays a modem-sleep wake-up. */
+		wifi_manager_apply_no_power_save("WIFI_EVENT_STA_CONNECTED");
 		event_ctx.is_connected = 1;
 		break;
 	}
@@ -210,6 +216,10 @@ void wifi_event_handler(void *handler_arg __attribute__((unused)),
 	}
 	case WIFI_EVENT_AP_START:
 		printf("event: WIFI_EVENT_AP_START\n");
+		/* AP start does not change the STA power mode, but a mode transition
+		 * can have reset it: re-assert the DAP latency setting (tolerates an
+		 * AP-only mode via a warning). */
+		wifi_manager_apply_no_power_save("WIFI_EVENT_AP_START");
 		break;
 	case WIFI_EVENT_AP_STACONNECTED: {
 		wifi_event_ap_staconnected_t *event = event_data;

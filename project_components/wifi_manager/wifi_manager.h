@@ -15,6 +15,23 @@ void wifi_manager_wifi_led_set(bool on);
 void *wifi_manager_get_ap_netif(void);
 void *wifi_manager_get_sta_netif(void);
 
+/**
+ * Force the station into WIFI_PS_NONE (modem sleep off) and verify the
+ * readback.  Called after init/start, on STA (re)connect and after mode
+ * changes; never aborts (AP-only mode only logs a warning).
+ *
+ * Rationale: WIFI_PS_MIN_MODEM is the IDF default and gates the RX path on
+ * the AP's DTIM schedule, which adds up to one beacon interval (100 ms) to
+ * every USBIP/WebSocket DAP round trip.  See docs/wifi-no-power-save.md.
+ */
+void wifi_manager_apply_no_power_save(const char *reason);
+
+/** Current station power-save mode (WIFI_PS_MIN_MODEM when the read fails). */
+wifi_ps_type_t wifi_manager_get_power_save(void);
+
+/** Stable lowercase name for a power-save mode ("none"/"min_modem"/...). */
+const char *wifi_manager_power_save_name(wifi_ps_type_t ps);
+
 typedef void (*wifi_manager_scan_done_cb)(uint16_t ap_found, wifi_ap_record_t *record, void *arg);
 int wifi_manager_get_scan_list(uint16_t *number, wifi_ap_record_t *aps);
 

@@ -190,7 +190,7 @@ cd .. && scripts/gen_web_assets.sh --install   # explicitly updates project_comp
    - Default password: `12345678` (**change it in the Wi-Fi page on first use**, see [§9](#9-security-defaults--hardening))
 3. Open **<http://192.168.1.1/>** in a browser (default AP gateway/device address).
    - If the device has been joined to your LAN via the Wi-Fi page, use the IP assigned by your router instead;
-   - mDNS: the device registers an `_http._tcp` service under hostname `wifi-dap` (`project_components/wt_mdns/wt_mdns_config.h`), so `http://wifi-dap.local/` should work depending on your resolver — otherwise use the device IP.
+   - mDNS: the device registers an `_http._tcp` service under `wifi-dap-XXXX.local`, where **XXXX is the last two STA MAC bytes as four hex digits** (same suffix as the default AP SSID `WiFi-Dap-XXXX`; e.g. MAC ending CA:60 -> `http://wifi-dap-ca60.local/`). If your resolver cannot find it, use the device IP.
 4. In the **Wi-Fi** page, join your LAN (multiple networks are remembered and rotated automatically). Afterwards the Web UI, debugger ports and UART bridge are reachable from that LAN.
 5. Open the **UART** page (115200-8N1 by default) to watch the target's serial output, or start debugging over USBIP/elaphureLink ([§7](#7-debugger-transports)).
 
@@ -312,7 +312,7 @@ Login/pairing-code/token authentication has been **removed**. What remains is an
 - when a browser sends `Origin`, it must be same-origin or whitelisted (CSWSH protection);
 - non-browser clients (curl, OpenOCD, scripts) send no Origin and are allowed — this is **not authentication**.
 
-If you access the UI through a hostname (mDNS/reverse proxy), add it to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (e.g. `http://wifi-dap.local`). Scripts no longer accept/need `--token`.
+If you access the UI through a hostname (mDNS/reverse proxy), add it to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (e.g. `http://wifi-dap-XXXX.local`). Scripts no longer accept/need `--token`.
 
 ### 9.4 Disabling unused transports
 
@@ -424,7 +424,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 |---|---|
 | `WiFi-Dap-XXXX` AP not found | first flash done? correct board (`sdkconfig.defaults.*`)? Wi-Fi init errors in the serial log? AP turns off 30 s after STA connects (normal) |
 | `192.168.1.1` does not respond | is the client on the device AP? did Smart APSTA turn the AP off? use the device's STA-network IP |
-| `wifi-dap.local` does not resolve | mDNS support on device/client; fall back to the IP (hostname is `wifi-dap` in `wt_mdns_config.h`) |
+| `wifi-dap-XXXX.local` does not resolve | mDNS support on device/client; fall back to the IP (hostname is `wifi-dap-XXXX` in `wt_mdns_config.h` (XXXX = last two MAC bytes)) |
 | Web UI opens but operations are rejected with HTTP 403 | Host/Origin guard: access via IP or add the hostname to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
 | `usbip.exe attach_ude` fails | usbip-win 0.3.0+? device IP/network reachable? port 3240 blocked by firewall? busid is always `1-1` |
 | DAP disconnects/slow | Wi-Fi environment/distance, 2.4 GHz interference, too-high debug clock, broadcast storms on the LAN |

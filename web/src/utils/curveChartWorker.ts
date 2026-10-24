@@ -1,67 +1,48 @@
 /**
- * OffscreenCanvas 图表渲染 Worker（task-47）。
+ * OffscreenCanvas 图表渲染 Worker（task-47 → task-62 P1-15 增强）。
  *
- * 主线程把当前 X 视图窗口的原始值（Float32Array，NaN=无点）与颜色/尺寸/Y 模式
- * transfer 进来；本 Worker 在 OffscreenCanvas 上完成 Y 范围计算、网格/坐标轴、
- * 像素列 min/max 降采样/平滑，然后 transferToImageBitmap 回传。主线程只做
- * drawImage(bitmap) 与 hover overlay，便于失败回退主线程渲染。
+ * 与旧实现（主线程每帧把窗口内所有 series 的 Float32Array 快照 transfer 进来）相比：
+ *  - Worker 自己维护与主线程同构的 ring（ChartRingStore），主线程只按 pushSample
+ *    频率发小消息（time + ids + values，A256 时 ~2 KB/次），不再每帧复制整窗数据；
+ *  - Y 范围计算、log/normalized 变换、平滑、像素列 min/max 降采样、canvas 光栅
+ *    全部在 Worker 内完成；主线程只 drawImage(bitmap) + hover overlay（主线程 ring）；
+ *  - 大系列数（A 模式 256 路）自适应降低内部光栅分辨率并按颜色合批 stroke；
+ *  - 派生曲线（add/sub）仍在主线程重算，存在派生曲线时 DebugCurve 回退主线程绘制。
  *
- * 不负责 ring/采样协议；ring/数值转换仍在主线程（明确边界）。
+ * 失败/不支持 OffscreenCanvas 时主线程回退 drawChartLocal（数据/导出/光标不变）。
  */
-interface SceneSeries {
-    id: string
-    color: string
-    values: Float32Array
-}
-
-interface ChartScene {
-    requestId: number
-    width: number
-    height: number
-    dpr: number
-    padding: {left: number; right: number; top: number; bottom: number}
-    xMin: number
-    xMax: number
-    times: Float32Array
-    series: SceneSeries[]
-    yMode: 'auto' | 'normalized' | 'log'
-    smoothingWindow: number
-    palette: {bg: string; grid: string; text: string; axis: string}
-}
+import {
+    ChartRingStore,
+    buildColumnEnvelope,
+    computeChartRange,
+    formatAxisValue,
+    niceTimeStep,
+    type ChartDrawMessage,
+    type ChartGeometry,
+    type ChartRingStore as ChartRingStoreType,
+    type ChartWorkerInput,
+    type ColumnEnvelope,
+} from './curveChartCore'
 
 const scope = self as unknown as {
-    onmessage: ((event: MessageEvent<ChartScene>) => void) | null
+    onmessage: ((event: MessageEvent<ChartWorkerInput>) => void) | null
     postMessage: (message: unknown, transfer?: Transferable[]) => void
 }
 
-function niceTimeStep(span: number): number {
-    const target = span / 5
-    const magnitude = Math.pow(10, Math.floor(Math.log10(Math.max(target, 1e-6))))
-    for (const candidate of [1, 2, 5, 10]) {
-        if (candidate * magnitude >= target) return candidate * magnitude
-    }
-    return 10 * magnitude
-}
-
-function formatAxisValue(value: number): string {
-    if (!Number.isFinite(value)) return ''
-    const abs = Math.abs(value)
-    if (abs >= 1e6 || (abs > 0 && abs < 1e-3)) return value.toExponential(2)
-    if (Number.isInteger(value)) return String(value)
-    return value.toFixed(2)
-}
+const store: ChartRingStoreType = new ChartRingStore()
 
 let cachedCanvas: OffscreenCanvas | null = null
 let cachedPixelWidth = 0
 let cachedPixelHeight = 0
-let cachedMin: Float32Array | null = null
-let cachedMax: Float32Array | null = null
+/** 每 series 包络数组复用（避免每帧分配）。 */
+const envelopeCache = new Map<number, ColumnEnvelope>()
 
-function drawScene(scene: ChartScene): {bitmap: ImageBitmap; geometry: unknown} {
+function drawScene(scene: ChartDrawMessage): {bitmap: ImageBitmap; geometry: ChartGeometry | null; stats: Record<string, number>} {
+    const startedAt = performance.now()
     const width = Math.max(1, Math.floor(scene.width))
     const height = Math.max(1, Math.floor(scene.height))
     const dpr = Math.min(2, Math.max(1, scene.dpr))
-    // A 256 路时降低内部光栅分辨率（主线程 drawImage 拉伸显示），换取帧率。
+    // A 模式 256 路时降低内部光栅分辨率（主线程 drawImage 拉伸显示），换取帧率。
     const renderScale = scene.series.length > 192 ? 0.65 : scene.series.length > 96 ? 0.8 : 1
     const pixelWidth = Math.max(1, Math.round(width * dpr * renderScale))
     const pixelHeight = Math.max(1, Math.round(height * dpr * renderScale))
@@ -80,56 +61,20 @@ function drawScene(scene: ChartScene): {bitmap: ImageBitmap; geometry: unknown} 
     const padding = scene.padding
     const plotWidth = width - padding.left - padding.right
     const plotHeight = height - padding.top - padding.bottom
-    if (plotWidth < 20 || plotHeight < 20) return {bitmap: canvas.transferToImageBitmap(), geometry: null}
-    const count = scene.times.length
-    if (count === 0 || scene.series.length === 0) return {bitmap: canvas.transferToImageBitmap(), geometry: null}
-
-    const seriesRanges = new Map<string, {min: number; max: number}>()
-    let minValue = Number.POSITIVE_INFINITY
-    let maxValue = Number.NEGATIVE_INFINITY
-    const rawForY = (value: number): number | null => {
-        if (!Number.isFinite(value)) return null
-        if (scene.yMode === 'log') return value > 0 ? Math.log10(value) : null
-        return value
+    if (plotWidth < 20 || plotHeight < 20 || store.count === 0 || scene.series.length === 0) {
+        return {bitmap: canvas.transferToImageBitmap(), geometry: null, stats: {series: scene.series.length}}
     }
-    for (const series of scene.series) {
-        if (scene.yMode === 'normalized') {
-            let min = Number.POSITIVE_INFINITY
-            let max = Number.NEGATIVE_INFINITY
-            for (let index = 0; index < series.values.length; index++) {
-                const value = series.values[index]
-                if (!Number.isFinite(value)) continue
-                if (value < min) min = value
-                if (value > max) max = value
-            }
-            if (!Number.isFinite(min) || !Number.isFinite(max)) continue
-            if (max - min < 1e-12) max = min + 1
-            seriesRanges.set(series.id, {min, max})
-        } else {
-            for (let index = 0; index < series.values.length; index++) {
-                const value = rawForY(series.values[index])
-                if (value === null) continue
-                if (value < minValue) minValue = value
-                if (value > maxValue) maxValue = value
-            }
-        }
+    const startOrder = store.lowerBoundTime(scene.xMin)
+    if (startOrder >= store.count) {
+        return {bitmap: canvas.transferToImageBitmap(), geometry: null, stats: {series: scene.series.length}}
     }
-    if (scene.yMode === 'normalized') {
-        minValue = 0
-        maxValue = 100
-    } else {
-        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return {bitmap: canvas.transferToImageBitmap(), geometry: null}
-        if (maxValue - minValue < 1e-9) {
-            minValue -= 1
-            maxValue += 1
-        } else {
-            const span = maxValue - minValue
-            minValue -= span * 0.08
-            maxValue += span * 0.08
-        }
+    const range = computeChartRange(store, scene.series, startOrder, scene.yMode)
+    if (!range) {
+        return {bitmap: canvas.transferToImageBitmap(), geometry: null, stats: {series: scene.series.length}}
     }
-
-    const toX = (time: number) => padding.left + ((time - scene.xMin) / (scene.xMax - scene.xMin)) * plotWidth
+    const {minValue, maxValue} = range
+    const span = scene.xMax - scene.xMin
+    const toX = (time: number) => padding.left + ((time - scene.xMin) / span) * plotWidth
     const toY = (value: number) => padding.top + (1 - (value - minValue) / (maxValue - minValue)) * plotHeight
     const formatY = (value: number) => {
         if (scene.yMode === 'normalized') return `${Math.round(value)}%`
@@ -156,7 +101,7 @@ function drawScene(scene: ChartScene): {bitmap: ImageBitmap; geometry: unknown} 
     // X 轴
     context.textAlign = 'center'
     context.textBaseline = 'top'
-    const timeStep = niceTimeStep(scene.xMax - scene.xMin)
+    const timeStep = niceTimeStep(span)
     const firstTick = Math.ceil(scene.xMin / timeStep) * timeStep
     for (let time = firstTick; time <= scene.xMax + 1e-9; time += timeStep) {
         const x = toX(time)
@@ -169,100 +114,174 @@ function drawScene(scene: ChartScene): {bitmap: ImageBitmap; geometry: unknown} 
         context.fillText(`${time.toFixed(0)}s`, x, padding.top + plotHeight + 6)
     }
 
-    const orderCount = count
+    const orderCount = store.count - startOrder
     const useDecimation = orderCount > plotWidth * 1.5
+    // 大系列数：更粗的像素列 + 点抽取（范围仍精确扫描，见 core.computeChartRange）。
     const columnScale = scene.series.length > 192 ? 20 : scene.series.length > 96 ? 4 : 1
     const orderStep = scene.series.length > 192 ? 4 : 1
-    const plotColumns = Math.max(1, Math.ceil(plotWidth / columnScale))
-    if (!cachedMin || cachedMin.length < plotColumns) {
-        cachedMin = new Float32Array(plotColumns)
-        cachedMax = new Float32Array(plotColumns)
-    }
-    const columnMin = cachedMin
-    const columnMax = cachedMax!
-    context.lineWidth = 1.5
+    const byColor = new Map<string, ChartDrawSeriesSpecLike[]>()
     for (const series of scene.series) {
-        const smoothQueue: number[] = []
-        const valueForY = (value: number): number | null => {
-            const raw = rawForY(value)
-            if (raw === null) return null
-            if (scene.yMode === 'normalized') {
-                const range = seriesRanges.get(series.id)
-                if (!range) return null
-                const span = range.max - range.min
-                if (span < 1e-12) return 50
-                return ((value - range.min) / span) * 100
-            }
-            return raw
+        const bucket = byColor.get(series.color)
+        if (bucket) bucket.push(series)
+        else byColor.set(series.color, [series])
+    }
+    context.lineWidth = 1.5
+    let columnsDrawn = 0
+    let segments = 0
+    if (useDecimation) {
+        const options = {
+            left: padding.left,
+            plotWidth,
+            columnScale,
+            orderStep,
+            xMin: scene.xMin,
+            xMax: scene.xMax,
+            yMode: scene.yMode,
+            smoothingWindow: scene.smoothingWindow,
+            ranges: range.ranges,
         }
-        const smooth = (value: number): number => {
-            if (scene.smoothingWindow <= 1) return value
-            smoothQueue.push(value)
-            if (smoothQueue.length > scene.smoothingWindow) smoothQueue.shift()
-            return smoothQueue.reduce((sum, item) => sum + item, 0) / smoothQueue.length
-        }
-        context.strokeStyle = series.color
-        context.beginPath()
-        if (!useDecimation) {
-            let started = false
-            for (let index = 0; index < orderCount; index++) {
-                const value = valueForY(series.values[index])
-                if (value === null) {
-                    started = false
-                    smoothQueue.length = 0
-                    continue
+        for (const [color, items] of byColor) {
+            context.strokeStyle = color
+            context.beginPath()
+            for (const series of items) {
+                const envelope = buildColumnEnvelope(store, series, startOrder, options, envelopeCache.get(series.id) ?? null)
+                if (!envelope) continue
+                envelopeCache.set(series.id, envelope)
+                columnsDrawn += envelope.columns
+                const xs = envelope.xs
+                const min = envelope.min
+                const max = envelope.max
+                let previousColumn = -2
+                for (let column = 0; column < envelope.columns; column++) {
+                    if (!Number.isFinite(min[column])) continue
+                    const x = xs[column]
+                    const yTop = toY(max[column])
+                    const yBottom = toY(min[column])
+                    if (column !== previousColumn + 1) context.moveTo(x, yTop)
+                    else context.lineTo(x, yTop)
+                    context.lineTo(x, yBottom)
+                    previousColumn = column
+                    segments += 1
                 }
-                const x = toX(scene.times[index])
-                const y = toY(smooth(value))
-                if (!started) {
-                    context.moveTo(x, y)
-                    started = true
-                } else {
-                    context.lineTo(x, y)
+            }
+            context.stroke()
+        }
+    } else {
+        for (const [color, items] of byColor) {
+            context.strokeStyle = color
+            context.beginPath()
+            for (const series of items) {
+                const values = store.seriesValues(series.id)
+                const seriesRange = range.ranges.get(series.id)
+                let started = false
+                const smoothQueue: number[] = []
+                let smoothSum = 0
+                const smoothing = Math.max(1, scene.smoothingWindow)
+                for (let order = startOrder; order < store.count; order++) {
+                    const slot = store.slotOf(order)
+                    if (store.slotSeq[slot] < series.startSeq) continue
+                    const raw = values[slot]
+                    let value: number | null
+                    if (!Number.isFinite(raw)) value = null
+                    else if (scene.yMode === 'log') value = raw > 0 ? Math.log10(raw) : null
+                    else if (scene.yMode === 'normalized') {
+                        if (!seriesRange) value = null
+                        else {
+                            const rangeSpan = seriesRange.max - seriesRange.min
+                            value = rangeSpan < 1e-12 ? 50 : ((raw - seriesRange.min) / rangeSpan) * 100
+                        }
+                    } else value = raw
+                    if (value === null) {
+                        started = false
+                        smoothQueue.length = 0
+                        smoothSum = 0
+                        continue
+                    }
+                    let drawValue = value
+                    if (smoothing > 1) {
+                        smoothQueue.push(value)
+                        smoothSum += value
+                        if (smoothQueue.length > smoothing) smoothSum -= smoothQueue.shift() as number
+                        drawValue = smoothSum / smoothQueue.length
+                    }
+                    const x = toX(store.timeAt(order))
+                    const y = toY(drawValue)
+                    if (!started) {
+                        context.moveTo(x, y)
+                        started = true
+                    } else {
+                        context.lineTo(x, y)
+                    }
                 }
             }
-        } else {
-            columnMin.fill(Number.POSITIVE_INFINITY)
-            columnMax.fill(Number.NEGATIVE_INFINITY)
-            for (let index = 0; index < orderCount; index += orderStep) {
-                const value = valueForY(series.values[index])
-                if (value === null) continue
-                const drawValue = smooth(value)
-                const column = Math.min(plotColumns - 1, Math.max(0, Math.floor((toX(scene.times[index]) - padding.left) / columnScale)))
-                if (drawValue < columnMin[column]) columnMin[column] = drawValue
-                if (drawValue > columnMax[column]) columnMax[column] = drawValue
-            }
-            let previous = -2
-            for (let column = 0; column < plotColumns; column++) {
-                if (!Number.isFinite(columnMin[column])) continue
-                const x = padding.left + column * columnScale + columnScale * 0.5
-                const yTop = toY(columnMax[column])
-                const yBottom = toY(columnMin[column])
-                if (column !== previous + 1) context.moveTo(x, yTop)
-                else context.lineTo(x, yTop)
-                context.lineTo(x, yBottom)
-                previous = column
-            }
+            context.stroke()
         }
-        context.stroke()
     }
 
     const ranges: Record<string, [number, number]> = {}
-    for (const [id, range] of seriesRanges) ranges[id] = [range.min, range.max]
+    for (const [id, seriesRange] of range.ranges) ranges[String(id)] = [seriesRange.min, seriesRange.max]
     return {
         bitmap: canvas.transferToImageBitmap(),
-        geometry: {padding, plotWidth, plotHeight, xMin: scene.xMin, xMax: scene.xMax, minValue, maxValue, yMode: scene.yMode, ranges},
+        geometry: {
+            padding,
+            plotWidth,
+            plotHeight,
+            xMin: scene.xMin,
+            xMax: scene.xMax,
+            minValue,
+            maxValue,
+            yMode: scene.yMode,
+            ranges,
+        },
+        stats: {
+            series: scene.series.length,
+            startOrder,
+            orderCount,
+            decimated: useDecimation ? 1 : 0,
+            columnsDrawn,
+            segments,
+            drawMs: performance.now() - startedAt,
+        },
     }
 }
 
-scope.onmessage = (event: MessageEvent<ChartScene>) => {
-    const scene = event.data
+/** 与 ChartDrawSeriesSpec 形状一致（避免重复 import type 噪音）。 */
+interface ChartDrawSeriesSpecLike {
+    id: number
+    color: string
+    startSeq: number
+}
+
+scope.onmessage = (event: MessageEvent<ChartWorkerInput>) => {
+    const message = event.data
     try {
-        const startedAt = performance.now()
-        const result = drawScene(scene)
-        scope.postMessage({type: 'bitmap', requestId: scene.requestId, bitmap: result.bitmap,
-          geometry: result.geometry, drawMs: performance.now() - startedAt}, [result.bitmap])
+        if (message.type === 'reset') {
+            store.resize(message.maxPoints)
+            store.reset()
+            envelopeCache.clear()
+            return
+        }
+        if (message.type === 'samples') {
+            store.push(message.time, message.ids, message.values)
+            return
+        }
+        const result = drawScene(message)
+        scope.postMessage(
+            {
+                type: 'bitmap',
+                requestId: message.requestId,
+                bitmap: result.bitmap,
+                geometry: result.geometry,
+                stats: result.stats,
+                drawMs: result.stats.drawMs,
+            },
+            [result.bitmap],
+        )
     } catch (error) {
-        scope.postMessage({type: 'error', requestId: scene.requestId, error: error instanceof Error ? error.message : String(error)})
+        scope.postMessage({
+            type: 'error',
+            requestId: message.type === 'draw' ? message.requestId : 0,
+            error: error instanceof Error ? error.message : String(error),
+        })
     }
 }

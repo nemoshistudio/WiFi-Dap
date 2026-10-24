@@ -3,6 +3,31 @@
     <h1 class="page-title">{{ translate('target.title') }}</h1>
     <p class="text-center text-xs bb-muted">{{ translate('target.description') }}</p>
 
+    <!-- P0 dashboard: DAP / WiFi / target / current link + quick entries.
+         Read-only status only; detection is an explicit user click. -->
+    <TargetDashboard
+        :target-info="targetInfo"
+        :detecting="detecting"
+        :detect-error="detectError"
+        :flashing="flashing"
+        :flash-success="phase === 'success'"
+        @detect="onDetect"
+        @goto-flash="scrollToFlash"
+        @open-guided="openGuided"
+        @open-diagnostics="openDiagnostics"
+    />
+
+    <GuidedFlow
+        ref="guidedRef"
+        :connected="deviceConnected"
+        :detected="targetInfo?.detected === true"
+        :detecting="detecting"
+        :flashing="flashing"
+        :flashed="phase === 'success'"
+        @detect="onDetect"
+        @goto-flash="scrollToFlash"
+    />
+
     <el-alert
         class="mt-2"
         type="warning"
@@ -14,10 +39,37 @@
     <section class="bb-card">
       <div class="bb-card__head">
         <h2 class="bb-card__title text-lg">{{ translate('target.detect') }}</h2>
-        <el-button type="primary" :loading="detecting" :disabled="flashing" @click="onDetect">
-          {{ detecting ? translate('target.detecting') : translate('target.detect') }}
-        </el-button>
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs bb-muted">{{ translate('target.swdClock') }}</span>
+          <el-select
+              v-model="swdClockHz"
+              size="small"
+              style="width: 11rem"
+              :disabled="flashing || swdClockBusy"
+              data-testid="swd-clock-select"
+              @change="onSwdClockChange"
+          >
+            <el-option :value="0" :label="translate('target.swdClockAuto')"/>
+            <el-option :value="500000" label="500 kHz"/>
+            <el-option :value="1000000" label="1 MHz"/>
+            <el-option :value="2000000" label="2 MHz"/>
+            <el-option :value="4000000" label="4 MHz"/>
+            <el-option :value="10000000" label="10 MHz"/>
+          </el-select>
+          <el-button type="primary" :loading="detecting" :disabled="flashing" @click="onDetect">
+            {{ detecting ? translate('target.detecting') : translate('target.detect') }}
+          </el-button>
+        </div>
       </div>
+
+    <el-alert
+        v-if="swdClockError"
+        class="mt-2"
+        type="warning"
+        :title="swdClockError"
+        :closable="false"
+        show-icon
+    />
 
     <el-alert
         v-if="detectError"
@@ -146,7 +198,7 @@
 
     </section>
 
-    <section class="bb-card">
+    <section ref="flashSectionRef" class="bb-card" data-testid="target-flash-actions">
     <div class="flex flex-wrap gap-2 justify-center">
       <el-button
           type="primary"
@@ -227,18 +279,31 @@
         show-icon
     />
     </section>
+
+    <!-- Diagnostics / recovery (collapsed by default; dashboard + Ctrl+K can open it). -->
+    <section class="bb-card bb-card--diag-toggle" data-testid="diagnostics-toggle-card">
+      <div class="bb-card__head">
+        <div>
+          <h2 class="bb-card__title text-lg">{{ translate('diag.title') }}</h2>
+          <p class="bb-card__hint">{{ translate('diag.subtitle') }}</p>
+        </div>
+        <el-button size="small" data-testid="diagnostics-toggle" @click="toggleDiagnostics">
+          {{ diagnosticsOpen ? translate('common.close') : translate('common.details') }}
+        </el-button>
+      </div>
+    </section>
+    <DiagnosticsPanel v-if="diagnosticsOpen" ref="diagnosticsRef" />
   </div>
 </template>
 
 <script setup lang="ts">
-import {computed, onUnmounted, ref, shallowRef} from "vue";
+import {computed, nextTick, onMounted, onUnmounted, ref, shallowRef} from "vue";
 import {ElMessageBox} from "element-plus";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
 import {
   flashTarget,
   getTargetInfo,
-  getTargetStatus,
   resetTarget,
   type TargetApiError,
   type TargetFlashSuccess,
@@ -258,6 +323,21 @@ import {
   formatDevId,
   parseTargetDetection,
 } from "@/utils/targetProfile";
+import {ControlEvent} from "@/api";
+import {useWsStore} from "@/stores/websocket";
+import TargetDashboard from "@/components/dashboard/TargetDashboard.vue";
+import GuidedFlow from "@/components/dashboard/GuidedFlow.vue";
+import DiagnosticsPanel from "@/components/dashboard/DiagnosticsPanel.vue";
+import {onAction} from "@/components/dashboard/actionBus";
+import {
+  isTargetStatusAvailable,
+  recordTargetDetection,
+  refreshTargetStatus,
+  startLinkPolling,
+  stopLinkPolling,
+} from "@/components/dashboard/dashboardState";
+import { emitGuidedSignal } from "@/components/dashboard/guidedSignals";
+import {getSwdClock, setSwdClock} from "@/api/apiTarget";
 
 type FlashPhase = 'idle' | 'flashing' | 'success' | 'error'
 
@@ -282,6 +362,22 @@ const errorDetail = ref('');
 const resetting = ref(false);
 const diagnosticsCopied = ref(false);
 const diagnosticsError = ref('');
+const swdClockHz = ref(0);
+const swdClockBusy = ref(false);
+const swdClockError = ref('');
+
+/* -----------------------------------------------------------------------
+ * P0 web platform: dashboard / guided flow / diagnostics integration.
+ * The dashboard itself is read-only; all device actions below stay explicit
+ * user clicks (or a command-palette action the user just invoked).
+ * --------------------------------------------------------------------- */
+const guidedRef = ref<InstanceType<typeof GuidedFlow> | null>(null);
+const diagnosticsRef = ref<InstanceType<typeof DiagnosticsPanel> | null>(null);
+const flashSectionRef = ref<HTMLElement | null>(null);
+const diagnosticsOpen = ref(false);
+const wsStore = useWsStore();
+const deviceConnected = computed(() => wsStore.state === ControlEvent.CONNECTED);
+let offAction: (() => void) | null = null;
 
 let statusTimer = 0;
 let flashHandle: { abort(): void } | null = null;
@@ -451,15 +547,57 @@ function stopStatusPolling() {
 
 function startStatusPolling() {
   stopStatusPolling();
-  // /api/target/status 为可选端点：不可用时返回 null，静默停止轮询（MVP 不依赖进度）
+  // /api/target/status 为可选端点：不可用时静默停止轮询（MVP 不依赖进度）。
+  // 复用 dashboardState 的单一去重请求路径，同时更新链路健康遥测（P0-8），
+  // 避免页面进度轮询与 Dashboard 刷新各自发请求（P1-16）。
+  let pollInFlight = false;
+  let consecutiveFailures = 0;
   statusTimer = window.setInterval(async () => {
-    const status = await getTargetStatus();
-    if (!status) {
-      stopStatusPolling();
+    if (pollInFlight) {
+      // Device HTTP is busy while flashing; never pile up overlapping polls.
       return;
     }
-    deviceStatus.value = status;
+    pollInFlight = true;
+    try {
+      const status = await refreshTargetStatus({force: true});
+      if (isTargetStatusAvailable()) {
+        consecutiveFailures = 0;
+        deviceStatus.value = status;
+        return;
+      }
+      // Tolerate a few transient failures (the httpd task is busy flashing);
+      // only stop when the endpoint is consistently unavailable.
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 3) {
+        stopStatusPolling();
+      }
+    } finally {
+      pollInFlight = false;
+    }
   }, 1000);
+}
+
+async function loadSwdClock(): Promise<void> {
+  const hz = await getSwdClock();
+  if (hz !== null) {
+    swdClockHz.value = hz;
+  }
+}
+
+async function onSwdClockChange(value: number): Promise<void> {
+  swdClockBusy.value = true;
+  swdClockError.value = '';
+  try {
+    const result = await setSwdClock(value);
+    if (!result.ok) {
+      swdClockError.value = result.err || translate('target.swdClockFailed');
+      swdClockHz.value = (await getSwdClock()) ?? 0;
+    } else if (result.hz !== value) {
+      swdClockError.value = translate('target.swdClockApplied');
+    }
+  } finally {
+    swdClockBusy.value = false;
+  }
 }
 
 async function onDetect() {
@@ -474,6 +612,11 @@ async function onDetect() {
     targetInfo.value = info;
     if (info.httpStatus === 404) {
       detectError.value = translate('target.notSupported');
+    } else if (info.httpStatus === 503) {
+      // fw-core2: /api/target/info returns 503 when the largest free heap block
+      // is too small to bring up SWD - that is a device heap problem, not a
+      // missing target ("no target" stays HTTP 200 + detected=false).
+      detectError.value = translate('target.heapLow', {err: info.err || `HTTP 503`});
     } else if (!info.detected) {
       detectError.value = info.err
           ? translate('target.detectFailed', {err: info.err})
@@ -486,6 +629,13 @@ async function onDetect() {
   } finally {
     detecting.value = false;
   }
+  // Shared telemetry for the dashboard / diagnostics / command palette.
+  recordTargetDetection(targetInfo.value, detectError.value);
+  if (targetInfo.value?.detected === true) {
+    // P1-18: guide auto-advance from the real detection result.
+    emitGuidedSignal('target-detected', 'TargetFlash');
+  }
+  void refreshTargetStatus();
   // Flash 基地址/容量可能因芯片而异：检测成功后按设备参数重新转换已选固件。
   if (selectedFile.value && !flashing.value) {
     await convertSelectedFile(selectedFile.value);
@@ -636,6 +786,8 @@ async function onStartFlash() {
       flashHandle = null;
       phase.value = 'success';
       result.value = flashResult;
+      // P1-18: guide auto-advance from the real verified flash result.
+      emitGuidedSignal('flash-success', 'TargetFlash');
       globalNotify(translate('target.success'), 'success');
     },
     onFailure: (failure) => {
@@ -664,7 +816,82 @@ async function onResetTarget() {
   }
 }
 
+/* -------------------------------------------------------------------------
+ * Dashboard / guided flow / diagnostics glue
+ * ---------------------------------------------------------------------- */
+
+function scrollToFlash(): void {
+  void nextTick(() => {
+    flashSectionRef.value?.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+}
+
+function openGuided(): void {
+  guidedRef.value?.open();
+}
+
+function scrollToDiagnostics(): void {
+  void nextTick(() => {
+    const el = diagnosticsRef.value?.$el as HTMLElement | undefined;
+    el?.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+}
+
+function openDiagnostics(): void {
+  diagnosticsOpen.value = true;
+  scrollToDiagnostics();
+}
+
+function scrollToDevices(): void {
+  void nextTick(() => {
+    const el = document.querySelector('[data-testid="dashboard-devices"]');
+    el?.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+}
+
+function toggleDiagnostics(): void {
+  diagnosticsOpen.value = !diagnosticsOpen.value;
+  if (diagnosticsOpen.value) {
+    scrollToDiagnostics();
+  }
+}
+
+onMounted(() => {
+  // P1-16: first-screen work in parallel - SWD clock (HTTP) + link status poll
+  // (HTTP) + WS WIFI queries (started by the dashboard telemetry on connect).
+  void loadSwdClock();
+  // One single page-level poll feeds the link-health card and flash progress; it
+  // stops on unmount / WS disconnect instead of several cards polling on their own.
+  startLinkPolling();
+  // One-shot actions requested by the command palette (queued until mounted).
+  offAction = onAction((action) => {
+    switch (action) {
+      case 'target-detect':
+        if (!detecting.value && !flashing.value) {
+          void onDetect();
+        }
+        break;
+      case 'target-reset':
+        if (!resetting.value && !flashing.value) {
+          void onResetTarget();
+        }
+        break;
+      case 'diagnostics-open':
+        openDiagnostics();
+        break;
+      case 'devices-open':
+        scrollToDevices();
+        break;
+      default:
+        break;
+    }
+  });
+});
+
 onUnmounted(() => {
+  offAction?.();
+  offAction = null;
+  stopLinkPolling();
   stopStatusPolling();
   if (diagnosticsTimer) {
     window.clearTimeout(diagnosticsTimer);

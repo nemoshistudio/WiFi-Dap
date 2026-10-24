@@ -18,6 +18,37 @@
  *   POST /api/target/flash   -> octet-stream upload + flash (module 6, cmd 2)
  *   GET  /api/target/status   -> engine status snapshot (module 6, cmd 3)
  *   POST /api/target/reset    -> optional {"run":bool} SWD reset (module 6, cmd 4)
+ *   GET  /api/discover        -> nearby DAPs via mDNS _http._tcp (P1-19,
+ *                                module 6, cmd 6; registered here BEFORE the
+ *                                URI modules so the "/" SPA fallback cannot
+ *                                swallow it).  Read-only, blocking <= 2 s,
+ *                                one query at a time (429 when busy).
+ *
+ * GET /api/target/status contract (additive diagnostics; existing fields keep
+ * their meaning, HTTP stays 200):
+ *   state/total/written/verified/percent/err/message/busy  -- flash engine
+ *   heap_free        esp_get_free_heap_size() at snapshot time (bytes)
+ *   heap_largest     heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)
+ *   dap_session_active  read-only tcp_server_session_active() (kSock >= 0);
+ *                    never kicks the USBIP/elaphureLink/WS-DAP session
+ *   swd_clock_hz     last successful /api/target/info probe clock; omitted
+ *                    until a probe has run since boot
+ *   swd_clock_actual_hz  P0-8 actual clock of the last successful bring-up
+ *                    (auto probe ladder 4M/2M/1M/500k); omitted when none yet
+ *   swd_clock_manual_hz  manual clock selection (0 = auto); always present
+ *   wifi_connected   P0-8 read-only Wi-Fi station link state (bool)
+ *   wifi_rssi        dBm; omitted when the station is not connected
+ *   wifi_ssid        connected SSID; omitted when not connected
+ *   wifi_channel     primary channel; omitted when not connected
+ *   dap_xfer_count/avg_us/max_us/last_us  device-side USBIP<->DAP command
+ *                    latency counters (NOT a network RTT; 0 before the first
+ *                    transaction)
+ *   dap_ring_preallocated / dap_ring_active / dap_ring_request_bytes /
+ *   dap_ring_response_bytes  P0-2 early DAP ring reservation state
+ *   last_error       flash engine status message while err != 0; omitted
+ *                    when the last operation had no error
+ *   Fields that could not be measured are OMITTED (never fabricated/null).
+ * The field set is consumed by the Web dashboard and scripts/hil_gate.py.
  *
  * POST /api/target/flash contract:
  *   - Host/Origin browser guard first (web_host_guard_http_ok);
@@ -49,14 +80,19 @@
 #include "web_error_json.h"
 
 #include "wt_target_flash.h"
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "birdiebot_wired_dap.h"
+#endif
 #include "tcp_server.h"
 
 #include <sdkconfig.h>
 
 #include <cJSON.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_task_wdt.h>
 
 #include <mbedtls/sha256.h>
@@ -80,18 +116,31 @@
 #define TARGET_CMD_FLASH  2
 #define TARGET_CMD_STATUS 3
 #define TARGET_CMD_RESET  4
+#define TARGET_CMD_SWD_CLOCK 5
+#define TARGET_CMD_DISCOVER 6
 
 #define TARGET_URI_INFO   "/api/target/info"
 #define TARGET_URI_FLASH  "/api/target/flash"
 #define TARGET_URI_STATUS "/api/target/status"
 #define TARGET_URI_RESET  "/api/target/reset"
+#define TARGET_URI_SWD_CLOCK "/api/target/swd-clock"
+#define TARGET_URI_DISCOVER "/api/discover"
 #define DAP_URI_KICK      "/api/dap/kick"
 
 #define TARGET_CHUNK_SIZE      4096
-#define TARGET_JSON_MAX        768
+#define TARGET_JSON_MAX        1536
 #define TARGET_SHA256_HEX_LEN  64
 #define TARGET_RESET_BODY_MAX  128
+/* P0-2 heap guard: under this largest contiguous internal block a SWD
+ * bring-up cannot be trusted (fragmented NCM+WiFi heap); answer an explicit
+ * 503 instead of letting /api/target/info end in a silent SWD timeout. */
+#define TARGET_HEAP_GUARD_BYTES 4096U
 #define TARGET_UID_HEX_LEN     (2 * 12 + 1)
+/* P1-19 discovery response: 8 max-length device rows (name/hostname/ip/port +
+ * optional target/version, JSON-escaped) plus the envelope.  Worst case is
+ * ~3.8 KiB when every string needs escaping; the formatter returns -1 and the
+ * handler falls back to {"ok":true,"devices":[]} rather than truncating. */
+#define TARGET_DISCOVER_JSON_MAX 4096
 
 /* JSON error codes (docs/protocol.md §1.1); 7 (auth) is not used any more. */
 #define TARGET_CODE_BAD_REQUEST 2
@@ -114,6 +163,16 @@
  * a defensive flag and also tells GET /status that an upload is running). */
 static volatile bool s_flash_busy;
 
+/* Diagnostics cache: last successful SWD probe snapshot.  Written by the info
+ * handler (httpd task) after wt_tf_probe() succeeds and only read by GET
+ * /api/target/status; it never drives a DAP/flash decision.  GET /status must
+ * stay cheap and must not probe (a probe would take DAP ownership and disturb
+ * an active USBIP/WS-DAP session), so the clock is reported from this cache and
+ * omitted until the Web dashboard/hil gate has queried target/info at least
+ * once since boot. */
+static bool s_last_probe_valid;
+static uint32_t s_last_probe_swd_hz;
+
 /* Shared JSON/response buffer: handlers run in the single httpd task and one
  * flash session at a time, so a static buffer keeps the stack small. */
 static char s_json[TARGET_JSON_MAX];
@@ -135,6 +194,7 @@ static const char *target_http_status_str(int status)
 	case 413: return "413 Payload Too Large";
 	case 415: return "415 Unsupported Media Type";
 	case 422: return "422 Unprocessable Entity";
+	case 429: return "429 Too Many Requests";
 	case 503: return "503 Service Unavailable";
 	default:  return "500 Internal Server Error";
 	}
@@ -334,6 +394,22 @@ static esp_err_t target_info_handler(httpd_req_t *req)
 		                         TARGET_CODE_PROPERTY);
 	}
 
+	/* P0-2 heap guard: make an out-of-memory condition an explicit 503 with
+	 * numbers instead of a silent SWD timeout.  The probe itself takes the DAP
+	 * hand-off and re-creates the USBIP ring wrappers, which is not safe on a
+	 * heap with no contiguous block left. */
+	size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+	                                                  MALLOC_CAP_INTERNAL);
+	if (largest < TARGET_HEAP_GUARD_BYTES) {
+		char err_text[96];
+		snprintf(err_text, sizeof(err_text),
+		         "low heap: largest free block %u B < %u B",
+		         (unsigned)largest, (unsigned)TARGET_HEAP_GUARD_BYTES);
+		ESP_LOGW(TAG, "target/info refused: %s", err_text);
+		return target_send_error(req, 503, TARGET_CMD_INFO, err_text,
+		                         TARGET_CODE_INTERNAL);
+	}
+
 	esp_err_t err = wt_tf_probe(&info);
 	if (err != ESP_OK || !info.detected) {
 		/* "No target" is a normal state the UI polls: keep HTTP 200 and report
@@ -343,6 +419,11 @@ static esp_err_t target_info_handler(httpd_req_t *req)
 		                                                  : esp_err_to_name(err),
 		                         TARGET_CODE_PROPERTY);
 	}
+
+	/* Diagnostics only: remember the SWD clock for GET /api/target/status
+	 * (never used for protocol/flash decisions). */
+	s_last_probe_swd_hz = info.swd_clock_hz;
+	s_last_probe_valid = true;
 
 	char dpidr[11];
 	char cpuid[11];
@@ -366,6 +447,11 @@ static esp_err_t target_info_handler(httpd_req_t *req)
 		cJSON_AddStringToObject(root, "device", info.device);
 		cJSON_AddBoolToObject(root, "supported", info.supported);
 		cJSON_AddNumberToObject(root, "swd_clock_hz", info.swd_clock_hz);
+		/* P0-8: actual bring-up clock + manual selection (0 = auto). */
+		cJSON_AddNumberToObject(root, "swd_clock_actual_hz",
+		                        (double) wt_tf_get_actual_swd_clock());
+		cJSON_AddNumberToObject(root, "swd_clock_manual_hz",
+		                        (double) wt_tf_get_swd_clock());
 		cJSON_AddStringToObject(root, "dpidr", dpidr);
 		cJSON_AddStringToObject(root, "cpuid", cpuid);
 		cJSON_AddStringToObject(root, "idcode", idcode);
@@ -414,6 +500,65 @@ static esp_err_t target_status_handler(httpd_req_t *req)
 		cJSON_AddNumberToObject(root, "err", status.err);
 		cJSON_AddStringToObject(root, "message", status.message);
 		cJSON_AddBoolToObject(root, "busy", s_flash_busy);
+
+		/* Read-only diagnostics (additive; fields above keep their meaning and
+		 * the response stays HTTP 200).  The Web dashboard/HIL gate consumes
+		 * these to detect heap exhaustion/fragmentation and proxy sessions
+		 * without a UART console. */
+		cJSON_AddNumberToObject(root, "heap_free", (double) esp_get_free_heap_size());
+		cJSON_AddNumberToObject(root, "heap_largest",
+		                        (double) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+		/* kSock >= 0 only; tcp_server_session_active() never kicks the
+		 * session (unlike POST /api/dap/kick / curve start DAP hand-off). */
+		cJSON_AddBoolToObject(root, "dap_session_active", tcp_server_session_active());
+#if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+		cJSON_AddBoolToObject(root, "wired_ncm_active", birdiebot_wired_dap_ncm_active());
+		cJSON_AddBoolToObject(root, "wired_dhcp_active", birdiebot_wired_dap_dhcp_active());
+		cJSON_AddNumberToObject(root, "wired_dhcp_error", birdiebot_wired_dap_dhcp_error());
+		cJSON_AddNumberToObject(root, "wired_dhcp_state", birdiebot_wired_dap_dhcp_state());
+		cJSON_AddStringToObject(root, "wired_ip", birdiebot_wired_dap_device_ip());
+#endif
+		/* Reuse existing state: last /api/target/info probe clock. */
+		if (s_last_probe_valid) {
+			cJSON_AddNumberToObject(root, "swd_clock_hz", (double) s_last_probe_swd_hz);
+		}
+		/* P0-8/E: read-only link quality.  Every field is a real measurement
+		 * (Wi-Fi driver state, device-side DAP latency counters, heap, SWD
+		 * clock actually used); nothing here is a fabricated RTT. */
+		wt_tf_link_diag_t link;
+		wt_tf_get_link_diag(&link);
+		cJSON_AddBoolToObject(root, "wifi_connected", link.wifi_connected);
+		if (link.wifi_connected) {
+			cJSON_AddNumberToObject(root, "wifi_rssi", link.wifi_rssi);
+			cJSON_AddStringToObject(root, "wifi_ssid", link.wifi_ssid);
+			cJSON_AddNumberToObject(root, "wifi_channel", link.wifi_channel);
+		}
+		if (link.swd_clock_actual_hz != 0U) {
+			cJSON_AddNumberToObject(root, "swd_clock_actual_hz",
+			                        (double) link.swd_clock_actual_hz);
+		}
+		cJSON_AddNumberToObject(root, "swd_clock_manual_hz",
+		                        (double) link.swd_clock_manual_hz);
+		cJSON_AddNumberToObject(root, "dap_xfer_count",
+		                        (double) link.dap_xfer_count);
+		cJSON_AddNumberToObject(root, "dap_xfer_avg_us",
+		                        (double) link.dap_xfer_avg_us);
+		cJSON_AddNumberToObject(root, "dap_xfer_max_us",
+		                        (double) link.dap_xfer_max_us);
+		cJSON_AddNumberToObject(root, "dap_xfer_last_us",
+		                        (double) link.dap_xfer_last_us);
+		cJSON_AddBoolToObject(root, "dap_ring_preallocated",
+		                      link.dap_ring_preallocated);
+		cJSON_AddBoolToObject(root, "dap_ring_active", link.dap_ring_active);
+		cJSON_AddNumberToObject(root, "dap_ring_request_bytes",
+		                        (double) link.dap_ring_request_bytes);
+		cJSON_AddNumberToObject(root, "dap_ring_response_bytes",
+		                        (double) link.dap_ring_response_bytes);
+		/* Reuse existing engine status: expose the last failure text without
+		 * changing the numeric "err" contract. */
+		if (status.err != 0) {
+			cJSON_AddStringToObject(root, "last_error", status.message);
+		}
 	}
 	return target_send_json(req, 200, TARGET_CMD_STATUS, root);
 }
@@ -658,6 +803,68 @@ static esp_err_t target_flash_handler(httpd_req_t *req)
 	return target_send_json(req, 200, TARGET_CMD_FLASH, root);
 }
 
+/* GET/POST /api/target/swd-clock                                           */
+/* Manual SWD clock selection for target detect/flash and local sampling.    */
+/* 0 = auto probe (2 MHz -> 1 MHz -> 500 kHz); manual 100 kHz..10 MHz.      */
+static void target_swd_clock_json(httpd_req_t *req, int http_status,
+                                  esp_err_t err, uint32_t hz)
+{
+	cJSON *root = cJSON_CreateObject();
+	if (root != NULL) {
+		cJSON_AddNumberToObject(root, "module", TARGET_MODULE_ID);
+		cJSON_AddNumberToObject(root, "cmd", TARGET_CMD_SWD_CLOCK);
+		cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+		cJSON_AddNumberToObject(root, "hz", (double) hz);
+		cJSON_AddStringToObject(root, "mode", hz == 0U ? "auto" : "manual");
+		if (err != ESP_OK) {
+			cJSON_AddStringToObject(root, "err", "invalid swd clock (0 or 100000..10000000 Hz)");
+		}
+	}
+	target_send_json(req, http_status, TARGET_CMD_SWD_CLOCK, root);
+}
+
+static esp_err_t target_swd_clock_get_handler(httpd_req_t *req)
+{
+	if (!web_host_guard_http_ok(req)) {
+		return target_send_error(req, 403, TARGET_CMD_SWD_CLOCK, TARGET_ERR_FORBIDDEN,
+		                         TARGET_CODE_PROPERTY);
+	}
+	target_swd_clock_json(req, 200, ESP_OK, wt_tf_get_swd_clock());
+	return ESP_OK;
+}
+
+static esp_err_t target_swd_clock_set_handler(httpd_req_t *req)
+{
+	if (!web_host_guard_http_ok(req)) {
+		return target_send_error(req, 403, TARGET_CMD_SWD_CLOCK, TARGET_ERR_FORBIDDEN,
+		                         TARGET_CODE_PROPERTY);
+	}
+	if (req->content_len == 0 || req->content_len > 128) {
+		return target_send_error(req, 400, TARGET_CMD_SWD_CLOCK, "bad json request",
+		                         TARGET_CODE_BAD_REQUEST);
+	}
+	char body[129];
+	int received = httpd_req_recv(req, body, req->content_len);
+	if (received <= 0) {
+		return target_send_error(req, 400, TARGET_CMD_SWD_CLOCK, "bad json request",
+		                         TARGET_CODE_BAD_REQUEST);
+	}
+	body[received] = '\0';
+	cJSON *json = cJSON_ParseWithLength(body, (size_t) received);
+	if (json == NULL) {
+		return target_send_error(req, 400, TARGET_CMD_SWD_CLOCK, "bad json request",
+		                         TARGET_CODE_BAD_REQUEST);
+	}
+	cJSON *hz_json = cJSON_GetObjectItem(json, "hz");
+	uint32_t hz = cJSON_IsNumber(hz_json) && hz_json->valuedouble >= 0
+	              ? (uint32_t) hz_json->valuedouble : UINT32_MAX;
+	cJSON_Delete(json);
+	esp_err_t err = wt_tf_set_swd_clock(hz);
+	target_swd_clock_json(req, err == ESP_OK ? 200 : 400, err,
+	                      err == ESP_OK ? wt_tf_get_swd_clock() : wt_tf_get_swd_clock());
+	return ESP_OK;
+}
+
 /* POST /api/dap/kick                                                         */
 /* Drop the active USBIP/elaphureLink/WS-DAP session so the browser can open  */
 /* its own WS-DAP connection on TCP 3240 (Web UI variable-curve page).       */
@@ -670,6 +877,48 @@ static esp_err_t dap_kick_handler(httpd_req_t *req)
     httpd_resp_set_status(req, "200 OK");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
+/* ------------------------------------------------------------------------- */
+/* GET /api/discover (P1-19 nearby devices via mDNS)                         */
+/* ------------------------------------------------------------------------- */
+
+/* Discovery row buffer (target_flash wt_tf_discover_json formats into it).
+ * Static: the httpd task has a 4 KiB stack and mDNS results can be up to
+ * 8 devices. */
+static char s_discover_json[TARGET_DISCOVER_JSON_MAX];
+
+static esp_err_t target_discover_handler(httpd_req_t *req)
+{
+	size_t len = 0U;
+	esp_err_t err;
+
+	if (!web_host_guard_http_ok(req)) {
+		return target_send_error(req, 403, TARGET_CMD_DISCOVER,
+		                         TARGET_ERR_FORBIDDEN, TARGET_CODE_PROPERTY);
+	}
+	/* Read-only mDNS query: no DAP ownership, no target access.  The helper
+	 * enforces one query at a time and never fabricates rows; mDNS not running
+	 * (WiFi off / target without mDNS) yields {"ok":true,"devices":[]}. */
+	err = wt_tf_discover_json(s_discover_json, sizeof(s_discover_json),
+	                          WT_TF_DISCOVER_TIMEOUT_MS, &len);
+	if (err == ESP_ERR_INVALID_STATE) {
+		return target_send_error(req, 429, TARGET_CMD_DISCOVER,
+		                         "discovery busy", TARGET_CODE_BUSY);
+	}
+	if (err != ESP_OK) {
+		/* Never fail the Web's discovery poll: answer an empty, valid list. */
+		static const char empty[] =
+			"{\"ok\":true,\"devices\":[]}";
+		httpd_resp_set_status(req, "200 OK");
+		httpd_resp_set_type(req, "application/json");
+		httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+		return httpd_resp_send(req, empty, HTTPD_RESP_USE_STRLEN);
+	}
+	httpd_resp_set_status(req, "200 OK");
+	httpd_resp_set_type(req, "application/json");
+	httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+	return httpd_resp_send(req, s_discover_json, (ssize_t)len);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -700,10 +949,28 @@ static const httpd_uri_t uri_target_reset = {
 	.handler = target_reset_handler,
 };
 
+static const httpd_uri_t uri_target_swd_clock_get = {
+	.uri = TARGET_URI_SWD_CLOCK,
+	.method = HTTP_GET,
+	.handler = target_swd_clock_get_handler,
+};
+
+static const httpd_uri_t uri_target_swd_clock_set = {
+	.uri = TARGET_URI_SWD_CLOCK,
+	.method = HTTP_POST,
+	.handler = target_swd_clock_set_handler,
+};
+
 static const httpd_uri_t dap_kick = {
 	.uri = DAP_URI_KICK,
 	.method = HTTP_POST,
 	.handler = dap_kick_handler,
+};
+
+static const httpd_uri_t uri_target_discover = {
+	.uri = TARGET_URI_DISCOVER,
+	.method = HTTP_GET,
+	.handler = target_discover_handler,
 };
 
 void uri_target_register(httpd_handle_t server)
@@ -721,7 +988,10 @@ void uri_target_register(httpd_handle_t server)
 		{TARGET_URI_FLASH, &uri_target_flash},
 		{TARGET_URI_STATUS, &uri_target_status},
 		{TARGET_URI_RESET, &uri_target_reset},
+		{TARGET_URI_SWD_CLOCK, &uri_target_swd_clock_get},
+		{TARGET_URI_SWD_CLOCK, &uri_target_swd_clock_set},
 		{DAP_URI_KICK, &dap_kick},
+		{TARGET_URI_DISCOVER, &uri_target_discover},
 	};
 
 	for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); ++i) {

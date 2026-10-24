@@ -46,6 +46,21 @@
       <div class="bb-nav__right">
         <div id="page-spec-slot" class="bb-nav__spec"></div>
 
+        <!-- Global command palette trigger (Ctrl+K). -->
+        <button
+            type="button"
+            class="bb-icon-btn bb-palette-btn"
+            :title="translate('palette.openHint')"
+            :aria-label="translate('palette.openHint')"
+            data-testid="navbar-palette"
+            @click="openCommandPalette"
+        >
+          <svg class="bb-palette-btn__icon" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="9" cy="9" r="5.2"/>
+            <path d="M13.1 13.1 17.3 17.3"/>
+          </svg>
+        </button>
+
         <div class="bb-status" :class="statusKind" role="status" :aria-label="wsState" :title="wsState">
           <span class="bb-status__dot" aria-hidden="true"></span>
           <span class="bb-status__text">{{ wsState }}</span>
@@ -213,6 +228,7 @@ import { BRAND_NAME } from "@/constants/brand";
 import { BRAND_MARK_64 } from "@/assets/brand/brand-assets";
 import { locale, setLang } from "@/i18n"
 import { LANGUAGES, getLanguageOption } from "@/constants/languages"
+import { openCommandPalette } from "@/components/dashboard/actionBus"
 
 type Theme = 'dark' | 'light'
 /** Keep in sync with the bootstrap snippet in src/main.ts. */
@@ -310,28 +326,13 @@ type Item = {
   badge?: Ref<boolean>;
 };
 
-const menuItems: ComputedRef<Item[]> = computed(() => ([
-  {
-    name: translate("page.uart"),
-    href: "/uart",
-  }, {
-    name: translate("page.wifi"),
-    href: "/wifi",
-  }, {
-    name: translate("target.title"),
-    href: "/target",
-  }, {
-    name: translate("page.debugCurve"),
-    href: "/debug-curve",
-  },
-]));
-
-const sideBarItems: ComputedRef<Item[]> = computed(() => {
+/**
+ * Primary navigation order (P0): the home entry is the target flash page.
+ * OTA is appended only when this build enables it (default: enabled).
+ */
+const menuItems: ComputedRef<Item[]> = computed(() => {
   const items: Item[] = [
     {
-      name: translate("page.wifi"),
-      href: "/wifi",
-    }, {
       name: translate("target.title"),
       href: "/target",
     }, {
@@ -340,6 +341,34 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
     }, {
       name: translate("page.uart"),
       href: "/uart",
+    }, {
+      name: translate("page.wifi"),
+      href: "/wifi",
+    },
+  ];
+  if (isOTAEnabled()) {
+    items.push({
+      name: translate("page.update"),
+      href: "/update",
+    });
+  }
+  return items;
+});
+
+const sideBarItems: ComputedRef<Item[]> = computed(() => {
+  const items: Item[] = [
+    {
+      name: translate("target.title"),
+      href: "/target",
+    }, {
+      name: translate("page.debugCurve"),
+      href: "/debug-curve",
+    }, {
+      name: translate("page.uart"),
+      href: "/uart",
+    }, {
+      name: translate("page.wifi"),
+      href: "/wifi",
     }, {
       name: translate("page.about"),
       href: "/about",
@@ -428,6 +457,16 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
 }
 
 .bb-menu-btn__icon {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+/* Command palette trigger (same icon-button language as menu/theme). */
+.bb-palette-btn__icon {
   width: 17px;
   height: 17px;
   fill: none;

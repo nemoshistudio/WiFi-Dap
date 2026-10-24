@@ -155,7 +155,7 @@ static uint16_t find_duplicate_expr(const curve_config_t *cfg, uint16_t last)
 /** Compact prefix expression (v3): A<addr8> R<reg2><off8> C<off8>
  *  +<off8><inner> D<off8><inner>.  Fixed-width hex keeps the HTTP body small
  *  and, more importantly, keeps cJSON's allocation count low on ESP32. */
-static esp_err_t parse_expr_compact(const char **cursor, curve_config_t *cfg,
+esp_err_t curve_parse_expr_compact(const char **cursor, curve_config_t *cfg,
                                     uint16_t *out_index, uint32_t depth,
                                     char *err, size_t err_len)
 {
@@ -204,7 +204,7 @@ static esp_err_t parse_expr_compact(const char **cursor, curve_config_t *cfg,
         if (!read_hex_u32(&p, &value, 8U)) goto bad;
         node->offset = (int32_t)value;
         {
-            esp_err_t e = parse_expr_compact(&p, cfg, &node->inner, depth + 1U, err, err_len);
+            esp_err_t e = curve_parse_expr_compact(&p, cfg, &node->inner, depth + 1U, err, err_len);
             if (e != ESP_OK) return e;
         }
         break;
@@ -352,7 +352,7 @@ static void collect_expr_regs(const curve_config_t *cfg, uint16_t index,
 }
 
 /** Normalize a flash [low, high) PC range (Thumb bit0 cleared). */
-static bool normalize_pc_range(uint32_t pc_low, uint32_t pc_high,
+bool curve_normalize_pc_range(uint32_t pc_low, uint32_t pc_high,
                                uint32_t *low_norm, uint32_t *high_norm)
 {
     uint32_t lo;
@@ -398,7 +398,7 @@ static void parse_pc_scope(const cJSON *series_item, curve_series_t *dst)
                   4294967295.0, &pc_high)) {
         return;
     }
-    if (!normalize_pc_range(pc_low, pc_high, &low_norm, &high_norm)) {
+    if (!curve_normalize_pc_range(pc_low, pc_high, &low_norm, &high_norm)) {
         return;
     }
     dst->flags |= CURVE_SERIES_FLAG_PC_GATE;
@@ -462,7 +462,7 @@ static esp_err_t parse_variants(const cJSON *series_item, curve_config_t *cfg,
                       4294967295.0, &pc_low) ||
             !json_u32(cJSON_GetObjectItemCaseSensitive(variant, "pc_high"), 0.0,
                       4294967295.0, &pc_high) ||
-            !normalize_pc_range(pc_low, pc_high, &low_norm, &high_norm)) {
+            !curve_normalize_pc_range(pc_low, pc_high, &low_norm, &high_norm)) {
             return curve_parse_fail(err, err_len,
                                     "series[%u].variants[%u] has a bad PC range "
                                     "(flash 0x08000000..0x08FFFFFF, low<high)",
@@ -484,7 +484,7 @@ static esp_err_t parse_variants(const cJSON *series_item, curve_config_t *cfg,
                                         (unsigned)dst->variant_count);
             }
             const char *cursor = compact->valuestring;
-            e = parse_expr_compact(&cursor, cfg, &expr_index, 1U, err, err_len);
+            e = curve_parse_expr_compact(&cursor, cfg, &expr_index, 1U, err, err_len);
             if (e != ESP_OK) {
                 return e;
             }
@@ -551,7 +551,7 @@ static esp_err_t parse_series(const cJSON *item, curve_config_t *cfg,
         const cJSON *compact = cJSON_GetObjectItemCaseSensitive(item, "expr_s");
         if (cJSON_IsString(compact) && compact->valuestring != NULL) {
             const char *cursor = compact->valuestring;
-            e = parse_expr_compact(&cursor, cfg, &expr_index, 1U, err, err_len);
+            e = curve_parse_expr_compact(&cursor, cfg, &expr_index, 1U, err, err_len);
             if (e != ESP_OK) {
                 return e;
             }
@@ -573,6 +573,29 @@ static esp_err_t parse_series(const cJSON *item, curve_config_t *cfg,
                                 (unsigned)global_index);
     }
     parse_pc_scope(item, dst);
+
+    /* Protocol v3: exact per-series refresh rate.  `sample_every` (preferred)
+     * or the legacy proposal name `divisor`: sample this series every N ticks
+     * of its group.  Stored in the former `reserved` byte (sizeof stays 16). */
+    {
+        const cJSON *every_item =
+            cJSON_GetObjectItemCaseSensitive(item, "sample_every");
+        uint32_t every = 1U;
+
+        if (every_item == NULL) {
+            every_item = cJSON_GetObjectItemCaseSensitive(item, "divisor");
+        }
+        if (every_item != NULL &&
+            !json_u32(every_item, (double)CURVE_SAMPLE_EVERY_MIN,
+                      (double)CURVE_SAMPLE_EVERY_MAX, &every)) {
+            return curve_parse_fail(err, err_len,
+                                    "series[%u].sample_every must be %u..%u",
+                                    (unsigned)global_index,
+                                    (unsigned)CURVE_SAMPLE_EVERY_MIN,
+                                    (unsigned)CURVE_SAMPLE_EVERY_MAX);
+        }
+        dst->sample_every = (uint8_t)every;
+    }
 
     dst->size = (uint8_t)size;
     *sample_bytes += (uint16_t)size;
@@ -742,6 +765,175 @@ static esp_err_t parse_trigger_condition(const cJSON *root,
     return ESP_OK;
 }
 
+/** Parse one watchpoint object ({"address","size"?,"access"?}) into slot. */
+static esp_err_t parse_watch_object(const cJSON *watch, uint8_t slot,
+                                    const char *key, curve_config_t *cfg,
+                                    char *err, size_t err_len)
+{
+    const cJSON *item;
+    uint32_t address = 0U;
+    uint32_t size = CURVE_WATCH_DEFAULT_SIZE;
+    uint8_t access = (uint8_t)CURVE_WATCH_ACCESS_WRITE;
+
+    if (!cJSON_IsObject(watch)) {
+        return curve_parse_fail(err, err_len, "%s must be an object", key);
+    }
+    item = cJSON_GetObjectItemCaseSensitive(watch, "address");
+    if (!json_u32(item, 0.0, 4294967295.0, &address)) {
+        return curve_parse_fail(err, err_len, "bad %s address", key);
+    }
+    item = cJSON_GetObjectItemCaseSensitive(watch, "size");
+    if (item != NULL) {
+        if (!json_u32(item, 1.0, 4.0, &size) ||
+            (size != CURVE_WATCH_SIZE_1 && size != CURVE_WATCH_SIZE_2 &&
+             size != CURVE_WATCH_SIZE_4)) {
+            return curve_parse_fail(err, err_len, "%s.size must be 1, 2 or 4",
+                                    key);
+        }
+    }
+    item = cJSON_GetObjectItemCaseSensitive(watch, "access");
+    if (item != NULL) {
+        if (!cJSON_IsString(item) || item->valuestring == NULL ||
+            (strcmp(item->valuestring, "write") != 0 &&
+             strcmp(item->valuestring, "read") != 0 &&
+             strcmp(item->valuestring, "readwrite") != 0)) {
+            return curve_parse_fail(err, err_len,
+                                    "%s.access must be \"write\", \"read\" or "
+                                    "\"readwrite\"", key);
+        }
+        if (strcmp(item->valuestring, "readwrite") == 0) {
+            access = (uint8_t)CURVE_WATCH_ACCESS_RW;
+        } else if (strcmp(item->valuestring, "read") == 0) {
+            access = (uint8_t)CURVE_WATCH_ACCESS_READ;
+        } else {
+            access = (uint8_t)CURVE_WATCH_ACCESS_WRITE;
+        }
+    }
+    if (!curve_watchpoint_params_ok(address, (uint8_t)size)) {
+        return curve_parse_fail(err, err_len, "bad %s address", key);
+    }
+    for (uint8_t i = 0U; i < slot; i++) {
+        /* Same address with a different access is a valid split (read and
+         * write need separate comparators); an identical address+access pair
+         * would make one comparator useless. */
+        if (cfg->watch_addr[i] == address && cfg->watch_acc[i] == access) {
+            return curve_parse_fail(err, err_len,
+                                    "%s duplicates watchpoint %u "
+                                    "(address+access)", key,
+                                    (unsigned)(i + 1U));
+        }
+    }
+    cfg->watch_addr[slot] = address;
+    cfg->watch_sz[slot] = (uint8_t)size;
+    cfg->watch_acc[slot] = access;
+    if (slot == 0U) {
+        cfg->watch_address = address;
+        cfg->watch_size = (uint8_t)size;
+        cfg->watch_access = access;
+    } else if (slot == 1U) {
+        cfg->watch2_enabled = true;
+        cfg->watch2_address = address;
+        cfg->watch2_size = (uint8_t)size;
+        cfg->watch2_access = access;
+    }
+    return ESP_OK;
+}
+
+/**
+ * Optional DWT watchpoint list (P1.8.1 second comparator + P1-12 up to 4):
+ *
+ *   canonical:  "watchpoints": [{"address":u32,"size":1/2/4?,
+ *                                "access":"write"|"read"|"readwrite"?}, ...]
+ *   legacy:     root watch_address/watch_size/watch_access  (slot 0)
+ *               watch2 / watch3 / watch4 objects              (slots 1..3)
+ *
+ * The array form cannot be combined with the legacy objects (one encoding per
+ * request); slots must be contiguous.  Duplicate addresses are rejected so one
+ * DWT comparator cannot be requested twice.  The allocation of the actual
+ * comparators happens in the engine (it must first read DWT_CTRL), which
+ * reports a clear error when the target has fewer free comparators.
+ */
+static esp_err_t parse_watchpoints(const cJSON *root, curve_config_t *cfg,
+                                   char *err, size_t err_len)
+{
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "watchpoints");
+    const char *aliases[] = {"watch2", "watch3", "watch4"};
+
+    if (cfg->trigger != (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
+        if (list != NULL) {
+            return curve_parse_fail(err, err_len,
+                                    "watchpoints require trigger=\"watchpoint\"");
+        }
+        for (size_t i = 0U; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+            if (cJSON_GetObjectItemCaseSensitive(root, aliases[i]) != NULL) {
+                return curve_parse_fail(err, err_len,
+                                        "%s requires trigger=\"watchpoint\"",
+                                        aliases[i]);
+            }
+        }
+        return ESP_OK;
+    }
+    if (list != NULL) {
+        const cJSON *entry;
+        uint32_t count;
+
+        for (size_t i = 0U; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+            if (cJSON_GetObjectItemCaseSensitive(root, aliases[i]) != NULL) {
+                return curve_parse_fail(
+                    err, err_len,
+                    "watchpoints cannot be combined with %s", aliases[i]);
+            }
+        }
+        if (!cJSON_IsArray(list)) {
+            return curve_parse_fail(err, err_len,
+                                    "watchpoints must be an array");
+        }
+        count = (uint32_t)cJSON_GetArraySize(list);
+        if (count < 1U || count > CURVE_MAX_WATCHPOINTS) {
+            return curve_parse_fail(err, err_len,
+                                    "watchpoints count must be 1..%u",
+                                    (unsigned)CURVE_MAX_WATCHPOINTS);
+        }
+        uint8_t slot = 0U;
+
+        cJSON_ArrayForEach(entry, list) {
+            esp_err_t e = parse_watch_object(entry, slot, "watchpoints[]",
+                                             cfg, err, err_len);
+
+            if (e != ESP_OK) {
+                return e;
+            }
+            slot++;
+        }
+        cfg->watch_count = (uint8_t)count;
+        return ESP_OK;
+    }
+
+    /* Legacy aliases: slot 0 was parsed from the root fields by the caller. */
+    for (uint8_t slot = 1U; slot < CURVE_MAX_WATCHPOINTS; slot++) {
+        const cJSON *watch =
+            cJSON_GetObjectItemCaseSensitive(root, aliases[slot - 1U]);
+
+        if (watch == NULL) {
+            continue;
+        }
+        if (cfg->watch_count != slot) {
+            return curve_parse_fail(
+                err, err_len,
+                "%s requires the previous watchpoint slot to be configured",
+                aliases[slot - 1U]);
+        }
+        esp_err_t e = parse_watch_object(watch, slot, aliases[slot - 1U], cfg,
+                                         err, err_len);
+
+        if (e != ESP_OK) {
+            return e;
+        }
+        cfg->watch_count = (uint8_t)(slot + 1U);
+    }
+    return ESP_OK;
+}
+
 esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
                              char *err, size_t err_len)
 {
@@ -794,22 +986,48 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         }
     }
 
+    /* P1-12: DWT watchpoints are only meaningful for trigger="watchpoint";
+     * reject the keys early so they are never silently ignored (this keeps the
+     * old `watch2` behavior for non-watchpoint requests). */
+    if (cfg->trigger != (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
+        static const char *watch_keys[] = {"watch2", "watch3", "watch4",
+                                           "watchpoints"};
+
+        for (size_t wi = 0U; wi < sizeof(watch_keys) / sizeof(watch_keys[0]);
+             wi++) {
+            if (cJSON_GetObjectItemCaseSensitive(root, watch_keys[wi]) != NULL) {
+                result = curve_parse_fail(err, err_len,
+                                          "%s requires trigger=\"watchpoint\"",
+                                          watch_keys[wi]);
+                goto out;
+            }
+        }
+    }
+
     item = cJSON_GetObjectItemCaseSensitive(root, "interval_us");
     if (cfg->trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT) {
-        const cJSON *watch_item =
-            cJSON_GetObjectItemCaseSensitive(root, "watch_address");
-        const cJSON *size_item =
-            cJSON_GetObjectItemCaseSensitive(root, "watch_size");
-        const cJSON *access_item =
-            cJSON_GetObjectItemCaseSensitive(root, "watch_access");
+        const cJSON *watchpoints_item =
+            cJSON_GetObjectItemCaseSensitive(root, "watchpoints");
+        const cJSON *watch_item = NULL;
+        const cJSON *size_item = NULL;
+        const cJSON *access_item = NULL;
         uint32_t watch_address = 0U;
         uint32_t watch_size = CURVE_WATCH_DEFAULT_SIZE;
 
-        if (!json_u32(watch_item, 0.0, 4294967295.0, &watch_address)) {
+        /* Canonical array form supplies every slot (including slot 0); the
+         * legacy root watch_address/watch_size/watch_access form is only used
+         * when the array is absent. */
+        if (watchpoints_item == NULL) {
+            watch_item = cJSON_GetObjectItemCaseSensitive(root, "watch_address");
+            size_item = cJSON_GetObjectItemCaseSensitive(root, "watch_size");
+            access_item = cJSON_GetObjectItemCaseSensitive(root, "watch_access");
+        }
+        if (watchpoints_item == NULL &&
+            !json_u32(watch_item, 0.0, 4294967295.0, &watch_address)) {
             result = curve_parse_fail(err, err_len, "bad watchpoint address");
             goto out;
         }
-        if (size_item != NULL) {
+        if (watchpoints_item == NULL && size_item != NULL) {
             if (!json_u32(size_item, 1.0, 4.0, &watch_size) ||
                 (watch_size != CURVE_WATCH_SIZE_1 &&
                  watch_size != CURVE_WATCH_SIZE_2 &&
@@ -819,25 +1037,45 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
                 goto out;
             }
         }
-        if (!curve_watchpoint_params_ok(watch_address, (uint8_t)watch_size)) {
+        if (watchpoints_item == NULL &&
+            !curve_watchpoint_params_ok(watch_address, (uint8_t)watch_size)) {
             result = curve_parse_fail(err, err_len, "bad watchpoint address");
             goto out;
         }
         cfg->watch_address = watch_address;
         cfg->watch_size = (uint8_t)watch_size;
         cfg->watch_access = (uint8_t)CURVE_WATCH_ACCESS_WRITE;
-        if (access_item != NULL) {
+        if (watchpoints_item == NULL && access_item != NULL) {
             if (!cJSON_IsString(access_item) || access_item->valuestring == NULL ||
                 (strcmp(access_item->valuestring, "write") != 0 &&
+                 strcmp(access_item->valuestring, "read") != 0 &&
                  strcmp(access_item->valuestring, "readwrite") != 0)) {
                 result = curve_parse_fail(err, err_len,
-                                          "watch_access must be \"write\" "
-                                          "or \"readwrite\"");
+                                          "watch_access must be \"write\", "
+                                          "\"read\" or \"readwrite\"");
                 goto out;
             }
-            cfg->watch_access = (strcmp(access_item->valuestring, "readwrite") == 0)
-                                    ? (uint8_t)CURVE_WATCH_ACCESS_RW
-                                    : (uint8_t)CURVE_WATCH_ACCESS_WRITE;
+            if (strcmp(access_item->valuestring, "readwrite") == 0) {
+                cfg->watch_access = (uint8_t)CURVE_WATCH_ACCESS_RW;
+            } else if (strcmp(access_item->valuestring, "read") == 0) {
+                cfg->watch_access = (uint8_t)CURVE_WATCH_ACCESS_READ;
+            } else {
+                cfg->watch_access = (uint8_t)CURVE_WATCH_ACCESS_WRITE;
+            }
+        }
+        /* Canonical slot 0 mirrors the legacy root fields (array form fills
+         * all slots itself); then watch2/watch3/watch4 aliases (P1-12). */
+        if (watchpoints_item == NULL) {
+            cfg->watch_addr[0] = cfg->watch_address;
+            cfg->watch_sz[0] = cfg->watch_size;
+            cfg->watch_acc[0] = cfg->watch_access;
+            cfg->watch_count = 1U;
+        } else {
+            cfg->watch_count = 0U;
+        }
+        result = parse_watchpoints(root, cfg, err, err_len);
+        if (result != ESP_OK) {
+            goto out;
         }
         /* interval_us is the throttle floor; optional, 5 ms..1 s. */
         if (item == NULL) {
@@ -885,6 +1123,47 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
             goto out;
         }
         cfg->interval_us = interval_us;
+    }
+
+    /* P1.8.2 function snapshot: optional one-shot breakpoint capture.  Field
+     * presence switches the session to one-shot mode; absent keeps the
+     * continuous breakpoint behavior exactly as before. */
+    item = cJSON_GetObjectItemCaseSensitive(root, "snapshot_after");
+    if (item != NULL) {
+        uint32_t after = 0U;
+
+        if (!json_u32(item, 0.0, (double)CURVE_SNAPSHOT_MAX_AFTER, &after)) {
+            result = curve_parse_fail(err, err_len,
+                                      "snapshot_after must be 0..%u",
+                                      (unsigned)CURVE_SNAPSHOT_MAX_AFTER);
+            goto out;
+        }
+        if (cfg->trigger != (uint8_t)CURVE_TRIGGER_BREAKPOINT) {
+            result = curve_parse_fail(err, err_len,
+                                      "snapshot_after requires "
+                                      "trigger=\"breakpoint\"");
+            goto out;
+        }
+        cfg->snapshot_enabled = true;
+        cfg->snapshot_after = (uint8_t)after;
+    }
+
+    /* P1.8.2 prototype: frame-pointer backtrace at trigger hits. */
+    item = cJSON_GetObjectItemCaseSensitive(root, "backtrace");
+    if (item != NULL) {
+        if (!cJSON_IsBool(item)) {
+            result = curve_parse_fail(err, err_len,
+                                      "backtrace must be a boolean");
+            goto out;
+        }
+        cfg->backtrace = cJSON_IsTrue(item) ? true : false;
+        if (cfg->backtrace &&
+            cfg->trigger == (uint8_t)CURVE_TRIGGER_PERIODIC) {
+            result = curve_parse_fail(err, err_len,
+                                      "backtrace requires trigger=\"breakpoint\" "
+                                      "or \"watchpoint\"");
+            goto out;
+        }
     }
 
     item = cJSON_GetObjectItemCaseSensitive(root, "halt");
@@ -987,6 +1266,16 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         cfg->group_count = 1U;
     }
 
+    result = curve_config_finalize(cfg, err, err_len);
+out:
+    cJSON_Delete(root);
+    return result;
+}
+
+esp_err_t curve_config_finalize(curve_config_t *cfg, char *err, size_t err_len)
+{
+    esp_err_t result = ESP_OK;
+
     /* Weighted round-robin schedule: group index repeated `weight` times.
      * All weights default to 1, which reproduces the legacy equal rotation. */
     cfg->schedule_len = 0U;
@@ -1001,7 +1290,14 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
         }
     }
 
-    cfg->sample_bytes = max_sample_bytes;
+    /* The group parsers filled groups[].sample_bytes; the config-wide payload
+     * is the largest group payload (CVF2 frame_bytes). */
+    cfg->sample_bytes = 0U;
+    for (uint8_t g = 0U; g < cfg->group_count; g++) {
+        if (cfg->groups[g].sample_bytes > cfg->sample_bytes) {
+            cfg->sample_bytes = cfg->groups[g].sample_bytes;
+        }
+    }
     cfg->needs_regs = false;
     cfg->pc_gate_count = 0U;
     for (uint8_t g = 0U; g < cfg->group_count; g++) {
@@ -1038,17 +1334,13 @@ esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
      * mode always samples on a halted core. */
     if (cfg->trigger == (uint8_t)CURVE_TRIGGER_PERIODIC && !cfg->halt &&
         cfg->needs_regs) {
-        result = curve_parse_fail(err, err_len,
-                                  "halt=false cannot sample reg/cfa expressions");
-        goto out;
+        return curve_parse_fail(err, err_len,
+                                "halt=false cannot sample reg/cfa expressions");
     }
     if (cfg->variant_used > 0U &&
         cfg->trigger == (uint8_t)CURVE_TRIGGER_PERIODIC && !cfg->halt) {
-        result = curve_parse_fail(err, err_len, "variants require halt=true");
-        goto out;
+        return curve_parse_fail(err, err_len, "variants require halt=true");
     }
 
-out:
-    cJSON_Delete(root);
     return result;
 }

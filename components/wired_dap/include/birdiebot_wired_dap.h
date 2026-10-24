@@ -1,9 +1,10 @@
 /**
  * @file birdiebot_wired_dap.h
- * @brief C1 wired-DAP API: USB-NCM MVP (independent build variant, default OFF).
+ * @brief C1 wired-DAP API: USB-NCM (default ON for unified ESP32-S3 images).
  *
- * STATUS: MVP implementation for the wired build variant
- *         (CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y), default NONE.
+ * STATUS: default ESP32-S3 unified firmware enables
+ *         CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y together with Wi-Fi; other
+ *         targets keep NONE.
  *
  * Design and effort/risk analysis: docs/wired-dap-plan.md.
  * Build / flash / host test steps: docs/wired-dap-mvp.md.
@@ -75,6 +76,16 @@ void birdiebot_wired_dap_deinit(void);
 
 /** @brief Device IPv4 address used by the USB-NCM netif (for logs/tests). */
 const char *birdiebot_wired_dap_device_ip(void);
+
+/** @brief True when the USB-NCM transport is initialized (read-only). */
+bool birdiebot_wired_dap_ncm_active(void);
+
+/** @brief True when the NCM DHCP server started successfully (read-only). */
+bool birdiebot_wired_dap_dhcp_active(void);
+
+/** Last esp_netif_dhcps_start() error code and DHCP status enum (diagnostics). */
+int birdiebot_wired_dap_dhcp_error(void);
+int birdiebot_wired_dap_dhcp_state(void);
 
 #ifdef __cplusplus
 }

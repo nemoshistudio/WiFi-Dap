@@ -424,6 +424,18 @@ esp_err_t tf_swd_read_reg(uint8_t reg, uint32_t *value)
     return ESP_ERR_TIMEOUT;
 }
 
+static uint32_t s_forced_clock_hz = 0U;
+
+void tf_swd_set_forced_clock(uint32_t clock_hz)
+{
+    s_forced_clock_hz = clock_hz;
+}
+
+uint32_t tf_swd_get_forced_clock(void)
+{
+    return s_forced_clock_hz;
+}
+
 esp_err_t tf_swd_link_init(uint32_t clock_hz, uint32_t *dpidr)
 {
     static const uint8_t line_reset[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};

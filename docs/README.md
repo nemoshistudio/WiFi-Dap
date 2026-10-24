@@ -57,6 +57,7 @@
 | [hardware-test-wifi.md](hardware-test-wifi.md) | 硬件验收清单 | Wi-Fi 多凭据记忆/AP SSID：T0 默认 AP、T1–T5 cmd 11–14、轮换与持久化、错误码；含只读自动脚本说明 | ✅ 已入库（wifi-dev） |
 | [host-test-report.md](host-test-report.md) | host 测试报告 | Wave 3 / WP-302 纯逻辑与契约测试：C 125 checks + Python 60 tests（ASan/UBSan），2 个 suite 全部 PASS；含 F1/F2 findings 与覆盖缺口 | ✅ 已入库（QA） |
 | [dap-boundary-host-tests.md](dap-boundary-host-tests.md) | host 测试选题（只读走查） | DAP ↔ 传输层边界契约速查与 host 可测候选（HT-01…），供 QA 选题与后续测试扩展 | ✅ 已入库（Wave 3） |
+| [hil-gate.md](hil-gate.md) | HIL 门禁/性能验证 | P0 真机回归 + 性能门禁：`GET /api/target/status` 诊断字段（heap/DAP 会话/SWD 时钟/last_error）、设备本地采样 1/5 系列、有效帧率/丢帧/invalid/heap 阈值、页面 smoke、CI 用法与实测 baseline | ✅ 已入库（2026-10-24） |
 | [scripts/e2e_ws_client.py](../scripts/e2e_ws_client.py) | 自动化脚本 | 纯标准库 WS 客户端：`ping` / `wifi-scan` / `uart-echo` / `dataflow-list` / `ota-info` / `json`，供上面的清单直接引用 | ✅ 已入库 |
 | [scripts/ota_upload.py](../scripts/ota_upload.py) | 自动化脚本 | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 模块 5 `GET_INFO` 轮询，支持 `--token`/错误注入 | ✅ 已入库 |
 | [merge-and-verification-2026-10-21.md](merge-and-verification-2026-10-21.md) | 合并 + 全量验证报告 | 本次全量合并清单（含 C1）、构建矩阵、host 测试、真机 WiFi/USB-NCM/USBIP/DAP profiling 验证数据与回滚方式 | ✅ 已入库（2026-10-21） |

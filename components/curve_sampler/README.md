@@ -1,4 +1,4 @@
-# WiFi Dap - curve page device-local sampler (Phase 0/1/2/2.5 + object watch/watchpoint/condition trigger, protocol v2)
+# WiFi Dap - curve page device-local sampler (Phase 0/1/2/2.5 + object watch/watchpoint/condition trigger + read/2nd comparator/snapshot/trace, protocol v2)
 
 Firmware half of `docs/curve-local-sampler.md`: the Web curve page sends its
 `AddressExpr` series configuration over HTTP, this component samples the STM32
@@ -14,10 +14,14 @@ All endpoints pass the normal `web_host_guard` browser safety policy.
 | Method | URI | Notes |
 | --- | --- | --- |
 | POST | `/api/curve/selftest` | Phase 0 diagnostic, optional `{}` body |
-| POST | `/api/curve/start` | JSON body <= 16384 B, 1..8 groups x 1..64 series (<=256 total; typical use: tens) |
+| POST | `/api/curve/start` | JSON body <= 6144 B (unified NCM+WiFi heap headroom; typical use tens of series), 1..8 groups x 1..64 series (<=256 total) |
 | POST | `/api/curve/stop` | idempotent, optional body |
 | GET | `/api/curve/status` | sampler status JSON |
 | GET | `/api/curve/frames?since=&max=` | binary CVF2, `application/octet-stream` |
+| POST | `/api/curve/trace/start` | P1.8.3 prototype: subscribe to the target UART (existing uart_service link) |
+| POST | `/api/curve/trace/stop` | stop the trace capture (UART stays owned by uart_service) |
+| GET | `/api/curve/trace?since=<byte seq>` | raw target-UART bytes, `application/octet-stream`; 204 = nothing new |
+| GET | `/api/curve/backtrace` | P1.8.2 prototype: frame-pointer backtrace of the last trigger hit |
 | GET | `/ws/curve` | WebSocket push subscription (CVF2 batches, P1.11) |
 
 `POST /api/curve/start` body (schema identical to the Web `AddressExpr`):
@@ -59,13 +63,24 @@ P1.8 conditional trigger can be combined with any trigger mode:
  "series":[{"id":0,"size":4,"expr":{"kind":"addr","address":536870916}}]}
 ```
 
-P1.8/P1.9 DWT data watchpoint trigger (core halts itself on a variable write or
-read+write):
+P1.8/P1.9 DWT data watchpoint trigger (core halts itself on a variable read,
+write or read+write; P1.8.1 adds the optional second comparator):
 
 ```json
 {"trigger":"watchpoint","watch_address":536870912,"watch_size":4,
  "watch_access":"write","interval_us":20000,
  "series":[{"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}}]}
+```
+
+P1.8.1 read watchpoint + second comparator (same session, independent address/
+size/access; requires a target with >= 2 DWT comparators):
+
+```json
+{"trigger":"watchpoint","watch_address":536870912,"watch_size":4,
+ "watch_access":"read",
+ "watch2":{"address":603979776,"size":2,"access":"readwrite"},
+ "interval_us":20000,
+ "series":[{"id":0,"size":4,"expr":{"kind":"addr","address":536870916}}]}
 ```
 
 Limits enforced by the parser (`src/curve_json.c`): `trigger` is `periodic`
@@ -86,9 +101,19 @@ window), `size` (1/2/4, default 4), `op` (`eq`/`ne`/`lt`/`le`/`gt`/`ge`, also
 false), `mode` (`once` default or `continuous`) and `stop_after` (bool, default
 false).  Invalid objects/fields return HTTP 400.  For `trigger=watchpoint`: `watch_address` (required, must be
 naturally aligned to the size and inside an allowed target memory window),
-`watch_size` (1/2/4, default 4) and `watch_access` (`"write"` default or
-`"readwrite"`) select the DWT comparator; `halt` is ignored because the DWT hit
-already halted the core.  `breakpoint_address` must be a Thumb instruction address in target flash
+`watch_size` (1/2/4, default 4) and `watch_access` (`"write"` default,
+`"read"` or `"readwrite"`) select the DWT comparator; `halt` is ignored because
+the DWT hit already halted the core.  Optional `watch2` object
+(`{"address":u32,"size":1/2/4,"access":"write"|"read"|"readwrite"}`, address
+required) requests a second DWT comparator; malformed/duplicate objects are
+rejected with HTTP 400 at parse time, while a target that reports fewer than
+two comparators (or has them busy) is reported by `POST /start` with a clear
+`err` message (the capability is only known after the SWD bring-up).  For `trigger=breakpoint`, the optional
+`snapshot_after` field (0..32, see "P1.8.2 function snapshot") switches to a
+one-shot pre/trigger/post capture; without it the continuous behavior is
+unchanged.  `backtrace:true` (bool, breakpoint/watchpoint only) enables the
+P1.8.2 frame-pointer backtrace prototype.  `breakpoint_address` must be a Thumb
+instruction address in target flash
 (0x08000000..0x08FFFFFF, bit0 ignored); anything else returns HTTP 400
 `{"ok":false,"err":"bad breakpoint address"}`.
 
@@ -109,7 +134,8 @@ layout are unchanged; decoders **must** drive the frame layout from
 in halt/breakpoint/watchpoint mode (default `true`).
 
 `flags.bit2 = TRIGGERED` marks a batch that contains at least one trigger-event
-frame (DWT watchpoint trigger); the exact sequence number is
+frame (DWT watchpoint trigger, or the trigger frame of a P1.8.2 one-shot
+function snapshot); the exact sequence number is
 `status.trigger_seq`.  `flags.bit3 = CONDITION` marks a batch that contains at
 least one frame whose `trigger_condition` matched; the exact seq is
 `status.condition_trigger_seq`.  The wire format has no per-frame marker bit, so
@@ -139,18 +165,28 @@ frame, so the batch starts at the oldest retained frame.
 
 `GET /api/curve/status` also exposes the diagnostics `ring_frames` (capacity)
 and `served_seq` (highest seq handed to a client in this session), plus the
-Phase 2 fields `trigger` (`"periodic"`/`"breakpoint"`), `breakpoint_address`,
-`hits`, `sampled`, `throttled`, the Phase 2.5 field `out_of_scope` (number of
+Phase 2 fields `trigger` (`"periodic"`/`"breakpoint"`/`"watchpoint"`),
+`breakpoint_address`, `hits`, `sampled`, `throttled`, the Phase 2.5 field
+`out_of_scope` (number of
 PC-gated/variant series values skipped because the halted core's PC did not
 match), the protocol v2 fields `group_count`/`current_group`, the CVF2 PC
 fields `pc_available` (bool) / `last_pc` (last captured PC, Thumb bit0 cleared),
 the DWT watchpoint fields `watchpoint_armed`, `watchpoint_address`,
-`watchpoint_hits`, `trigger_seq` (seq of the last trigger-event frame), and the
+`watchpoint_hits`, `trigger_seq` (seq of the last trigger-event frame), the
+P1.8.1 fields `watch_count` (1/2 configured; actual arming in
+`watchpoint_armed`/`watchpoint2_armed`), `watchpoint2_armed`,
+`watchpoint2_address`, `watchpoint2_hits` and `last_watch_index` (1/2, 0=none),
+the P1.8.2 snapshot fields `snapshot_state`, `snapshot_after`,
+`snapshot_trigger_seq`, `snapshot_pre_frames`, `snapshot_post_frames` and the
+backtrace summary `backtrace_valid`/`backtrace_count`, the P1.8.3 trace fields
+`trace_active`/`trace_bytes`/`trace_dropped`, and the
 condition fields `condition_armed` (still evaluating), `condition_met`
 (latched), `condition_hits` and `condition_trigger_seq` (seq of the last
 condition-match frame).  The start
-response adds `group_count`, `series_count` (total) and `sample_bytes` (max
-group payload).
+response adds `group_count`, `series_count` (total), `sample_bytes` (max
+group payload), `watch_count`, `watchpoint2_address`/`watchpoint2_size`/
+`watchpoint2_access`, `snapshot_state`/`snapshot_after` (effective, clamped to
+the ring capacity) and `backtrace`.
 
 ### curl examples
 
@@ -366,33 +402,39 @@ Limits/notes:
   frames in the ring; clients can still fetch them via HTTP/WS until the next
   start.
 
-## P1.8/P1.9: DWT data watchpoint trigger
+## P1.8/P1.9/P1.8.1: DWT data watchpoint trigger (1..2 comparators)
 
 `trigger=watchpoint` turns the session into a data-access-driven sampler using
-Cortex-M7 DWT comparator 0:
+the target's DWT comparators:
 
 1. Bring-up + DAP hand-off are the same as the other trigger modes; the target
    is first resumed if it was halted.
-2. The sampler verifies DWT availability (`DWT_CTRL.NUMCOMP > 0`), requires
-   `DWT_FUNCTION0 == 0` (free comparator) and saves `DEMCR`, `DWT_COMP0`,
-   `DWT_MASK0`, `DWT_FUNCTION0`.  It then sets `DEMCR.TRCENA` and programs
-   `DWT_COMP0 = watch_address`, `DWT_MASK0 = log2(watch_size)`,
-   `DWT_FUNCTION0 = 6` (write) or `7` (read+write).  Comparator 1..n and the FPB
-   are not touched.
+2. The sampler reads `DWT_CTRL.NUMCOMP` and the `DWT_FUNCTIONn` values, then
+   allocates the first free comparators (primary watchpoint prefers comparator
+   0, preserving the old single-watch behavior; the optional `watch2` wants a
+   second one).  It saves `DEMCR`, `DWT_COMPn`, `DWT_MASKn`, `DWT_FUNCTIONn`
+   for every comparator it allocated only, sets `DEMCR.TRCENA` and programs
+   `COMPn = watch_address`, `MASKn = log2(watch_size)`, `FUNCTIONn = 5`
+   (read), `6` (write) or `7` (read+write).  Other comparators and the FPB are
+   not touched; a partially failed setup is restored before `start` fails.
 3. The worker polls `DHCSR.S_HALT` every ~1 ms on the local SWD link (esp_timer
-   one-shot + task notification; httpd is never involved).  On halt it verifies
-   `DWT_FUNCTION0.MATCHED` (bit24) so unrelated halts are not recorded as
-   watchpoint events.
+   one-shot + task notification; httpd is never involved).  On halt it reads the
+   allocated comparators' `FUNCTIONn` and checks the `MATCHED` bits (bit24) so
+   unrelated halts are not recorded as watchpoint events; the hit is attributed
+   to watchpoint slot 1/2 (`last_watch_index`, per-comparator
+   `watchpoint_hits`/`watchpoint2_hits`).
 4. On a real hit the frame is sampled exactly like the breakpoint path (PC
    capture, PC gate/variants, group rotation, CVF2 record with the trigger
-   marker), then the comparator is disabled (`DWT_FUNCTION0 = 0`), the core is
-   resumed (verified via `DHCSR.S_HALT` clear), the `interval_us` throttle is
-   waited and the comparator is re-armed at the top of the loop.
-5. `stop`/error restores `DWT_FUNCTION0/COMP0/MASK0` and `DEMCR`, makes sure the
-   core runs and releases the DAP.  `watchpoint_hits` counts triggers and
-   `trigger_seq` is the CVF2 seq of the last triggered frame, so the Web client
-   can fetch the pre/post-trigger window from the ring (the ring always keeps
-   the most recent frames).
+   marker), then all allocated comparators are disabled
+   (`DWT_FUNCTIONn = 0`), the core is resumed (verified via `DHCSR.S_HALT`
+   clear), the `interval_us` throttle is waited and the comparators are
+   re-armed at the top of the loop.
+5. `stop`/error restores `DWT_FUNCTIONn/COMPn/MASKn` for the allocated
+   comparators and `DEMCR`, makes sure the core runs and releases the DAP.
+   `watchpoint_hits` counts all triggers, `watchpoint2_hits` those on the second
+   watchpoint, and `trigger_seq` is the CVF2 seq of the last triggered frame, so
+   the Web client can fetch the pre/post-trigger window from the ring (the ring
+   always keeps the most recent frames).
 
 Watchpoint limitations / risks:
 
@@ -401,18 +443,137 @@ Watchpoint limitations / risks:
   `watch_size`.  Flash watchpoints would never match writes.
 * `DEMCR.TRCENA` is shared with ITM/trace: the original `DEMCR` is restored on
   stop, but another debugger owning DWT/ITM at the same time is a resource
-  conflict (comparator 0 busy is rejected with a clear start error).
+  conflict (not enough free comparators is rejected with a clear start error;
+  the request never silently overwrites somebody else's comparator).
+* The second comparator needs a target with `NUMCOMP >= 2` (Cortex-M7 up to 4;
+  most Cortex-M3/M4 also implement 4).  On a single-comparator target `start`
+  with `watch2` fails with `ESP_ERR_NOT_SUPPORTED` and a message containing the
+  observed `DWT_CTRL`.
 * DWT data watchpoints halt the core on *every* matching access until the
   comparator is disarmed; the throttle (`interval_us`, 5..1000 ms) controls how
   often the target is allowed to stop again.
-* A sticky/unexpected halt that is not our comparator is resumed and counted;
-  5 consecutive unexpected halts / SWD errors stop the session and restore DWT.
+* Read watchpoints (`"read"`, DWT_FUNCTION=5) trigger on loads, including the
+  sampler's own AHB-AP reads?  No: AHB-AP debug reads are not core loads, so
+  the sampler's own reads of the watched address do not retrigger; only target
+  code loads/stores do.
+* A sticky/unexpected halt that is not one of our comparators is resumed and
+  counted; 5 consecutive unexpected halts / SWD errors stop the session and
+  restore DWT.
 * Conditional (`trigger_condition`) evaluation is implemented on top of every
   trigger mode (see "P1.8: conditional trigger" above); the DWT address/access
   match is still what makes a watchpoint tick happen, the condition is an
   additional per-tick address comparison.
-* `watch_access:"read"` is not exposed (contract only lists write/readwrite);
-  the DWT read-only encoding 5 is unused.
+* When both watchpoints match the same halted instruction (e.g. a load/store
+  pair touching both), the hit is attributed to watchpoint 1 and both counters
+  are incremented; the CVF2 frame carries the triggers marker as usual.
+
+## P1.8.2: function snapshot (one-shot pre/trigger/post capture)
+
+Optional, breakpoint-only, and **opt-in**: a start request without
+`snapshot_after` keeps the continuous breakpoint behavior above unchanged
+(frames are not marked as trigger events, no self-stop).
+
+```json
+{"trigger":"breakpoint","breakpoint_address":134356037,"interval_us":20000,
+ "snapshot_after":8,
+ "backtrace":true,
+ "series":[{"id":0,"size":4,"expr":{"kind":"reg","reg":13,"offset":244}}]}
+```
+
+- `snapshot_after` (0..32) presence switches the session to one-shot mode:
+  1. the first FPB hit records the trigger frame (`CVF2 flags.bit2` set,
+     `status.trigger_seq` = its seq) and latches `snapshot_trigger_seq` +
+     `snapshot_pre_frames` (retained ring frames before the trigger);
+  2. the FPB is disarmed, the core resumed, and up to `snapshot_after`
+     post-trigger frames are captured with periodic `halt -> sample -> resume`
+     ticks at `interval_us` (`snapshot_post_frames` counts them);
+  3. the session then stops itself: `running=false`, `snapshot_state` becomes
+     `"complete"` and `message` reads
+     `stopped: function snapshot complete (trigger seq=..., post=...)`.
+     `stop`/error before that point ends with `snapshot_state="aborted"`.
+- The ring (8 KiB budget) is the only frame storage: pre-history + trigger + post
+  frames stay readable with `GET /api/curve/frames` after the session stopped
+  (until the next `start`).  The self-stop does **not** release the ring and
+  `POST /api/curve/stop` is not required afterwards (it is an idempotent no-op
+  once the session stopped and does not clear the ring); only the next
+  `POST /api/curve/start` releases the old ring before parsing.  The Web must
+  finish fetching the pre/trigger/post frames before starting the next session.
+  `snapshot_after` is clamped at start so
+  the trigger + post frames fit the actual ring capacity (the effective value is
+  reported in `status.snapshot_after`; `ring_frames` shows the capacity).
+- Status: `snapshot_state` (`"off"`/`"armed"`/`"capturing"`/`"complete"`/
+  `"aborted"`), `snapshot_after`, `snapshot_trigger_seq`, `snapshot_pre_frames`,
+  `snapshot_post_frames`.  Suggested Web fetch: start at
+  `since = max(1, snapshot_trigger_seq - snapshot_pre_frames)`, `max=64`,
+  repeat until `seq > trigger + snapshot_after`; `flags.bit2` still marks the
+  trigger frame.
+- The default breakpoint path is untouched: no extra samples, no extra SWD
+  reads, no CVF2 marker change unless `snapshot_after` is present.
+- `backtrace:true` (breakpoint or watchpoint) additionally captures the
+  frame-pointer backtrace of each trigger hit; see P1.8.2b below.
+- Snapshot captures the *first* hit only; there is no rolling "latest N
+  snapshots" buffer (one session = one snapshot).
+
+## P1.8.2b: backtrace prototype (frame-pointer unwind)
+
+`GET /api/curve/backtrace` returns the backtrace captured at the last
+breakpoint/watchpoint trigger hit (opt-in via `"backtrace":true` in the start
+request; the engine reads r7 and follows `[fp] = previous fp`,
+`[fp+4] = return address` through the AHB-AP, up to 8 PCs):
+
+```json
+{"ok":true,"valid":true,"count":4,"truncated":false,
+ "pcs":["0x08029A44","0x08029244","0x0801F310","0x08008A02"]}
+```
+
+Boundaries — this is a **prototype**, not a debugger-quality unwinder:
+
+* Requires frame pointers: build the target with `-O0` or
+  `-fno-omit-frame-pointer`; optimized code that reuses r7 produces a short or
+  empty chain (reported as `valid:false`/small `count`), never a fabricated
+  deep stack.
+* No `.debug_frame`/`.eh_frame` CFI, no inline-frame expansion, no DWARF, no
+  exception/interrupt-stack awareness; only the interrupted context is unwalked.
+* Only the last trigger hit is kept (8 PCs max, `truncated` when the chain
+  continues); the capture costs a few SWD word reads while the core is halted.
+* Return addresses must be Thumb (bit0 set) flash addresses and frame pointers
+  must be 4-byte aligned, strictly ascending and in an allowed memory window;
+  anything else ends the walk (protects against garbage chains).
+* The endpoint is read-only and does not change sampling/CVF2 semantics.
+
+## P1.8.3: debug-trace evaluation (SWO/UART/RTOS)
+
+This task evaluated the three requested debug capabilities; only the feasible
+ones are implemented, and the boundaries are explicit:
+
+* **target-UART trace (prototype, implemented)**: the board's existing target
+  UART link (`components/uart_service`, shared with the Web UART page and TCP
+  1346 bridge) is tapped as an RX subscriber and 2 KiB of the most recent
+  target output are served to the Web:
+  - `POST /api/curve/trace/start` -> `{"ok":true,"active":true,"ring_bytes":2048}`
+  - `POST /api/curve/trace/stop` -> `{"ok":true,"active":false}`
+  - `GET /api/curve/trace?since=<byte seq>` -> `application/octet-stream` raw
+    bytes; response headers `X-Curve-Trace-Seq` (use as the next `since`),
+    `X-Curve-Trace-Active`, `X-Curve-Trace-Gap` (since was evicted),
+    `X-Curve-Trace-Total`, `X-Curve-Trace-Dropped`; HTTP 204 = nothing new.
+    The Web UART module still owns baud/line settings and the other RX
+    consumers keep working; this component never reconfigures the UART.
+  - Boundaries: text/bytes only (no line framing or per-byte target
+    timestamps), 2 KiB history (~0.17 s at 115200 baud), shared UART bandwidth,
+    and the normal Web UART/TCP bridge consumers see the same bytes.
+* **SWO/ITM trace (not implemented, not feasible here)**: local SWO would need
+  the target SWO pin wired to the ESP32 and a Manchester/UART receive path
+  (`SWO_FUNCTION_ENABLE=0` in `components/DAP/DAP_config.h`, no SWO pin in the
+  board contract), and the ESP32-side local sampler only owns SWD.  The USBIP
+  SWO endpoint serves the PC debugger, not this local sampler.  No fake SWO.
+* **RTOS task awareness (evaluated only, not implemented)**: there is no ELF
+  symbol/type information inside the firmware, so it cannot resolve
+  `pxCurrentTCB`/TCB offsets by itself.  A viable follow-up is to let the Web
+  (which has the ELF + DWARF) send `{current_tcb_address, name_offset,
+  stack_offset, priority_offset}` in the start request; the firmware could then
+  read the current TCB at each halt and report the task name/stack range in the
+  status/frames.  Not implemented in this task - it needs Web-side symbol
+  plumbing and real-target validation.
 
 ## P1.11: WebSocket CVF2 frame push (`/ws/curve`)
 
@@ -509,11 +670,12 @@ fully functional (it is not disabled by a WS subscription).
 
 ## Tests / build
 
-* ESP-IDF v5.2.1 Docker build (`scripts/build_all.sh -t esp32s3`) - see the
-  task report for the exact command, binary size and remaining unverified
-  items (real-target timing needs the device).
-* `src/curve_json.c` + `src/curve_expr.c` + `src/curve_ring.c` were additionally
-  regression-tested on the host (`test/host/run.sh`, no hardware needed):
+* ESP-IDF v5.2.1 Docker build (`scripts/build_all.sh`) - all three targets
+  (esp32s3/esp32c3/esp32) green; real-target timing still needs the device.
+* `test/host/run.sh` (no hardware, cJSON from the IDF image) currently reports
+  **4299 checks**, covering `curve_json.c`/`curve_expr.c`/`curve_ring.c`/
+  `curve_status.c`/`curve_cvf2.c`/`curve_ws_core.c` plus the P1.8 pure modules
+  `curve_backtrace.c` and `curve_trace_core.c`:
   contract example, all limits, depth 8/9, address window boundaries,
   `addr`/`reg`/`cfa`/`add`/`deref` evaluation, pointer-read filtering, ring
   capacity clamp and the `overwritten`/`gap` semantics (prompt consumer ->
@@ -528,6 +690,13 @@ fully functional (it is not disabled by a WS subscription).
   8x64=512 series, variant selection + normalisation, variant/expression pool
   caps, CVF2 header/frame byte layout, group round-robin wrap, legacy
   single-group compatibility and the static config-size budget).
+  P1.8.1 adds DWT function/mask/allocator/hit-mask tables, `read` access,
+  `watch2` parsing (valid/defaults/duplicate/bad-trigger/error texts);
+  P1.8.2 adds `snapshot_after` + `backtrace` parsing, the frame-pointer
+  unwinder (valid chain, corrupted/looping/out-of-flash chain, frame-limit
+  truncation) and the new status JSON fields (worst case fits
+  `CURVE_STATUS_JSON_MAX`); P1.8.3 adds the trace-ring plan/wrap/gap/eviction
+  semantics.
 
 ## Known limitations / behaviour to be aware of
 
@@ -563,14 +732,53 @@ fully functional (it is not disabled by a WS subscription).
   text frames <= 256 B; the endpoint is limited to 4 concurrent sockets.
 * DWT watchpoint triggers sample the halted frame *after* the watched access;
   the pre-trigger frames are whatever the ring already holds (poll promptly to
-  keep the window useful).  Conditional expressions are not implemented yet.
-* Group weights are a backend-only scheduling feature for now; the Web UI does
-  not send `weight` and always gets equal round-robin.  A weight only changes
-  how often a group is sampled, not its refresh timestamp cadence per group.
+  keep the window useful).  For breakpoints use the P1.8.2 one-shot
+  `snapshot_after` capture to freeze a deterministic pre/trigger/post window.
+* Per-variable refresh rate is a Web-side grouping concern; the firmware
+  scheduling primitive is the group `weight` (1..8).  With `L = sum(weights)`
+  and tick period `interval_us`, group g is sampled at
+  `weight_g / (L * interval_us)`; e.g. 50/25/12.5 Hz -> weights 4/2/1 with
+  `interval_us ~= 11429`.  No per-group `divisor` field was added: it would not
+  express more rates than weights, and it would add scheduling complexity for
+  +1 byte per group (the protocol change itself is cheap).  See
+  docs/curve-local-sampler.md §13 for the evaluation.
+* P1.8.2 snapshot: one session captures exactly one snapshot (first hit); ring
+  pre-history is bounded by the 8 KiB ring and the effective `snapshot_after`
+  is clamped to the ring capacity.  The session stops itself, so a Web client
+  that wants a second snapshot must call `start` again (which resets `seq`).
+* P1.8.2 backtrace: prototype - frame pointers required (-O0 /
+  -fno-omit-frame-pointer), no CFI/DWARF/inline/interrupt awareness, last
+  trigger hit only, 8 PCs; not a replacement for a real debugger backtrace.
+* P1.8.3 trace: only the target-UART link is captured (no SWO); the raw
+  endpoint keeps a 2 KiB byte history, shared with the Web UART/TCP 1346
+  consumers.  P1-13 adds a line-buffered view
+  (`GET /api/curve/trace/lines`): 32 lines with ESP32 receive timestamps
+  (esp_timer, not target time), '\n' line boundaries and an optional substring
+  trigger (`POST /api/curve/trace/start` body).  RTOS task awareness is
+  evaluated only (needs ELF/TCB symbol plumbing from Web) and is not
+  implemented.
+* P0-3 exact per-series rate: series `sample_every` (1..64) samples every Nth
+  tick of its group; skipped ticks are zero and flagged in the CVF2
+  `SERIES_MASK` (flags bit4) footer after the frame records (backward
+  compatible: old decoders ignore it).
+* P1-12 DWT: watchpoints are an array of 1..4 comparators (`watchpoints` or
+  legacy `watch_address` + `watch2`/`watch3`/`watch4`); resource shortage is a
+  clear start error (no silent downgrade).  status exposes
+  `watchpoint3/4_armed/address/hits`, `watch_count` 0..4.
+* P0-2/P0-8: the optional early DAP ring storage reservation
+  (`dap_handle_prealloc_ringbuffers()`) is **off by default**
+  (`BIRDIEBOT_DAP_RING_PREALLOC=0`): enabling it on the unified NCM+WiFi image
+  lost USB-NCM enumeration and ~41 KiB of heap on real hardware; the known-good
+  lazy `xRingbufferCreate()` path is used again (P0-8 SWD clock ladder 4M/2M/
+  1M/500k and `GET /api/target/status.swd_clock_actual_hz` are unaffected).
 * Very large logical combinations (e.g. hundreds of deep variant expressions)
   are bounded by the 256-variant / 768-expression-node pools; the parser
-  rejects them explicitly.  HTTP request bodies are capped at 4 KiB, so real
-  Web requests stay far below those caps.
+  rejects them explicitly.  JSON start bodies are capped at 16 KiB
+  (`CURVE_JSON_BODY_MAX`) and the streaming binary CBS1 body at
+  `CURVE_BIN_BODY_MAX` (also 16 KiB, but never buffered as one heap block:
+  the unified NCM+WiFi heap often cannot provide 16 KiB contiguous after
+  fragmentation, so new clients use `POST /api/curve/start-bin`; a JSON body
+  alloc failure is an explicit HTTP 503 with the measured largest block).
 * The session bring-up reuses `tf_swd_link_init()`, which pulses nRESET before
   the SWD switch sequence (same as the target-flash probe).  **Starting a local
   sampling session therefore resets the target once**; the sampler then keeps

@@ -53,6 +53,10 @@ export interface TargetStatus {
     total?: number
     percent?: number
     err?: string
+    heapFree?: number
+    heapLargest?: number
+    dapSessionActive?: boolean
+    swdClockHz?: number
 }
 
 export interface TargetFlashSuccess extends TargetInfo {
@@ -158,6 +162,10 @@ export async function getTargetStatus(): Promise<TargetStatus | null> {
             total: toNumber(body.total),
             percent: toNumber(body.percent),
             err: typeof body.err === 'string' ? body.err as string : undefined,
+            heapFree: toNumber(body.heap_free),
+            heapLargest: toNumber(body.heap_largest),
+            dapSessionActive: typeof body.dap_session_active === 'boolean' ? body.dap_session_active : undefined,
+            swdClockHz: toNumber(body.swd_clock_hz),
         }
     } catch {
         return null
@@ -256,5 +264,44 @@ export async function resetTarget(run = true): Promise<{ ok: boolean; err?: stri
         return {ok: true, httpStatus: response.status}
     } catch (error) {
         return {ok: false, err: error instanceof Error ? error.message : 'network error', httpStatus: 0}
+    }
+}
+
+/** GET /api/target/swd-clock: manually selected SWD clock (0 = auto). */
+export async function getSwdClock(): Promise<number | null> {
+    try {
+        const response = await fetch('/api/target/swd-clock', {method: 'GET', cache: 'no-store'})
+        const body = await parseJson(response)
+        if (!response.ok || !body) {
+            return null
+        }
+        return toNumber(body.hz) ?? 0
+    } catch {
+        return null
+    }
+}
+
+/**
+ * POST /api/target/swd-clock. `hz=0` restores automatic 2/1/0.5 MHz probing;
+ * manual values are validated by the firmware (100 kHz..10 MHz).
+ */
+export async function setSwdClock(hz: number): Promise<{ok: boolean; hz: number; err?: string}> {
+    try {
+        const response = await fetch('/api/target/swd-clock', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hz}),
+        })
+        const body = await parseJson(response)
+        if (!response.ok || !body) {
+            return {ok: false, hz: 0, err: `HTTP ${response.status}`}
+        }
+        return {
+            ok: response.ok,
+            hz: toNumber(body.hz) ?? 0,
+            err: typeof body.err === 'string' ? body.err : undefined,
+        }
+    } catch (error) {
+        return {ok: false, hz: 0, err: error instanceof Error ? error.message : 'network error'}
     }
 }

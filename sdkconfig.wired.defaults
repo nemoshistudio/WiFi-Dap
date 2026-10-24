@@ -5,8 +5,9 @@
 # it: the default Wi-Fi-only firmware and its sdkconfig.defaults.* stay
 # unchanged.
 #
-# Wire protocol: TinyUSB CDC-NCM device + static device IP 192.168.7.1/24;
-# the existing DAP proxy keeps listening on TCP 3240 (host keeps usbip+OpenOCD).
+# Compatibility variant; the default ESP32-S3 build already enables NCM+WiFi.
+# Wire protocol: TinyUSB CDC-NCM device + static device IP 192.168.7.1/24 +
+# DHCP server; the existing DAP proxy keeps listening on TCP 3240.
 #
 # Console: USB-OTG and USB-Serial/JTAG are mutually exclusive, so the wired
 # build disables the USB-Serial/JTAG secondary console and keeps UART0.
@@ -28,19 +29,19 @@ CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK=y
 CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID=y
 CONFIG_TINYUSB_DESC_USE_DEFAULT_PID=y
 CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="WiFi Dap"
-CONFIG_TINYUSB_DESC_PRODUCT_STRING="WiFi Dap (Wired NCM)"
-CONFIG_TINYUSB_DEBUG_LEVEL=1
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="WiFi Dap (NCM + WiFi)"
+CONFIG_TINYUSB_DEBUG_LEVEL=0
 
 # C1 tuning (A/B measured on the wired-DAP hardware window):
 #   - priority 22 broke even the FIRST WiFi-USBIP session; the default 5 is
 #     required for the WiFi transport to stay usable while NCM is installed.
-#   - stack 4096 + 3+3 NCM NTB buffers keep the heap headroom needed by the
+#   - stack 4096 + 1+1 NCM NTB buffers keep the heap headroom needed by the
 #     USBIP/DAP path (the device only has ~30-50 KiB free heap with TinyUSB
 #     installed); measured USB-NCM flash throughput is unchanged vs the
 #     previous 8192/6+6 setting (5.85 s for 345,600 B, 57.7 KiB/s).
 #   - DMA mode is required for USB-NCM throughput.
 CONFIG_TINYUSB_TASK_PRIORITY=5
 CONFIG_TINYUSB_TASK_STACK_SIZE=4096
-CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=3
-CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=3
+CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=1
+CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=1
 CONFIG_TINYUSB_MODE_DMA=y

@@ -31,12 +31,16 @@ extern "C" {
 #define TF_DAP_HANDOFF_TIMEOUT_MS 3000U
 #define TF_DAP_RESTORE_TIMEOUT_MS 1000U
 
-/* SWD clock requested from the DAP engine.  H7 boards in the field need a
- * slower link (OpenOCD only identifies the current H7 at <=1 MHz), so probe
- * walks TF_SWD_CLOCK_HZ -> 1 MHz -> 500 kHz and keeps the first working one. */
-#define TF_SWD_CLOCK_HZ          2000000U
-#define TF_SWD_CLOCK_FALLBACK1_HZ 1000000U
-#define TF_SWD_CLOCK_FALLBACK2_HZ  500000U
+/* SWD clock requested from the DAP engine (P0-8 auto probe).  H7 boards in the
+ * field need a slower link (OpenOCD only identifies the current H7 at <=1 MHz),
+ * while short/buffered links can run faster, so the automatic probe walks
+ * 4 MHz -> 2 MHz -> 1 MHz -> 500 kHz and keeps the first clock that identifies
+ * the target; GET /api/target/status reports the actually used clock.
+ * A manual clock (POST /api/target/swd-clock) disables the walk. */
+#define TF_SWD_CLOCK_HZ          4000000U
+#define TF_SWD_CLOCK_FALLBACK1_HZ 2000000U
+#define TF_SWD_CLOCK_FALLBACK2_HZ 1000000U
+#define TF_SWD_CLOCK_FALLBACK3_HZ  500000U
 
 /* Cortex-M debug/PPB registers (accessed through the AHB-AP). */
 #define TF_REG_CPUID             0xE000ED00U

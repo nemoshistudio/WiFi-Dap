@@ -13,6 +13,8 @@
 #                     tests/host/test_ota_sha.py         OTA upload contract
 #                     tests/host/test_partitions.py      frozen partition tables
 #                     tests/host/test_security_regressions.py  N2/N8/N9 guards
+#                     tests/host/test_hil_gate.py        HIL gate (CVF decode,
+#                     thresholds, fake-device --dry-run scenarios)
 #
 # Output is TAP-ish (one "ok/not ok" line per suite + "#" diagnostics) and the
 # exit code is the aggregate (0 = all suites passed).
@@ -157,11 +159,11 @@ PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -m unittest discover \
 py_status=$?
 py_ran="$(grep -m1 -oE 'Ran [0-9]+ tests?' "$LOG_DIR/py.log" | grep -oE '[0-9]+' || echo 0)"
 py_xfail="$(grep -m1 -oE 'expected failures=[0-9]+' "$LOG_DIR/py.log" | grep -oE '[0-9]+' || echo 0)"
-diag "python contract tests: ran=${py_ran} expected-fail=${py_xfail} (protocol_frame/ota_sha/partitions)"
+diag "python contract tests: ran=${py_ran} expected-fail=${py_xfail} (protocol_frame/ota_sha/partitions/security/hil_gate)"
 if [ "$py_status" -eq 0 ]; then
-    tap_ok "python contract tests (JSON/WS frame, OTA upload, partitions)"
+    tap_ok "python contract tests (JSON/WS frame, OTA upload, partitions, HIL gate)"
 else
-    tap_fail "python contract tests (JSON/WS frame, OTA upload, partitions)"
+    tap_fail "python contract tests (JSON/WS frame, OTA upload, partitions, HIL gate)"
     sed 's/^/#   /' "$LOG_DIR/py.log" | tail -80
 fi
 

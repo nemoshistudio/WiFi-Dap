@@ -40,10 +40,12 @@ extern "C" {
  *     (kind, inner, offset/reg/address) nodes, so 324 object fields typically
  *     need only a few hundred nodes instead of ~1600; 2048 still leaves headroom
  *     for 512 independent series with 3-4 node chains.
- *   CURVE_JSON_BODY_MAX        16384 request bytes (256-series/typical selection)
- *     requests are ~16-20 KiB even in the compact v3 format).
- *                                   every expr chain node (single expr or
- *                                   variant expr, depth <= 8) comes from here.
+ *   CURVE_JSON_BODY_MAX        16384 JSON request bytes (restored target).
+ *     The JSON path is a compatibility path: the body is a single heap block,
+ *     which the unified NCM+WiFi image cannot always provide once the heap is
+ *     fragmented.  New Web clients use POST /api/curve/start-bin instead: the
+ *     compact binary (CBS1) request is parsed in a streaming fashion with a
+ *     256 B stack buffer, so it never needs a contiguous 16 KiB heap block.
  * A request that exceeds the variant/expr pool is rejected with a clear parse
  * error (groups/series limits themselves follow the contract exactly). */
 #define CURVE_MAX_GROUPS            8U
@@ -59,7 +61,18 @@ extern "C" {
 #define CURVE_SERIES_SIZE_MIN       1U
 #define CURVE_SERIES_SIZE_MAX       8U
 #define CURVE_JSON_BODY_MAX         16384U
+/* Per-series divider (protocol v3 "exact refresh rate"): sample this series
+ * every N ticks of its group (1 = every tick, default).  Stored in
+ * curve_series_t.sample_every; the engine keeps a per-series counter and marks
+ * non-sampled ticks stale in a CVF2 footer (flags bit4). */
+#define CURVE_SAMPLE_EVERY_MIN      1U
+#define CURVE_SAMPLE_EVERY_MAX      64U
 #define CURVE_MAX_FRAMES_PER_REQ    64U
+/* Worst-case GET /api/curve/status JSON (all counters at u32 max, message and
+ * last_err full).  Static response buffer size: the http layer uses it for
+ * status / start / trace / backtrace responses.  Kept as one constant so the
+ * host test can assert the exact formatting never truncates. */
+#define CURVE_STATUS_JSON_MAX       2048U
 
 /* Frame ring.  The hard constraint is the heap budget (8 KiB), so the capacity
  * is budget/stride first and only then clamped to a small safety floor.  Large
@@ -114,12 +127,14 @@ typedef enum {
     CURVE_TRIGGER_WATCHPOINT = 2, /* P1.8/P1.9: DWT data watchpoint trigger */
 } curve_trigger_t;
 
-/* ---- P1.8/P1.9: DWT data watchpoint --------------------------------------
- * Cortex-M7 DWT comparator 0: DWT_COMP0 = address, DWT_MASK0 = log2(size),
- * DWT_FUNCTION0 = 5 (read) / 6 (write) / 7 (read+write) with MATCHED bit24
+/* ---- P1.8/P1.9 + P1.8.1: DWT data watchpoints ---------------------------
+ * Cortex-M7 DWT comparators: DWT_COMPn = address, DWT_MASKn = log2(size),
+ * DWT_FUNCTIONn = 5 (read) / 6 (write) / 7 (read+write) with MATCHED bit24
  * after a hit, DEMCR.TRCENA (bit24) must be set.  The sampler saves and
- * restores DEMCR/COMP0/MASK0/FUNCTION0 and disarms comparator 0 before every
- * resume (same throttle flow as the FPB breakpoint trigger). */
+ * restores DEMCR/COMPn/MASKn/FUNCTIONn for every comparator it allocated and
+ * disarms them before every resume (same throttle flow as the FPB breakpoint
+ * trigger).  Only comparators found free (FUNCTIONn & 0xF == 0) are used;
+ * the original single-watch requests still prefer comparator 0 first. */
 #define CURVE_TRIGGER_WATCH_MIN_US   5000U
 #define CURVE_TRIGGER_WATCH_MAX_US   1000000U
 #define CURVE_TRIGGER_WATCH_DEFAULT_US 20000U
@@ -129,10 +144,220 @@ typedef enum {
 #define CURVE_WATCH_SIZE_4           4U
 #define CURVE_WATCH_DEFAULT_SIZE     4U
 
+/* DWT data-watch access type -> DWT_FUNCTION value (Cortex-M3/M4/M7):
+ *   5 = read (load), 6 = write (store), 7 = read/write (load/store).
+ * The original firmware only exposed write/readwrite; P1.8.1 adds read and a
+ * second comparator while keeping the old request/status fields intact. */
 typedef enum {
     CURVE_WATCH_ACCESS_WRITE = 0,
     CURVE_WATCH_ACCESS_RW = 1,
+    CURVE_WATCH_ACCESS_READ = 2,
 } curve_watch_access_t;
+
+/* DWT comparator count (P1.8.1 added a second, P1-12 extends to four).
+ * Cortex-M7 implements 4 data-watch comparators; the sampler allocates only
+ * free ones (FUNCTIONn == 0) and reports a clear start error when the target
+ * has fewer free comparators than requested.  watch/watch2 stay the legacy
+ * JSON keys (slots 0/1); the canonical request form is the `watchpoints`
+ * array (0..4 entries) and watch3/watch4 are convenience aliases. */
+#define CURVE_MAX_WATCHPOINTS       4U
+#define CURVE_DWT_MAX_COMP         4U
+#define CURVE_DWT_FUNCTION_MASK    0x0FU
+
+/* ---- P1.8.2 "function snapshot": one-shot breakpoint capture --------------
+ * Opt-in (start request field `snapshot_after`, 0..CURVE_SNAPSHOT_MAX_AFTER).
+ * On the first FPB hit the sampler records the trigger frame, then captures
+ * `snapshot_after` additional periodic (halt -> sample -> resume) frames and
+ * stops the session.  The pre-trigger history stays in the normal ring, so
+ * Web can fetch [trigger_seq - snapshot_pre_frames, trigger_seq + after].
+ * Default (field absent) keeps the continuous breakpoint behavior unchanged. */
+typedef enum {
+    CURVE_SNAPSHOT_OFF = 0,       /* not configured */
+    CURVE_SNAPSHOT_ARMED = 1,     /* configured, waiting for the first hit */
+    CURVE_SNAPSHOT_CAPTURING = 2, /* trigger recorded, capturing post frames */
+    CURVE_SNAPSHOT_COMPLETE = 3,  /* all post frames captured, session stopped */
+    CURVE_SNAPSHOT_ABORTED = 4,   /* stopped/error before the snapshot finished */
+} curve_snapshot_state_t;
+
+#define CURVE_SNAPSHOT_MAX_AFTER    32U
+
+/** "off"/"armed"/"capturing"/"complete"/"aborted" (unknown -> "off"). */
+const char *curve_snapshot_state_name(uint8_t state);
+
+/* ---- P1.8.2 prototype: frame-pointer backtrace ----------------------------
+ * Prototype only (not a DWARF-CFI unwinder): at a breakpoint/watchpoint hit
+ * the firmware follows the AAPCS frame-pointer chain ([fp] = previous fp,
+ * [fp+4] = return address) through the AHB-AP and keeps up to 8 PCs.  It needs
+ * the target code to maintain frame pointers (-O0 or -fno-omit-frame-pointer);
+ * optimized code that reuses r7 yields a short/invalid chain. */
+#define CURVE_BACKTRACE_MAX_FRAMES  8U
+
+typedef bool (*curve_backtrace_read_fn)(void *ctx, uint32_t addr, uint32_t *value);
+
+typedef struct {
+    uint8_t count;                            /* valid PCs, 0 = no capture */
+    bool truncated;                           /* stopped at the frame limit */
+    uint32_t pcs[CURVE_BACKTRACE_MAX_FRAMES]; /* [0] = halted PC, then returns */
+} curve_backtrace_t;
+
+void curve_backtrace_reset(curve_backtrace_t *bt);
+
+/**
+ * @brief Unwind a frame-pointer chain into `out` (pure, host-tested).
+ *
+ * @param pc   halted core PC (Thumb bit0 ignored)
+ * @param fp   frame pointer (Cortex-M r7 at the hit)
+ * @param read target-word reader (engine passes the AHB-AP read with the
+ *             allowed-memory-window filter; the host test passes a mock)
+ * @return true when at least the halted PC was captured.
+ */
+bool curve_backtrace_capture(uint32_t pc, uint32_t fp,
+                             curve_backtrace_read_fn read, void *ctx,
+                             curve_backtrace_t *out);
+
+/* ---- P1.8.3 prototype: target-UART trace capture -------------------------
+ * The board already has a target-UART link (components/uart_service is the
+ * single owner, also used by the Web UART page / TCP 1346 bridge).  This
+ * prototype taps that existing link: a 2 KiB byte ring keeps the most recent
+ * target output and the HTTP layer serves it to the Web as raw bytes.
+ *
+ * Boundaries: no SWO/ITM (SWO_FUNCTION_ENABLE=0, no SWO pin to the target),
+ * no per-byte target timestamp (only the byte sequence counter), no baud
+ * control from this component (use the Web UART module), and the UART is
+ * shared with the existing consumers. */
+#define CURVE_TRACE_RING_BYTES      2048U
+
+typedef struct {
+    uint8_t *storage;
+    uint32_t capacity;
+    uint32_t head;   /* next write offset */
+    uint32_t used;   /* retained bytes (<= capacity) */
+    uint32_t total;  /* bytes appended since reset (byte seq) */
+} curve_trace_ring_t;
+
+/** One contiguous piece of the retained trace window for a chunked response. */
+typedef struct {
+    uint32_t offset; /* index into ring storage */
+    uint32_t len;
+} curve_trace_seg_t;
+
+void curve_trace_ring_reset(curve_trace_ring_t *ring, uint8_t *storage,
+                            uint32_t capacity);
+
+/** Append target bytes (oldest bytes are overwritten when the ring is full). */
+void curve_trace_ring_append(curve_trace_ring_t *ring, const uint8_t *data,
+                             uint32_t len);
+
+/**
+ * @brief Plan the retained bytes newer than `since` (pure, host-tested).
+ *
+ * @param first_seq first returned byte sequence number (oldest retained when
+ *                  `since` was evicted or 0)
+ * @param gap       true when `since` is older than the oldest retained byte
+ * @param seg       up to two contiguous storage segments (wrap split)
+ * @return total bytes to send (0 = nothing new)
+ */
+uint32_t curve_trace_ring_plan(const curve_trace_ring_t *ring, uint32_t since,
+                               uint32_t *first_seq, bool *gap,
+                               curve_trace_seg_t seg[2]);
+
+/** Trace capture control (curve_trace.c): subscribes to the UART service. */
+esp_err_t curve_trace_start(void);
+esp_err_t curve_trace_stop(void);
+
+/**
+ * @brief Start trace capture with an optional line trigger (P1-13).
+ *
+ * In addition to the raw byte ring, the RX fan-out assembles target lines
+ * (split on '\n', '\r' stripped, non-printable bytes replaced with '.') and
+ * keeps the most recent CURVE_TRACE_LINE_MAX lines with the ESP32
+ * esp_timer_get_time() timestamp of line completion.  When `trigger` is a
+ * non-empty substring, the first matching line sets triggered/trigger_seq;
+ * `stop_after=true` stops the capture at that line (the raw byte ring keeps
+ * everything captured so far).  No target-side timestamps are invented: t_us
+ * is the ESP32 receive time.
+ *
+ * @param trigger    substring to match in a completed line (NULL/"" = no trigger)
+ * @param stop_after stop capturing after the first trigger match
+ */
+esp_err_t curve_trace_start_with_config(const char *trigger, bool stop_after);
+
+/** Retained trace status: active flag, byte seq, evicted bytes. */
+void curve_trace_get_status(bool *active, uint32_t *total_bytes,
+                            uint32_t *dropped_bytes);
+
+/* ---- P1-13: line-buffered trace (timestamped, triggerable) --------------- */
+#define CURVE_TRACE_LINE_TEXT_MAX   96U
+#define CURVE_TRACE_LINE_MAX        32U
+#define CURVE_TRACE_TRIGGER_MAX     32U
+#define CURVE_TRACE_LINES_PER_REQ   8U
+#define CURVE_TRACE_LINE_FLAG_TRUNCATED 0x01U
+
+typedef struct {
+    uint32_t seq;      /* line sequence (starts at 1) */
+    uint64_t t_us;     /* ESP32 esp_timer time when the line was completed */
+    uint8_t len;       /* bytes in text (no NUL) */
+    uint8_t flags;     /* CURVE_TRACE_LINE_FLAG_* */
+    char text[CURVE_TRACE_LINE_TEXT_MAX + 1U]; /* NUL-terminated copy */
+} curve_trace_line_t;
+
+typedef struct {
+    curve_trace_line_t *storage;
+    uint32_t capacity;
+    uint32_t head;   /* next write slot */
+    uint32_t count;  /* retained lines (<= capacity) */
+    uint32_t total;  /* lines completed since reset */
+} curve_trace_line_ring_t;
+
+void curve_trace_line_ring_reset(curve_trace_line_ring_t *ring,
+                                 curve_trace_line_t *storage, uint32_t capacity);
+
+/** Append one completed (sanitized) line; the oldest line is overwritten when
+ *  the ring is full.  len is clamped to CURVE_TRACE_LINE_TEXT_MAX. */
+void curve_trace_line_ring_append(curve_trace_line_ring_t *ring, uint64_t t_us,
+                                  const char *text, uint32_t len,
+                                  bool truncated);
+
+/**
+ * @brief Copy up to `max` retained lines newer than line sequence `since`.
+ * @param out        caller array with room for `max` lines
+ * @param first_seq  seq of out[0]
+ * @param gap        true when `since` is older than the oldest retained line
+ * @return copied line count (0 = nothing new)
+ */
+uint32_t curve_trace_line_ring_plan(const curve_trace_line_ring_t *ring,
+                                    uint32_t since, uint32_t max,
+                                    curve_trace_line_t *out,
+                                    uint32_t *first_seq, bool *gap);
+
+/** Case-sensitive substring match used by the trace trigger (NULL-safe). */
+bool curve_trace_line_match(const char *text, const char *pattern);
+
+/**
+ * @brief Read timestamped lines for GET /api/curve/trace/lines (thread-safe).
+ * @return copied line count, first returned seq, gap flag.
+ */
+uint32_t curve_trace_lines_read(uint32_t since, uint32_t max,
+                                curve_trace_line_t *out, uint32_t *first_seq,
+                                bool *gap);
+
+/** Line-ring status: active, total lines, evicted lines, trigger latch. */
+void curve_trace_lines_get_status(bool *active, uint32_t *total_lines,
+                                  uint32_t *dropped_lines, bool *triggered,
+                                  uint32_t *trigger_seq);
+
+/**
+ * @brief Copy the retained trace bytes newer than `since` into `out`.
+ *
+ * Thread-safe view of the live trace state for the HTTP layer: the plan is
+ * computed and copied under the trace mutex so a concurrent UART RX append
+ * cannot tear the response; the caller sends the bytes after the lock is
+ * released.  At most `max` bytes are copied.
+ *
+ * @return copied byte count (0 = nothing new), first returned byte seq, gap.
+ */
+uint32_t curve_trace_read(uint32_t since, uint8_t *out, uint32_t max,
+                          uint32_t *first_seq, bool *gap);
 
 /* ---- P1.8 conditional trigger (trigger_condition) ------------------------
  * After each sampled tick the sampler reads one target address/size and
@@ -166,7 +391,11 @@ const char *curve_cond_op_name(uint8_t op);
 
 /* ---- Cortex-M7 DWT / DEMCR registers ------------------------------------- */
 #define CURVE_DWT_CTRL               0xE0001000U
+/* Comparator n register block: COMP/MASK/FUNCTION at +0x10*n from COMP0. */
 #define CURVE_DWT_COMP0              0xE0001020U
+#define CURVE_DWT_COMP(n)            (CURVE_DWT_COMP0 + 0x10U * (uint32_t)(n))
+#define CURVE_DWT_MASK(n)            (CURVE_DWT_COMP0 + 0x04U + 0x10U * (uint32_t)(n))
+#define CURVE_DWT_FUNCTION(n)        (CURVE_DWT_COMP0 + 0x08U + 0x10U * (uint32_t)(n))
 #define CURVE_DWT_MASK0              0xE0001024U
 #define CURVE_DWT_FUNCTION0          0xE0001028U
 #define CURVE_DEMCR                  0xE000EDFCU
@@ -182,7 +411,36 @@ const char *curve_cond_op_name(uint8_t op);
  *  sampling reads). */
 bool curve_watchpoint_params_ok(uint32_t address, uint8_t size);
 
-/** "write"/"readwrite" name for a curve_watch_access_t. */
+/** DWT_MASK value for a watch size (0=1B, 1=2B, 2=4B); invalid size -> 0. */
+uint32_t curve_dwt_mask_for_size(uint8_t size);
+
+/** DWT_FUNCTION value for a curve_watch_access_t; invalid access -> 0. */
+uint32_t curve_dwt_function_for_access(uint8_t access);
+
+/**
+ * @brief Allocate free DWT comparators for `want` watchpoints (pure, host-tested).
+ *
+ * @param num_comp  DWT_CTRL.NUMCOMP (available comparators, clamped to 4)
+ * @param functions current DWT_FUNCTIONn values, one per available comparator
+ *                  (only the low 4 bits are checked; ~0 when occupied = busy)
+ * @param want      requested comparators (1..CURVE_MAX_WATCHPOINTS)
+ * @param out       comparator indexes (lowest free first)
+ * @return true when `want` free comparators were found and written to `out`.
+ */
+bool curve_dwt_alloc_comparators(uint8_t num_comp, const uint32_t *functions,
+                                 uint8_t want, uint8_t *out);
+
+/**
+ * @brief Bitmask of the allocated comparators whose MATCHED bit is set.
+ * @param functions current DWT_FUNCTIONn values (indexed by comparator)
+ * @param indices   allocated comparator indexes (0..3)
+ * @param count     allocated comparator count
+ * @return bit n set = comparator indices[n] matched (n = watchpoint slot 0/1).
+ */
+uint8_t curve_dwt_hit_mask(const uint32_t *functions, const uint8_t *indices,
+                           uint8_t count);
+
+/** "write"/"read"/"readwrite" name for a curve_watch_access_t. */
 const char *curve_watch_access_name(uint8_t access);
 
 /** True when the breakpoint address (Thumb bit0 ignored) is in target flash. */
@@ -328,7 +586,10 @@ typedef struct {
     uint8_t size;             /* 1..8 bytes read from the evaluated address */
     uint8_t flags;            /* CURVE_SERIES_FLAG_* */
     uint8_t variant_count;    /* 0 = single expr/pc-gate series, 1..16 otherwise */
-    uint8_t reserved;         /* keep explicit: sizeof == 16, 512 series = 8 KiB */
+    uint8_t sample_every;     /* 1..CURVE_SAMPLE_EVERY_MAX ticks per sample
+                               * (0 is normalized to 1 by the parsers).  Uses
+                               * the former `reserved` byte, so sizeof stays 16
+                               * and the 256-series pool is still 4 KiB. */
 } curve_series_t;
 
 /* P2: optional per-group scheduling weight (weighted round-robin).  Web does
@@ -366,7 +627,24 @@ typedef struct {
     bool want_pc;                   /* CVF2 PC_PRESENT opt-out (default true) */
     uint32_t watch_address;         /* CURVE_TRIGGER_WATCHPOINT: data address */
     uint8_t watch_size;             /* 1/2/4 bytes */
-    uint8_t watch_access;           /* curve_watch_access_t (write/readwrite) */
+    uint8_t watch_access;           /* curve_watch_access_t (write/read/readwrite) */
+    /* P1.8.1 optional second DWT comparator (same trigger, different address).
+     * Kept as the legacy view of watchpoint slot 1 (JSON `watch2`, status
+     * watchpoint2_*); the engine reads the canonical arrays below. */
+    bool watch2_enabled;
+    uint32_t watch2_address;
+    uint8_t watch2_size;            /* 1/2/4 bytes */
+    uint8_t watch2_access;          /* curve_watch_access_t */
+    /* P1-12 canonical DWT watchpoint list (0..4 comparators).  Slot 0 mirrors
+     * watch_address/watch_size/watch_access, slot 1 mirrors watch2_*. */
+    uint8_t watch_count;            /* 0 = not a watchpoint session; 1..4 */
+    uint32_t watch_addr[CURVE_MAX_WATCHPOINTS];
+    uint8_t watch_sz[CURVE_MAX_WATCHPOINTS];   /* 1/2/4 bytes */
+    uint8_t watch_acc[CURVE_MAX_WATCHPOINTS];  /* curve_watch_access_t */
+    /* P1.8.2 optional one-shot function snapshot (breakpoint trigger only) */
+    bool snapshot_enabled;          /* true when the request carried snapshot_after */
+    uint8_t snapshot_after;         /* post-trigger frames, 0..32 */
+    bool backtrace;                 /* prototype: capture r7 chain at trigger hits */
     /* P1.8 optional trigger_condition (independent of the trigger mode) */
     bool cond_enabled;
     bool cond_signed;
@@ -390,6 +668,16 @@ typedef struct {
     curve_expr_t pool[CURVE_EXPR_POOL_MAX];
     uint16_t pool_used;
 } curve_config_t;
+
+/** True when a series with divider `sample_every` must be read on the tick
+ *  whose per-series counter is `tick` (1 = every tick, i.e. always). */
+static inline bool curve_sample_due(uint8_t sample_every, uint8_t tick)
+{
+    if (sample_every <= CURVE_SAMPLE_EVERY_MIN) {
+        return true;
+    }
+    return (uint8_t)(tick % sample_every) == 0U;
+}
 
 /** True when sampling this series requires the tick's PC (single-style gate or
  *  loclist variants). */
@@ -433,10 +721,34 @@ typedef struct {
     uint32_t out_of_scope;       /* PC-gated series skipped outside [low,high) */
     bool pc_available;           /* CVF2 frames carry PC (halt/breakpoint/watch) */
     uint32_t last_pc;            /* last captured PC (Thumb bit0 cleared) */
-    bool watchpoint_armed;       /* DWT comparator currently armed */
+    bool watchpoint_armed;       /* first DWT comparator currently armed */
     uint32_t watchpoint_address; /* DWT watchpoint address (0 when unrelated) */
-    uint32_t watchpoint_hits;    /* DWT watchpoint triggers observed */
+    uint32_t watchpoint_hits;    /* DWT watchpoint triggers observed (total) */
     uint32_t trigger_seq;        /* seq of the last trigger-event frame (0=none) */
+    /* P1.8.1/P1-12 DWT comparator status (up to 4 watchpoints) */
+    uint8_t watch_count;         /* configured watchpoints 0..4 */
+    bool watchpoint2_armed;      /* second comparator armed */
+    uint32_t watchpoint2_address;
+    uint32_t watchpoint2_hits;   /* triggers observed on the second watchpoint */
+    bool watchpoint3_armed;      /* third comparator armed (P1-12) */
+    uint32_t watchpoint3_address;
+    uint32_t watchpoint3_hits;
+    bool watchpoint4_armed;      /* fourth comparator armed (P1-12) */
+    uint32_t watchpoint4_address;
+    uint32_t watchpoint4_hits;
+    uint8_t last_watch_index;    /* 1..4 = last watchpoint that triggered, 0=none */
+    /* P1.8.2 function snapshot status */
+    uint8_t snapshot_state;      /* curve_snapshot_state_t */
+    uint8_t snapshot_after;      /* configured post-trigger frame count */
+    uint32_t snapshot_trigger_seq; /* seq of the trigger frame (0=none) */
+    uint32_t snapshot_pre_frames;  /* retained pre-trigger frames at hit time */
+    uint32_t snapshot_post_frames; /* post-trigger frames captured so far */
+    /* P1.8.3 prototype status */
+    bool trace_active;           /* UART trace capture is subscribed */
+    uint32_t trace_bytes;        /* total target bytes captured this trace run */
+    uint32_t trace_dropped;      /* bytes evicted from the 2 KiB trace ring */
+    bool backtrace_valid;        /* last trigger hit produced a backtrace */
+    uint8_t backtrace_count;     /* captured PCs of the last trigger hit */
     /* P1.8 trigger_condition status */
     bool condition_armed;        /* configured and still evaluating (once latch clears) */
     bool condition_met;          /* latched true after the first match */
@@ -450,6 +762,12 @@ typedef struct {
     uint16_t expr_pool_used;
     uint32_t errors;             /* failed sample ticks */
     uint32_t consecutive_errors;
+    /* protocol v3 exact per-series refresh rate (sample_every) */
+    uint8_t sample_every_max;    /* largest divider configured this session */
+    uint32_t series_stale;       /* stale (skipped) series slots in session */
+    /* heap snapshot at status time (read-only diagnostics; 0 when unknown) */
+    uint32_t heap_free;
+    uint32_t heap_largest;
     uint32_t link_hz;
     uint32_t dpidr;
     uint32_t last_tick_us;
@@ -502,12 +820,35 @@ void curve_expr_cache_end(void);
 #define CURVE_CVF2_FLAG_PC_PRESENT 0x02U
 #define CURVE_CVF2_FLAG_TRIGGERED  0x04U /* batch contains trigger-event frames */
 #define CURVE_CVF2_FLAG_CONDITION  0x08U /* batch contains condition-match frames */
+/* P0-3 per-series valid/stale map (protocol v3, backward compatible).
+ * Set when at least one frame in the batch has a stale (sample_every-skipped)
+ * series.  When set, `count * CURVE_CVF2_SERIES_MASK_BYTES` footer bytes are
+ * appended AFTER the last frame record (not in the frame layout, so decoders
+ * that do not know this flag still parse every frame and simply ignore the
+ * trailing bytes): one little-endian u64 bitmask per frame in frame order.
+ * bit i = series slot i within that frame's group (i.e. the group's
+ * cfg.series[series_first + i]) was sampled on this tick (1) or is stale (0,
+ * payload bytes are zero and the previous value should be held). */
+#define CURVE_CVF2_FLAG_SERIES_MASK    0x10U
+#define CURVE_CVF2_SERIES_MASK_BYTES   8U /* u64 bitmask covers 64 series/group */
 
 /** Write the 16-byte CVF2 batch header; returns 16.
  *  flags bit1 = PC_PRESENT when `pc_present` is set. */
 size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
                                uint16_t frame_bytes, bool gap, bool pc_present,
                                bool triggered, bool condition);
+
+/** Same as curve_cvf2_write_header() but ORs `extra_flags` into the flags byte
+ *  (protocol v3 uses CURVE_CVF2_FLAG_SERIES_MASK here).  Kept separate so the
+ *  original function/ABI and host test stay stable. */
+size_t curve_cvf2_write_header_ex(uint8_t *buf, uint16_t count,
+                                  uint32_t first_seq, uint16_t frame_bytes,
+                                  uint8_t extra_flags, bool gap,
+                                  bool pc_present, bool triggered,
+                                  bool condition);
+
+/** Append one 8-byte little-endian per-series valid bitmask to `buf`. */
+size_t curve_cvf2_write_series_mask(uint8_t *buf, uint64_t mask);
 
 /** Write the CVF2 frame metadata; returns 19 with PC, 15 without.
  *  PC (Thumb bit0 already cleared by the caller) goes after payload_len. */
@@ -575,6 +916,76 @@ int curve_status_format_json(const curve_status_t *status, char *buf, size_t buf
 esp_err_t curve_config_parse(const char *json, size_t len, curve_config_t *cfg,
                              char *err, size_t err_len);
 
+/** Parse a compact v3 expression prefix (A/R/C/+ /D encoding).  Shared by the
+ *  JSON `expr_s`/variants parser and the binary (CBS1) parser. */
+esp_err_t curve_parse_expr_compact(const char **cursor, curve_config_t *cfg,
+                                   uint16_t *out_index, uint32_t depth,
+                                   char *err, size_t err_len);
+
+/** Cross-field validation + derived fields (schedule, needs_regs, group regs,
+ *  halt/interval checks) for an already filled curve_config_t.  Shared by the
+ *  JSON and binary parsers; returns ESP_ERR_INVALID_ARG with err set. */
+esp_err_t curve_config_finalize(curve_config_t *cfg, char *err, size_t err_len);
+
+/** Normalize a target-flash [low, high) PC range (Thumb bit0 cleared); false
+ *  when the pair is not a valid flash range.  Shared with the binary parser. */
+bool curve_normalize_pc_range(uint32_t pc_low, uint32_t pc_high,
+                              uint32_t *low_norm, uint32_t *high_norm);
+
+/* ---- compact binary start request (CBS1, curve_bin.c) ---------------------
+ * POST /api/curve/start-bin body: a compact binary encoding of the same
+ * curve_config_t the JSON parser produces.  It is parsed STREAMING (the HTTP
+ * layer feeds it 256 B chunks from the socket), so the 16 KiB request-body
+ * heap block is not needed => no largest-contiguous-block requirement on the
+ * fragmented unified NCM+WiFi heap.  Wire layout (all little-endian):
+ *
+ *   "CBS1" magic u32 | version u8 (1) | flags u8 |
+ *   trigger u8 | watch_count u8 |
+ *   interval_us u32 | breakpoint_address u32 |
+ *   cond_address u32 | cond_value i32 |
+ *   cond_size u8 | cond_op u8 | cond_mode u8 | cond_flags u8 |
+ *   snapshot_after u8 | group_count u8 | reserved u16 (0)
+ *   flags: bit0 halt, bit1 want_pc, bit2 backtrace,
+ *          bit3 trigger_condition present, bit4 snapshot_after present
+ *   cond_flags: bit0 signed, bit1 stop_after
+ *   watch_count entries: address u32, size u8, access u8   (0..4)
+ *   group_count groups:
+ *     weight u8 | series_count u8 | reserved u16 (0)
+ *     series_count series:
+ *       size u8 | flags u8 | sample_every u8 | variant_count u8 |
+ *       pc_low u32 | pc_high u32 |
+ *       u16 expr_len | expr_len bytes ASCII compact expr (empty = none) |
+ *       variant_count variants:
+ *         pc_low u32 | pc_high u32 | u16 expr_len | expr bytes
+ *   series flags: bit0 pc gate (pc_low/pc_high used), rest reserved (0).
+ *   Request body max CURVE_BIN_BODY_MAX (streamed, not buffered as one block).
+ * A malformed/truncated body is rejected with ESP_ERR_INVALID_ARG and err. */
+#define CURVE_BIN_MAGIC             0x31534243U /* bytes 'C','B','S','1' LE */
+#define CURVE_BIN_VERSION           1U
+#define CURVE_BIN_BODY_MAX          CURVE_JSON_BODY_MAX
+#define CURVE_BIN_EXPR_MAX          64U
+#define CURVE_BIN_FLAG_HALT         0x01U
+#define CURVE_BIN_FLAG_WANT_PC      0x02U
+#define CURVE_BIN_FLAG_BACKTRACE    0x04U
+#define CURVE_BIN_FLAG_CONDITION    0x08U
+#define CURVE_BIN_FLAG_SNAPSHOT     0x10U
+#define CURVE_BIN_COND_FLAG_SIGNED  0x01U
+#define CURVE_BIN_COND_FLAG_STOP    0x02U
+#define CURVE_BIN_SERIES_FLAG_PC_GATE 0x01U
+
+/** Streaming byte source used by the binary parser: fill exactly `len` bytes
+ *  at `dst` or return an error (short read / socket timeout). */
+typedef esp_err_t (*curve_bin_read_fn)(void *ctx, void *dst, size_t len);
+
+/** Parse a CBS1 request from a streaming source into cfg (memset + full
+ *  validation, same post-conditions as curve_config_parse). */
+esp_err_t curve_bin_parse(curve_bin_read_fn read_fn, void *ctx,
+                          curve_config_t *cfg, char *err, size_t err_len);
+
+/** Parse a CBS1 request already in memory (host test / unit use). */
+esp_err_t curve_bin_parse_mem(const uint8_t *data, size_t len,
+                              curve_config_t *cfg, char *err, size_t err_len);
+
 /* ---- sampling engine (curve_engine.c) ------------------------------------ */
 esp_err_t curve_engine_init(void);
 
@@ -614,6 +1025,10 @@ esp_err_t curve_engine_alloc_frames(uint32_t since, uint32_t max,
 /** Current ring seq window (oldest retained / newest); false when no frames. */
 bool curve_engine_ring_seqs(uint32_t *oldest_seq, uint32_t *latest_seq);
 
+/** Copy the backtrace captured at the last trigger hit (prototype; P1.8.2).
+ *  Returns false when no backtrace was captured in this session. */
+bool curve_engine_backtrace(curve_backtrace_t *out);
+
 /* ---- WebSocket frame push (curve_ws.c / curve_ws_core.c) ------------------
  * GET /ws/curve WebSocket endpoint: after POST /api/curve/start a browser can
  * subscribe and receive CVF2 batches pushed by the sampler (same wire format
@@ -626,6 +1041,8 @@ void curve_ws_notify_frame(void);
  * dependency (see CMakeLists.txt); the DAP engine itself is taken over with
  * the documented hand-off protocol. */
 esp_err_t tf_swd_link_init(uint32_t clock_hz, uint32_t *dpidr);
+void tf_swd_set_forced_clock(uint32_t clock_hz);
+uint32_t tf_swd_get_forced_clock(void);
 esp_err_t tf_swd_recover_bus(void);
 esp_err_t tf_swd_read_u32(uint32_t addr, uint32_t *value);
 esp_err_t tf_swd_write_u32(uint32_t addr, uint32_t value);

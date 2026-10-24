@@ -22,6 +22,9 @@ set(priv_requires
     dap_proxy
     mbedtls
     esp_timer
+    esp_wifi      # P0-8 link diagnostics: read-only esp_wifi_sta_get_ap_info()
+    mdns          # P1-19 discovery: mdns_query_ptr("_http","_tcp")
+    esp_netif     # P1-19: esp_ip4_addr_t formatting from mDNS A records
 )
 
 set(srcs
@@ -34,6 +37,8 @@ set(srcs
     "src/tf_stm32f4.c"
     "src/tf_stm32h7.c"
     "src/tf_stm32_page.c"
+    "src/tf_discover.c"
+    "src/tf_discover_core.c"
 )
 
 

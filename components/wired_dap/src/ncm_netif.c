@@ -13,9 +13,10 @@
  *   - device-local interface with a static IPv4 address (192.168.7.1/24);
  *   - no WiFi<->USB bridge (the DAP TCP server listens on INADDR_ANY, so it is
  *     reachable through both the NCM netif and the Wi-Fi netifs);
- *   - no DHCP server yet (the host configures 192.168.7.2/24 manually) to keep
- *     the MVP small and to avoid the host installing a default route through
- *     the probe. DHCP is a P2 item (docs/wired-dap-mvp.md).
+ *   - DHCP server enabled on the NCM netif (pool derived from 192.168.7.0/24);
+ *     the host can use DHCP/auto IP, while 192.168.7.2/24 remains a static
+ *     fallback. Only the management link is served; no default route is
+ *     advertised so the diagnostic link does not steal the host's Internet.
  *
  * Console conflict: USB-OTG and USB-Serial/JTAG cannot be active at the same
  * time. The wired build must disable CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
@@ -66,6 +67,10 @@ static const esp_netif_ip_info_t s_ncm_ip_info = {
 
 static esp_netif_t *s_ncm_netif = NULL;
 static uint8_t s_ncm_mac[6];
+static bool s_ncm_active = false;
+static bool s_ncm_dhcp_active = false;
+static int s_ncm_dhcp_err = -1;
+static int s_ncm_dhcp_state = -1;
 
 /* ------------------------------------------------------------------------- */
 /* esp_netif driver callbacks (called from lwIP/TinyUSB contexts)             */
@@ -167,7 +172,7 @@ static esp_err_t ncm_usb_init(void)
 static esp_err_t ncm_esp_netif_init(void)
 {
     esp_netif_inherent_config_t base_cfg = {
-        .flags = ESP_NETIF_FLAG_AUTOUP,
+        .flags = ESP_NETIF_FLAG_AUTOUP | ESP_NETIF_DHCP_SERVER,
         .ip_info = &s_ncm_ip_info,
         .get_ip_event = 0,
         .lost_ip_event = 0,
@@ -223,6 +228,50 @@ static esp_err_t ncm_esp_netif_init(void)
     return ESP_OK;
 }
 
+static esp_err_t ncm_start_dhcp_server(void)
+{
+    if (s_ncm_netif == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The custom NCM driver does not emit an Ethernet link event.  Mark the
+     * link up explicitly so esp_netif_dhcps_start() really starts (not just
+     * arms) the DHCP server. */
+    esp_netif_action_connected(s_ncm_netif, NULL, 0, NULL);
+    /* The netif owns 192.168.7.1/24; IDF's DHCP server derives its pool from
+     * that subnet.  Stop first because a previous start (mode switch/retry)
+     * may be active. */
+    (void)esp_netif_dhcps_stop(s_ncm_netif);
+    esp_err_t err = esp_netif_dhcps_start(s_ncm_netif);
+    esp_netif_dhcp_status_t st = ESP_NETIF_DHCP_INIT;
+    esp_err_t st_err = esp_netif_dhcps_get_status(s_ncm_netif, &st);
+    s_ncm_dhcp_active = (err == ESP_OK && st_err == ESP_OK && st == ESP_NETIF_DHCP_STARTED);
+    s_ncm_dhcp_err = (int)err;
+    s_ncm_dhcp_state = (int)st;
+    if (s_ncm_dhcp_active) {
+        ESP_LOGI(TAG, "DHCP server started for USB-NCM (device 192.168.7.1/24)");
+    } else {
+        ESP_LOGW(TAG, "esp_netif_dhcps_start pending/failed (%s, status=%s); host may use static 192.168.7.2/24",
+                 esp_err_to_name(err), esp_err_to_name(st_err));
+    }
+    return err;
+}
+
+/* TinyUSB enumeration/link-up may complete just after init; DHCP server start
+ * on a still-down netif only arms it.  Retry briefly until the DHCP server is
+ * actually STARTED, so hosts get an address without manual static config. */
+static void ncm_dhcp_retry_task(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 20; ++i) {
+        if (s_ncm_dhcp_active) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+        (void)ncm_start_dhcp_server();
+    }
+    vTaskDelete(NULL);
+}
+
 esp_err_t birdiebot_wired_ncm_init(void)
 {
     if (s_ncm_netif != NULL) {
@@ -242,8 +291,11 @@ esp_err_t birdiebot_wired_ncm_init(void)
         s_ncm_netif = NULL;
         return err;
     }
+    (void)ncm_start_dhcp_server();
+    (void)xTaskCreate(ncm_dhcp_retry_task, "ncm_dhcp", 2048, NULL, 2, NULL);
+    s_ncm_active = true;
 
-    ESP_LOGI(TAG, "wired DAP ready: host network 192.168.7.0/24 (host .2), "
+    ESP_LOGI(TAG, "wired DAP ready: host network 192.168.7.0/24 (DHCP or static .2), "
                   "device 192.168.7.1, DAP proxy TCP %d",
              NCM_DAP_PROXY_PORT);
     return ESP_OK;
@@ -255,6 +307,33 @@ void birdiebot_wired_ncm_deinit(void)
         esp_netif_destroy(s_ncm_netif);
         s_ncm_netif = NULL;
     }
+    s_ncm_active = false;
+    s_ncm_dhcp_active = false;
+}
+
+bool birdiebot_wired_ncm_is_active(void)
+{
+    return s_ncm_active;
+}
+
+bool birdiebot_wired_ncm_dhcp_is_active(void)
+{
+    return s_ncm_dhcp_active;
+}
+
+int birdiebot_wired_ncm_dhcp_error(void)
+{
+    return s_ncm_dhcp_err;
+}
+
+int birdiebot_wired_ncm_dhcp_state(void)
+{
+    return s_ncm_dhcp_state;
+}
+
+const char *birdiebot_wired_ncm_device_ip(void)
+{
+    return "192.168.7.1";
 }
 
 #endif /* CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM && CONFIG_IDF_TARGET_ESP32S3 */

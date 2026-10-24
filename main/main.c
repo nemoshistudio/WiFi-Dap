@@ -45,7 +45,9 @@
 
 #include <assert.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 
 /*
@@ -155,9 +157,51 @@ void app_main()
 	}
 #endif
 
+	/*
+	 * P0-2 DAP ring storage reservation: DEFAULT OFF.
+	 *
+	 * Real-device regression (2026-10-25): reserving the two ~41 KiB ring
+	 * storages up-front made the unified NCM+WiFi image lose the USB-NCM
+	 * device (303a:4000 stopped enumerating) and left the internal heap at
+	 * ~17 KiB free / 4.6 KiB largest (Dashboard: ~7 KiB / 1.6 KiB).  The
+	 * known-good lazy xRingbufferCreate() path in DAP_Thread is therefore the
+	 * default again (BIRDIEBOT_DAP_RING_PREALLOC=0, see DAP_handle.h).  The
+	 * reservation implementation is kept and can be re-enabled by building
+	 * with -DBIRDIEBOT_DAP_RING_PREALLOC=1.
+	 *
+	 * The DAP_Thread ring (re-)create retry loop remains the fragmentation
+	 * mitigation for target/curve: it allocates only when the DAP task starts
+	 * (i.e. never from the early boot heap) and retries a transient failure
+	 * instead of killing the DAP task.
+	 */
+#if BIRDIEBOT_DAP_RING_PREALLOC
+	{
+		size_t free_before = esp_get_free_heap_size();
+		size_t largest_before =
+			heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+		esp_err_t reserve_err = dap_handle_prealloc_ringbuffers();
+
+		ESP_LOGI("BIRDIEBOT",
+		         "heap before DAP ring reserve: free=%u largest=%u -> reserve %s "
+		         "(free=%u largest=%u)",
+		         (unsigned)free_before, (unsigned)largest_before,
+		         reserve_err == ESP_OK ? "OK" : esp_err_to_name(reserve_err),
+		         (unsigned)esp_get_free_heap_size(),
+		         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+		                                                    MALLOC_CAP_INTERNAL));
+	}
+#endif
+
 	wt_mdns_init();
 
 	wifi_manager_init();
+	/* P0-2 diagnostics: heap state after NCM/WiFi stack initialization.  The
+	 * single largest block is what the JSON curve body / OTA buffers need, so
+	 * log it here (also visible through GET /api/target/status). */
+	ESP_LOGI("BIRDIEBOT", "heap after network init: free=%u largest=%u",
+	         (unsigned)esp_get_free_heap_size(),
+	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+	                                                    MALLOC_CAP_INTERNAL));
     DAP_Setup();
 
 	global_module_init();

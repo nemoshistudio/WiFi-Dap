@@ -307,6 +307,40 @@ static bool host_guard_origin_in_list(const char *origin, const char *whitelist)
 	return false;
 }
 
+static bool host_guard_host_is_device_mdns(const char *host)
+{
+	static const char prefix[] = "wifi-dap-";
+	static const char suffix[] = ".local";
+	const size_t prefix_len = sizeof(prefix) - 1U;
+	const size_t suffix_len = sizeof(suffix) - 1U;
+	size_t len;
+	if (host == NULL) {
+		return false;
+	}
+	len = strlen(host);
+	if (len != prefix_len + 4U + suffix_len) {
+		return false;
+	}
+	for (size_t i = 0; i < prefix_len; ++i) {
+		if (ascii_lower(host[i]) != prefix[i]) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < 4U; ++i) {
+		if (!((host[prefix_len + i] >= '0' && host[prefix_len + i] <= '9') ||
+		      (ascii_lower(host[prefix_len + i]) >= 'a' &&
+		       ascii_lower(host[prefix_len + i]) <= 'f'))) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < suffix_len; ++i) {
+		if (ascii_lower(host[prefix_len + 4U + i]) != suffix[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool host_guard_host_allowed(const char *host, const char *whitelist,
                                  const char *local_hostname)
 {
@@ -315,6 +349,9 @@ static bool host_guard_host_allowed(const char *host, const char *whitelist,
 	}
 	if (host_guard_host_is_ip_literal(host)) {
 		return true;
+	}
+	if (host_guard_host_is_device_mdns(host)) {
+		return true; /* current device's MAC-suffixed mDNS name; DNS-rebinding-safe pattern */
 	}
 	if (host_guard_host_in_list(host, whitelist)) {
 		return true;

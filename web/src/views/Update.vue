@@ -3,6 +3,15 @@
     <h1 class="page-title">{{ translate('page.update') }}</h1>
     <p class="text-center text-xs bb-muted">{{ translate('protocol.refreshHint') }}</p>
 
+    <!-- Lab-only safety hint: OTA has no authentication; keep it visible. -->
+    <el-alert
+        class="mt-2"
+        type="warning"
+        :title="translate('ota.upload.securityHint')"
+        :closable="false"
+        show-icon
+    />
+
     <section class="bb-card">
     <el-descriptions :title="translate('protocol.title')" border :column="1">
       <el-descriptions-item :label="translate('protocol.firmwareVersion')">
@@ -31,6 +40,13 @@
       </el-descriptions-item>
       <el-descriptions-item :label="translate('serialNumber')">
         {{ sysStore.sysInfo.sn }}
+      </el-descriptions-item>
+      <el-descriptions-item :label="translate('dashboard.devicesTitle')">
+        <span class="bb-mono">{{ pageHost }}</span>
+        <span v-if="pageDeviceName && pageDeviceName !== pageHost" class="ml-2">{{ pageDeviceName }}</span>
+        <el-button size="small" class="ml-2" data-testid="update-device-manage" @click="goManageDevices">
+          {{ translate('dashboard.deviceManage') }}
+        </el-button>
       </el-descriptions-item>
     </el-descriptions>
     </section>
@@ -196,6 +212,7 @@
 
 <script setup lang="ts">
 import {computed, onMounted, onUnmounted, ref, watch} from "vue";
+import {useRouter} from "vue-router";
 import {ElMessageBox} from "element-plus";
 import {useSystemStore} from "@/stores/useSystemStore";
 import {useUpdateStore} from "@/stores/useUpdateStore";
@@ -216,9 +233,15 @@ import {translate} from "@/locales";
 import {PROTOCOL_VERSION} from "@/api";
 import {isOTAEnabled} from "@/composables/buildMode";
 import {globalNotify} from "@/composables/notification";
+import {currentDeviceHost, deviceDisplayName} from "@/utils/deviceDiscovery";
 
+const router = useRouter();
 const sysStore = useSystemStore();
 const store = useUpdateStore();
+/** OTA uploads to the device that served this page; switching device is a
+ * browser navigation on the target page (never an automatic network change). */
+const pageHost = computed(() => currentDeviceHost() || translate('common.unknown'));
+const pageDeviceName = computed(() => (currentDeviceHost() ? deviceDisplayName(currentDeviceHost()) : ''));
 /** Wave2 构建开关：OTA 上传 UI 是否随本次构建启用（默认 false，联调时 VITE_ENABLE_OTA=true） */
 const otaEnabled = isOTAEnabled();
 const webInfo = window.__BIRDIEBOT_WEB__;
@@ -544,6 +567,11 @@ function resetForRetry() {
         store.resetUpload();
         selectedRawFile = null;
     }
+}
+
+function goManageDevices() {
+    // Manage/switch happens on the target dashboard (explicit user navigation).
+    void router.push('/target');
 }
 
 function doReboot() {

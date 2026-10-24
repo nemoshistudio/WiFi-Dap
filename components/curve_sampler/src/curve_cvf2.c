@@ -10,7 +10,8 @@
  *   count u16 | first_seq u32 | frame_bytes u16 (max payload across groups)
  *   | reserved u16
  *   flags bit2 = TRIGGERED: the batch contains at least one trigger-event
- *   frame (DWT watchpoint trigger); per-frame granularity is not in the wire
+ *   frame (DWT watchpoint trigger, or the trigger frame of a P1.8.2 one-shot
+ *   function snapshot); per-frame granularity is not in the wire
  *   format, status.trigger_seq identifies the exact sequence number.
  *   flags bit3 = CONDITION: the batch contains at least one frame whose
  *   trigger_condition matched; status.condition_trigger_seq is the exact seq.
@@ -49,9 +50,11 @@ static size_t put_u64(uint8_t *p, uint64_t v)
     return 8U;
 }
 
-size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
-                               uint16_t frame_bytes, bool gap, bool pc_present,
-                               bool triggered, bool condition)
+size_t curve_cvf2_write_header_ex(uint8_t *buf, uint16_t count,
+                                  uint32_t first_seq, uint16_t frame_bytes,
+                                  uint8_t extra_flags, bool gap,
+                                  bool pc_present, bool triggered,
+                                  bool condition)
 {
     size_t offset = 0U;
 
@@ -63,15 +66,33 @@ size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
     buf[offset++] = 'F';
     buf[offset++] = '2';
     buf[offset++] = (uint8_t)CURVE_CVF2_VERSION;
-    buf[offset++] = (gap ? (uint8_t)CURVE_CVF2_FLAG_GAP : 0U) |
-                    (pc_present ? (uint8_t)CURVE_CVF2_FLAG_PC_PRESENT : 0U) |
-                    (triggered ? (uint8_t)CURVE_CVF2_FLAG_TRIGGERED : 0U) |
-                    (condition ? (uint8_t)CURVE_CVF2_FLAG_CONDITION : 0U);
+    buf[offset++] = (uint8_t)((gap ? (uint8_t)CURVE_CVF2_FLAG_GAP : 0U) |
+                              (pc_present ? (uint8_t)CURVE_CVF2_FLAG_PC_PRESENT : 0U) |
+                              (triggered ? (uint8_t)CURVE_CVF2_FLAG_TRIGGERED : 0U) |
+                              (condition ? (uint8_t)CURVE_CVF2_FLAG_CONDITION : 0U) |
+                              extra_flags);
     offset += put_u16(buf + offset, count);
     offset += put_u32(buf + offset, first_seq);
     offset += put_u16(buf + offset, frame_bytes);
     offset += put_u16(buf + offset, 0U); /* reserved */
     return offset; /* CURVE_FRAME_HEADER_BYTES */
+}
+
+size_t curve_cvf2_write_header(uint8_t *buf, uint16_t count, uint32_t first_seq,
+                               uint16_t frame_bytes, bool gap, bool pc_present,
+                               bool triggered, bool condition)
+{
+    return curve_cvf2_write_header_ex(buf, count, first_seq, frame_bytes, 0U,
+                                      gap, pc_present, triggered, condition);
+}
+
+size_t curve_cvf2_write_series_mask(uint8_t *buf, uint64_t mask)
+{
+    if (buf == NULL) {
+        return 0U;
+    }
+    (void)put_u64(buf, mask);
+    return CURVE_CVF2_SERIES_MASK_BYTES;
 }
 
 size_t curve_cvf2_write_frame_meta(uint8_t *buf, uint32_t seq,

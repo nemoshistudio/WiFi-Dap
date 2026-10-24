@@ -10,11 +10,14 @@ export function isDevMode() {
 }
 
 /**
- * OTA page/module switch. Kept false for Wave 1; WP-207 enables it when the
- * browser upload flow is ready (docs/versioning.md §6, docs/ota-local-upload.md).
+ * OTA page/module switch.
+ *
+ * Enabled by default (P0 web platform): `npm run build` ships the OTA page and
+ * registers the OTA WS module. A trimmed build can opt out explicitly with
+ * `VITE_ENABLE_OTA=false` (docs/versioning.md §6, docs/ota-local-upload.md).
  */
 export function isOTAEnabled() {
-    return import.meta.env.VITE_ENABLE_OTA === 'true' || false;
+    return import.meta.env.VITE_ENABLE_OTA !== 'false';
 }
 
 export function isDataFlowEnabled() {

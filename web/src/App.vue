@@ -22,6 +22,11 @@ import { useDataFlowModule } from '@/composables/useDataFlowModule'
 import { useUartModule } from '@/composables/useUartModule'
 import { useUpdateModule } from '@/composables/useUpdateModule'
 import { translate } from '@/locales'
+import CommandPalette from '@/components/command/CommandPalette.vue'
+import { ensureDashboardTelemetry } from '@/components/dashboard/dashboardState'
+import { ensureGuidedSignalBridge } from '@/components/dashboard/guidedSignals'
+import { ensureCommandIndexBridge } from '@/utils/commandIndex'
+import { runAfterPaint, runWhenIdle } from '@/utils/idle'
 
 const wsState = useWsStore()
 const systemStore = useSystemStore()
@@ -84,10 +89,33 @@ function initWebsocket() {
 }
 
 onMounted(() => {
+  // First-screen timing baseline (P1-16): read with
+  // performance.getEntriesByType('mark') / Playwright.
+  if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+    performance.mark('bb:app-mounted')
+  }
   logHelloMessage()
+  // Critical path: register WS modules and open the socket before the first
+  // dashboard poll; the handshake/telemetry queries are queued on CONNECTED.
   registerModules()
   initWebsocket()
-  changeFavicon()
+  // Process-wide dashboard/diagnostics observers (WIFI module + WS state).
+  // They are read-only and do not register/unregister any module handler.
+  ensureDashboardTelemetry()
+  // P1-16: non-first-screen work waits for the first painted frame / idle time.
+  runAfterPaint(() => {
+    changeFavicon()
+    // P1-17/P1-18 bridges: the palette reads the curve page's ELF index; the
+    // guide listens for real events (detection / ELF index / sampling / flash).
+    ensureCommandIndexBridge()
+    ensureGuidedSignalBridge()
+  })
+  runWhenIdle(() => {
+    // Mark the first-screen baseline end (read in Playwright / diagnostics).
+    if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+      performance.mark('bb:first-screen-idle')
+    }
+  })
 })
 
 /**
@@ -147,5 +175,7 @@ const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; des
     <main id="main-content" class="app-main">
       <RouterView />
     </main>
+    <!-- Global Ctrl+K command palette (pages + actions + recents). -->
+    <CommandPalette />
   </div>
 </template>

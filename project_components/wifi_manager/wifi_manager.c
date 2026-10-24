@@ -111,6 +111,80 @@ static void wifi_led_init(void);
 static void wifi_led_set_off(void);
 static void wifi_led_set_on(void);
 
+/* ------------------------------------------------------------------------- */
+/* DAP latency: keep the Wi-Fi modem awake (docs/wifi-no-power-save.md)       */
+/*                                                                           */
+/* WIFI_PS_MIN_MODEM is the IDF default: the station sleeps between beacons   */
+/* and its RX path is gated by the AP's DTIM schedule.  Every USBIP/WebSocket */
+/* DAP transaction then pays an extra wake-up delay (worst case one beacon    */
+/* interval, 100 ms by default) on top of the Wi-Fi round trip, which is the  */
+/* dominant per-transaction cost of flashing/debugging.  WIFI_PS_NONE keeps   */
+/* the radio in active RX and removes that latency bucket.                    */
+/*                                                                           */
+/* The mode must be (re)applied at several points because the driver can      */
+/* reset it to the Kconfig/default value: after esp_wifi_init()/set_mode(),   */
+/* after esp_wifi_start(), on every STA (re)connect, and after every          */
+/* esp_wifi_set_mode() change.  The helper verifies the readback and logs the */
+/* effective mode, so a regression is visible in the boot log instead of      */
+/* silently costing latency.  AP+STA: this is a STA power mode; the AP        */
+/* (beacon TX) is unaffected, and an AP-only transition is tolerated.         */
+/* ------------------------------------------------------------------------- */
+static const char *wifi_ps_name(wifi_ps_type_t ps)
+{
+	switch (ps) {
+	case WIFI_PS_NONE:
+		return "none";
+	case WIFI_PS_MIN_MODEM:
+		return "min_modem";
+	case WIFI_PS_MAX_MODEM:
+		return "max_modem";
+	default:
+		return "unknown";
+	}
+}
+
+void wifi_manager_apply_no_power_save(const char *reason)
+{
+	wifi_ps_type_t ps = WIFI_PS_MIN_MODEM;
+	const char *where = (reason != NULL) ? reason : "?";
+	esp_err_t err;
+
+	err = esp_wifi_set_ps(WIFI_PS_NONE);
+	if (err != ESP_OK) {
+		/* e.g. AP-only mode: not fatal, the station is stopped anyway. */
+		ESP_LOGW(TAG, "WiFi PS: set WIFI_PS_NONE failed at %s: %s", where,
+		         esp_err_to_name(err));
+		return;
+	}
+	err = esp_wifi_get_ps(&ps);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "WiFi PS: get_ps failed at %s: %s", where,
+		         esp_err_to_name(err));
+		return;
+	}
+	if (ps != WIFI_PS_NONE) {
+		ESP_LOGW(TAG, "WiFi PS: readback=%s at %s (expected none)", wifi_ps_name(ps),
+		         where);
+		return;
+	}
+	ESP_LOGI(TAG, "WiFi PS: %s (modem sleep off) at %s", wifi_ps_name(ps), where);
+}
+
+wifi_ps_type_t wifi_manager_get_power_save(void)
+{
+	wifi_ps_type_t ps = WIFI_PS_MIN_MODEM;
+
+	if (esp_wifi_get_ps(&ps) != ESP_OK) {
+		return WIFI_PS_MIN_MODEM; /* unknown: never report a false "none" */
+	}
+	return ps;
+}
+
+const char *wifi_manager_power_save_name(wifi_ps_type_t ps)
+{
+	return wifi_ps_name(ps);
+}
+
 static bool disconnect_reason_is_credential(int reason)
 {
 	switch (reason) {
@@ -208,7 +282,9 @@ void wifi_manager_init(void)
 
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	ESP_ERROR_CHECK(esp_wifi_set_mode(ctx.mode));
-	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+	/* Pre-start: the driver stores the station power mode before it starts the
+	 * RX path.  Non-fatal on error (logged); re-applied after start/connect. */
+	wifi_manager_apply_no_power_save("init/set_mode");
 
 	/* Effective AP credential: user value from NVS, else WiFi-Dap-XXXX
 	 * derived from the STA MAC (contract §6). Never log the password. */
@@ -246,9 +322,9 @@ void wifi_manager_init(void)
 	}
 
 	ESP_ERROR_CHECK(esp_wifi_start());
-	/* The pre-start set_ps() can be overridden by start/mode changes; force
+	/* The pre-start power mode can be overridden by start/mode changes; force
 	 * no power save again now that the driver is running (debug throughput). */
-	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+	wifi_manager_apply_no_power_save("esp_wifi_start");
 	ESP_LOGI(TAG, "wifi started");
 	esp_log_level_set("wifi", ESP_LOG_WARN);
 
@@ -545,6 +621,9 @@ static int set_sta_cred(const char *ssid, const char *password)
 static void handle_wifi_connected(void)
 {
 	ctx.is_sta_connected = 1;
+	/* A (re)association may reset the station power mode to the IDF default;
+	 * restore WIFI_PS_NONE before any DAP traffic can use the link. */
+	wifi_manager_apply_no_power_save("STA connected");
 	wifi_led_set_on();
 
 	if (ctx.pending_valid) {
@@ -1081,6 +1160,9 @@ static int set_wifi_mode(wifi_apsta_mode_e mode)
 		disconn_handler();
 	}
 	ctx.mode = new_mode;
+	/* esp_wifi_set_mode() can reset the station power mode; re-apply while the
+	 * lock is still held (the helper only calls the Wi-Fi driver). */
+	wifi_manager_apply_no_power_save("esp_wifi_set_mode");
 	return err;
 }
 

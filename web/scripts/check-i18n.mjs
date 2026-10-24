@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 734
+const EXPECTED_TOTAL = 1051
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 586
+const EXPECTED_ADDED = 903
 
 const errors = []
 const warnings = []
@@ -111,7 +111,7 @@ const ADDED_KEYS = [
         'fileDate', 'fileInvalid', 'tooLarge', 'sha256', 'verifyingFile', 'upload', 'uploading',
         'cancel', 'cancelConfirm', 'progress', 'speed', 'eta', 'verifying', 'ready',
         'rebootNote', 'success', 'failed', 'aborted', 'sameVersionWarn', 'downgradeWarn',
-        'current', 'slotSize', 'slotFree',
+        'current', 'slotSize', 'slotFree', 'securityHint',
     ]),
     ...keys('ota.status', ['idle', 'receiving', 'verifying', 'ready', 'applying', 'error']),
     ...keys('about', ['hardwareVersion', 'manufactureDate', 'board', 'copyInfo']),
@@ -122,7 +122,7 @@ const ADDED_KEYS = [
         'sendShortcut', 'noResponse',
     ]),
     ...keys('target', [
-        'title', 'description', 'detect', 'detecting', 'detectFailed', 'notDetected',
+        'title', 'description', 'detect', 'detecting', 'detectFailed', 'heapLow', 'swdClock', 'swdClockAuto', 'swdClockFailed', 'swdClockApplied', 'notDetected',
         'notSupported', 'family', 'model', 'unsupportedFamily', 'cpuid', 'idcode', 'uid', 'flashBase', 'flashSize',
         'running', 'securityHint', 'selectFile', 'fileName', 'fileSize', 'sha256',
         'hashComputing', 'invalidFile', 'emptyFile', 'fileTooLarge', 'start',
@@ -224,10 +224,61 @@ const ADDED_KEYS = [
         'conditionEnable', 'conditionAddress', 'conditionSize', 'conditionOp', 'conditionValue', 'conditionSigned', 'conditionMode', 'conditionOnce', 'conditionContinuous', 'conditionStopAfter', 'conditionArmed', 'conditionMet', 'conditionHits', 'conditionTriggerSeq', 'conditionJump', 'conditionAddressRequired', 'conditionInvalid',
         'sourceActivePcLine', 'sourceLineNoAddressHint', 'pcLineNoLineIndex', 'pcLineNoLine',
         'smoothing', 'smoothingOff', 'fftNoSeries', 'fftButton', 'fftTitle', 'fftMagnitude', 'pcSourceFollow', 'mobileMore', 'mobileLess', 'recordExportJson', 'recordExportCsv', 'localTriggerConditional', 'conditionalPending',
-        'localTriggerWatchpoint', 'watchpointAddress', 'watchpointSize', 'watchpointAccess', 'watchpointWrite', 'watchpointReadWrite', 'watchpointAddressRequired', 'watchpointInvalid', 'watchpointArmed', 'watchpointHits', 'watchpointTriggerSeq', 'watchpointJump', 'watchpointJumpPre', 'watchpointJumpPost', 'watchpointTriggered', 'watchpointNoTrigger', 'activeOnly', 'currentFunctionOnly', 'sourceLineNoLineTable', 'targetTitle', 'targetRefresh', 'targetDetected', 'targetNotDetected', 'targetConfidence', 'targetProfile', 'targetProfileNone', 'targetMatch', 'targetFlashMismatch', 'targetFlashBeyond', 'verifyButton', 'verifyNeedElf', 'verifyStopFirst', 'verifyRunning', 'verifyNoFrames', 'verifyMismatch', 'wsTransport', 'wsFrames', 'wsDropped', 'wsLatency',
+        'localTriggerWatchpoint', 'watchpointAddress', 'watchpointSize', 'watchpointAccess', 'watchpointWrite', 'watchpointReadWrite', 'watchpointAddressRequired', 'watchpointInvalid', 'watchpointArmed', 'watchpointHits', 'watchpointTriggerSeq', 'watchpointJump', 'watchpointJumpPre', 'watchpointJumpPost', 'watchpointTriggered', 'watchpointNoTrigger',
+        // task-58: read / second DWT comparator + target UART trace + frame-pointer backtrace
+        'watchpointRead', 'watchpointSecond', 'watchpointSecondHint', 'watchpointDuplicatesFirst', 'watchpointCount',
+        'watchpoint2Armed', 'watchpoint2Hits', 'watchpointLastIndex', 'watchpointLastNone', 'watchpointFirmwareError',
+        'traceTitle', 'traceBoundary', 'traceStart', 'traceStop', 'traceActive', 'traceInactive', 'traceClear',
+        'traceView', 'traceText', 'traceHex', 'tracePoll', 'traceSeq', 'traceTotal', 'traceDropped', 'traceGap',
+        'traceEmpty', 'traceEmptyActive', 'traceHeadersUnavailable', 'traceSharedUart', 'traceStartFailed',
+        'traceStopFailed', 'traceReadFailed', 'traceStarted',
+        'backtraceTitle', 'backtraceBoundary', 'backtraceEnable', 'backtraceRequiresTrigger', 'backtraceRefresh',
+        'backtraceFrames', 'backtraceTruncated', 'backtraceInvalid', 'backtraceEmpty', 'backtraceLoadFailed',
+        'backtraceFunction', 'backtraceSource', 'backtraceHalted', 'backtraceReturn', 'backtraceNoSymbols',
+        'backtraceNoLine', 'backtraceNoLineIndex', 'backtraceInexact',
+        'debugDataTitle', 'debugDataBoundary', 'debugUnavailableTitle', 'swoUnavailable', 'rtosUnavailable',
+        'activeOnly', 'currentFunctionOnly', 'sourceLineNoLineTable', 'targetTitle', 'targetRefresh', 'targetDetected', 'targetNotDetected', 'targetConfidence', 'targetProfile', 'targetProfileNone', 'targetMatch', 'targetFlashMismatch', 'targetFlashBeyond', 'verifyButton', 'verifyNeedElf', 'verifyStopFirst', 'verifyRunning', 'verifyNoFrames', 'verifyMismatch', 'wsTransport', 'wsFrames', 'wsDropped', 'wsLatency',
         'presetEmpty', 'presetDefault', 'presetSaved', 'presetApplied', 'presetName', 'presetSave', 'presetSelect', 'presetLoad', 'presetDelete', 'watchAdd', 'watchRemove', 'watchTitle', 'derivedWhileSampling', 'derivedNeedTwo', 'derivedType', 'derivedAdd', 'derivedSub', 'diagCopyFailed', 'diagTitle', 'diagCopied', 'diagCopy', 'diagHint', 'recordNeedSampling', 'recordStarted', 'recordEmpty', 'recordDefault', 'recordSaved', 'recordSaveFailed', 'recordLimit', 'recordLoaded', 'recordLoadFailed', 'recordTitle', 'recordStart', 'recordStop', 'recordName', 'recordSave', 'recordRows', 'recordSelect', 'recordLoad', 'recordDelete', 'recordRefresh', 'playbackExit', 'playbackPause', 'playbackPlay', 'playbackSpeed', 'cursorDeltaTitle', 'cursorHint', 'cursorClear', 'ariaChart', 'groupWeight',
     ]),
     ...keys('page', ['debugCurve']),
+    // P0 Web platform (task-54): dashboard / guided flow / command palette / diagnostics
+    ...keys('dashboard', [
+        'title', 'subtitle', 'refresh', 'lastUpdated', 'dapTitle', 'wsConnection', 'wsHost',
+        'dapSession', 'dapSessionUnknown', 'dapSessionAfterKick', 'dapSessionActive', 'dapSessionIdle', 'errors', 'noErrors',
+        'wifiTitle', 'wifiSsid', 'wifiRssi', 'wifiIp', 'wifiMode', 'wifiModeApSta', 'wifiModeAp',
+        'wifiModeSta', 'wifiModeOff', 'wifiApOn', 'wifiApSsid', 'wifiDisconnected', 'wifiUnknown',
+        'targetTitle', 'targetUnknown', 'targetHint', 'targetModel',
+        'linkTitle', 'linkWired', 'linkWifi', 'linkUnknown', 'linkHostname', 'linkWiredHint',
+        'linkWifiHint', 'linkUnknownHint', 'quickActions', 'gotoTarget', 'gotoCurve', 'gotoUart',
+        'openGuided', 'openDiagnostics', 'deviceOfflineHint', 'flashSuccess', 'flashing',
+
+        'currentPhysical', 'wiredPreferred', 'wifiLinkNcmAvailable', 'linkAddress', 'wifiGateway', 'ncmState', 'ncmActive', 'ncmInactive', 'ncmNotReported', 'dhcpState', 'dhcpStateInit', 'dhcpStateStarted', 'dhcpStateStopped', 'dhcpError', 'wiredDeviceIp', 'ncmHintOk', 'ncmHintReplug', 'ncmHintUnavailable', 'healthTitle', 'healthOk', 'healthWarn', 'healthError', 'healthUnknown', 'healthRefresh', 'healthRefreshed', 'healthRefreshFailed', 'healthOfflineHint', 'rttTitle', 'rttValue', 'rttStats', 'rttNone', 'rttHint', 'statusEndpoint', 'statusSupported', 'statusUnsupported', 'statusRequestFailed', 'dapLatency', 'dapLatencyValue', 'swdActual', 'swdActualValue', 'heapFreeShort', 'heapLargestShort', 'lastUpdate', 'unknownField', 'lastSeen', 'wifiQualityExcellent', 'wifiQualityGood', 'wifiQualityFair', 'wifiQualityPoor', 'devicesTitle', 'devicesSubtitle', 'deviceRefresh', 'deviceAdd', 'deviceAddHint', 'deviceAddFailed', 'deviceAdded', 'deviceName', 'deviceCurrent', 'deviceOpen', 'deviceOpenHint', 'deviceRename', 'deviceRenameTitle', 'deviceRenamed', 'deviceDelete', 'deviceEmpty', 'deviceInvalidHost', 'deviceSameHost', 'deviceRemoveConfirm', 'deviceTarget', 'deviceVersion', 'deviceRssi', 'deviceSourceCurrent', 'deviceSourceDiscovered', 'deviceSourceManual', 'deviceSourceRecent', 'devicesUnsupported', 'devicesFailed', 'devicesOk', 'devicesLoading', 'devicesLastUpdated', 'deviceManage',
+        'wifiChannel', 'dapXferCount', 'dapXferLast', 'dapRing', 'devicesBusy', 'devicesNone',]),
+    ...keys('guided', [
+        'title', 'subtitle', 'progress', 'notAuto', 'stepConnect', 'stepConnectHint', 'stepDetect',
+        'stepDetectHint', 'stepElf', 'stepElfHint', 'stepSample', 'stepSampleHint', 'stepFlash',
+        'stepFlashHint', 'stateDone', 'stateTodo', 'current', 'openCurve', 'gotoFlash', 'markElfDone',
+        'markSampleDone', 'skip', 'reopen', 'connectionRequired', 'allDone', 'closedHint',
+
+        'reset', 'resetDone', 'autoDetected', 'manualConfirm', 'manualConfirmed', 'manualHint', 'elfAutoHint', 'sampleAutoHint',]),
+    ...keys('palette', [
+        'title', 'placeholder', 'openHint', 'recent', 'pages', 'actions', 'empty', 'footer',
+        'actionDetect', 'actionDetectHint', 'actionReset', 'actionResetHint', 'actionCurveToggle',
+        'actionCurveToggleHint', 'actionKick', 'actionKickHint', 'actionCopyDiag', 'actionCopyDiagHint',
+        'actionGuided', 'actionGuidedHint', 'actionDiagnostics', 'actionDiagnosticsHint',
+        'actionRefreshWifi', 'actionRefreshWifiHint', 'notConnected', 'kickOk', 'kickFail',
+        'copyFailed', 'resetOk', 'resetFail', 'refreshWifiSent',
+
+        'variables', 'functions', 'elfIndexSummary', 'elfUnavailable', 'noAddress', 'functionCopied', 'actionDevices', 'actionDevicesHint',]),
+    ...keys('diag', [
+        'title', 'subtitle', 'errors', 'noErrors', 'dap', 'swd', 'heap', 'wifi', 'target',
+        'protocol', 'link', 'lastKick', 'lastProbe', 'kickNone', 'kickOk', 'kickUnsupported', 'kickFailed',
+        'kickResponded', 'probeOk', 'probeFailed', 'probeNone', 'probeHttpStatus', 'statusState',
+        'statusBusy', 'statusUnavailable', 'heapFree', 'heapLargest', 'heapUnknown', 'swdClock', 'wifiState', 'wifiError', 'targetError',
+        'sessionUnknown', 'unsupportedHint', 'kick', 'reset', 'refresh', 'refreshing', 'refreshOk',
+        'refreshDeviceOffline', 'refreshStatusFailed', 'refreshProbeFailed', 'resetOk', 'resetFailed',
+        'copy', 'copyFailed', 'jsonTitle',
+    ]),
 ]
 
 const EXPECTED_KEYS = [...BASELINE_KEYS, ...ADDED_KEYS]
@@ -240,6 +291,8 @@ const ALLOWED_PLACEHOLDERS = new Set([
     'name', 'matched', 'total', 'maxFiles', 'maxBytes', 'time', 'type', 'file', 'line', 'shown',
     // task-40: target detection/profile match details
     'detected', 'profile', 'result', 'candidates',
+    // task-61: link health / discovery / command palette placeholders
+    'status', 'last', 'avg', 'min', 'khz', 'host', 'funcs', 'addr',
 ])
 
 function selfCheckContract() {

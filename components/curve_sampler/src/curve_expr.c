@@ -260,7 +260,101 @@ bool curve_watchpoint_params_ok(uint32_t address, uint8_t size)
 
 const char *curve_watch_access_name(uint8_t access)
 {
-    return (access == (uint8_t)CURVE_WATCH_ACCESS_RW) ? "readwrite" : "write";
+    switch (access) {
+    case (uint8_t)CURVE_WATCH_ACCESS_RW:
+        return "readwrite";
+    case (uint8_t)CURVE_WATCH_ACCESS_READ:
+        return "read";
+    case (uint8_t)CURVE_WATCH_ACCESS_WRITE:
+    default:
+        return "write";
+    }
+}
+
+uint32_t curve_dwt_mask_for_size(uint8_t size)
+{
+    switch (size) {
+    case CURVE_WATCH_SIZE_1:
+        return 0U;
+    case CURVE_WATCH_SIZE_2:
+        return 1U;
+    case CURVE_WATCH_SIZE_4:
+        return 2U;
+    default:
+        return 0U;
+    }
+}
+
+uint32_t curve_dwt_function_for_access(uint8_t access)
+{
+    switch (access) {
+    case (uint8_t)CURVE_WATCH_ACCESS_READ:
+        return CURVE_DWT_FUNC_READ;
+    case (uint8_t)CURVE_WATCH_ACCESS_RW:
+        return CURVE_DWT_FUNC_ACCESS;
+    case (uint8_t)CURVE_WATCH_ACCESS_WRITE:
+    default:
+        return CURVE_DWT_FUNC_WRITE;
+    }
+}
+
+bool curve_dwt_alloc_comparators(uint8_t num_comp, const uint32_t *functions,
+                                 uint8_t want, uint8_t *out)
+{
+    uint8_t found = 0U;
+
+    if (functions == NULL || out == NULL || want == 0U) {
+        return false;
+    }
+    if (want > CURVE_MAX_WATCHPOINTS) {
+        return false;
+    }
+    if (num_comp > CURVE_DWT_MAX_COMP) {
+        num_comp = CURVE_DWT_MAX_COMP;
+    }
+    for (uint8_t i = 0U; i < num_comp && found < want; i++) {
+        if ((functions[i] & CURVE_DWT_FUNCTION_MASK) == 0U) {
+            out[found++] = i;
+        }
+    }
+    return found == want;
+}
+
+uint8_t curve_dwt_hit_mask(const uint32_t *functions, const uint8_t *indices,
+                           uint8_t count)
+{
+    uint8_t mask = 0U;
+
+    if (functions == NULL || indices == NULL) {
+        return 0U;
+    }
+    if (count > CURVE_MAX_WATCHPOINTS) {
+        count = CURVE_MAX_WATCHPOINTS;
+    }
+    for (uint8_t i = 0U; i < count; i++) {
+        if (indices[i] < CURVE_DWT_MAX_COMP &&
+            (functions[indices[i]] & CURVE_DWT_FUNCTION_MATCHED) != 0U) {
+            mask = (uint8_t)(mask | (uint8_t)(1U << i));
+        }
+    }
+    return mask;
+}
+
+const char *curve_snapshot_state_name(uint8_t state)
+{
+    switch (state) {
+    case (uint8_t)CURVE_SNAPSHOT_ARMED:
+        return "armed";
+    case (uint8_t)CURVE_SNAPSHOT_CAPTURING:
+        return "capturing";
+    case (uint8_t)CURVE_SNAPSHOT_COMPLETE:
+        return "complete";
+    case (uint8_t)CURVE_SNAPSHOT_ABORTED:
+        return "aborted";
+    case (uint8_t)CURVE_SNAPSHOT_OFF:
+    default:
+        return "off";
+    }
 }
 
 uint16_t curve_series_expr_for_pc(const curve_config_t *cfg,

@@ -8,6 +8,7 @@
 #ifndef BIRDIEBOT_WIRED_NCM_NETIF_H
 #define BIRDIEBOT_WIRED_NCM_NETIF_H
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -19,6 +20,13 @@ esp_err_t birdiebot_wired_ncm_init(void);
 
 /** Destroy the USB-NCM netif / driver (best effort; used by deinit only). */
 void birdiebot_wired_ncm_deinit(void);
+
+/** Read-only diagnostics for the Web target/status endpoint. */
+bool birdiebot_wired_ncm_is_active(void);
+bool birdiebot_wired_ncm_dhcp_is_active(void);
+const char *birdiebot_wired_ncm_device_ip(void);
+int birdiebot_wired_ncm_dhcp_error(void);
+int birdiebot_wired_ncm_dhcp_state(void);
 
 #ifdef __cplusplus
 }

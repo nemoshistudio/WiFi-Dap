@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Host-side regression test for the curve sampler JSON parser + expression
-# evaluator (components/curve_sampler/src/curve_json.c / curve_expr.c).
+# Host-side regression test for the curve sampler JSON parser, expression
+# evaluator, DWT comparator helpers, backtrace prototype and trace ring
+# (components/curve_sampler/src/curve_json.c / curve_expr.c /
+# curve_backtrace.c / curve_trace_core.c).
 #
 # Runs on the build host, no target hardware / no firmware flash needed.
 # cJSON is taken from the ESP-IDF Docker image so the exact library version the
@@ -28,10 +30,13 @@ gcc -std=gnu11 -Wall -Wextra -O2 \
     -I "$ROOT/components/curve_sampler/src" \
     "$HERE/test_curve.c" \
     "$ROOT/components/curve_sampler/src/curve_json.c" \
+    "$ROOT/components/curve_sampler/src/curve_bin.c" \
     "$ROOT/components/curve_sampler/src/curve_expr.c" \
     "$ROOT/components/curve_sampler/src/curve_ring.c" \
     "$ROOT/components/curve_sampler/src/curve_status.c" \
     "$ROOT/components/curve_sampler/src/curve_cvf2.c" \
+    "$ROOT/components/curve_sampler/src/curve_backtrace.c" \
+    "$ROOT/components/curve_sampler/src/curve_trace_core.c" \
     "$ROOT/components/curve_sampler/src/curve_ws_core.c" \
     "$BUILD_DIR/cjson/cJSON.c" \
     -lm -o "$BUILD_DIR/test_curve"

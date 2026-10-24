@@ -188,7 +188,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
    - 默认口令：`12345678`（**首次使用请立即在 Wi-Fi 页修改**，见 [§9](#9-安全默认与加固)）
 3. 浏览器打开 **<http://192.168.1.1/>**（AP 模式默认网关/设备地址）。
    - 若已通过 Wi-Fi 页把设备接入局域网，则改用路由器分配给它的 IP；
-   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap`（见 `project_components/wt_mdns/wt_mdns_config.h`），可访问 `http://wifi-dap.local/`；若解析失败请直接使用设备 IP。
+   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap-XXXX.local`，**XXXX = STA MAC 最后两个字节的 4 位十六进制**（与默认 AP SSID `WiFi-Dap-XXXX` 同后缀；例如 MAC 末两字节 CA:60 → `http://wifi-dap-ca60.local/`）；若解析失败请直接使用设备 IP。
 4. 在 **Wi-Fi** 页填写并连接你的局域网（支持多网络记忆与自动切换），之后即可在局域网内访问 Web UI、调试器端口与 UART 桥。
 5. 打开 **UART** 页，选择波特率（默认 115200-8N1）即可看目标串口输出；或直接使用 USBIP/elaphureLink 开始调试（[§7](#7-调试工具接入)）。
 
@@ -219,7 +219,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 1. `Update` 页选择 `build/esp32s3/birdiebot_wifi_dap.bin`（**只上传 app 镜像**，不要上传 merge/全量包/zip）。
 2. 上传过程中设备把镜像写入**空闲槽**（`ota_0` ↔ `ota_1`），状态：`IDLE → RECEIVING → VERIFYING → READY → APPLYING`，成功后约 1 s 重启。
 3. 新镜像首启为 `PENDING_VERIFY`，`main` 在 10 s 后确认；若 10 s 内崩溃/复位，bootloader 自动回滚旧槽。
-4. 若当前 Web 构建未启用 Update 页（构建开关 `VITE_ENABLE_OTA`），可用等价的 HTTP/脚本方式上传：
+4. Update 页默认启用；只有显式 `VITE_ENABLE_OTA=false` 的精简构建才需要用等价的 HTTP/脚本方式上传：
    - `python3 scripts/ota_upload.py --host <ip> --file <app.bin> --info`
    - 或 `curl` 直传，见 [docs/hardware-test-ota.md §2/§3](docs/hardware-test-ota.md)。
 
@@ -310,7 +310,7 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 - 浏览器带 `Origin` 时必须同源或命中名单（防 CSWSH）；
 - 非浏览器客户端（curl/OpenOCD/脚本）不带 Origin，仍可访问——**这不是身份认证**。
 
-若通过主机名（mDNS/反向代理）访问，请在 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 加入该来源（如 `http://wifi-dap.local`）。脚本不再需要/支持 `--token`。
+若通过主机名（mDNS/反向代理）访问，请在 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 加入该来源（如 `http://wifi-dap-XXXX.local`，XXXX 用实际 MAC 后缀）。脚本不再需要/支持 `--token`。
 
 ### 9.4 关闭不需要的传输
 
@@ -422,7 +422,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 |---|---|
 | 找不到 `WiFi-Dap-XXXX` 热点 | 是否已首次烧录；板卡 board 选择是否正确（`sdkconfig.defaults.*`）；串口日志是否有 Wi-Fi 初始化错误；STA 已连接时 AP 会在 30 s 后关闭（正常） |
 | 打开 `192.168.1.1` 无响应 | 手机/PC 是否连的是设备 AP；是否被 Smart APSTA 关闭了 AP；改连 STA 网段的设备 IP |
-| `wifi-dap.local` 无法解析 | 设备/客户端 mDNS 支持；改用 IP 访问（主机名见 `wt_mdns_config.h`，默认 `wifi-dap`） |
+| `wifi-dap-XXXX.local` 无法解析 | 设备/客户端 mDNS 支持；改用 IP 访问（主机名见 `wt_mdns_config.h`，格式 `wifi-dap-XXXX`，XXXX 为 MAC 后两字节） |
 | Web UI 提示在线但操作被拒（HTTP 403） | Host/Origin 校验：用 IP 访问，或把主机名加入 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
 | `usbip.exe attach_ude` 失败 | usbip-win 版本是否 0.3.0+；设备 IP/网段是否可达；3240 是否被防火墙拦截；busid 固定为 `1-1` |
 | DAP 断连/很慢 | Wi-Fi 环境与距离；2.4 GHz 干扰；调试器时钟过高；同网段广播风暴 |

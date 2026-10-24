@@ -162,6 +162,61 @@ esp_err_t wt_tf_init(void);
 esp_err_t wt_tf_probe(wt_tf_info_t *info);
 
 /**
+ * Force the SWD clock used by target detection/flash and local sampling.
+ * 0 = automatic 2 MHz -> 1 MHz -> 500 kHz probe; manual values must be
+ * 100 kHz..10 MHz. The setting is process-wide and intentionally not
+ * persisted across reboot.
+ */
+esp_err_t wt_tf_set_swd_clock(uint32_t clock_hz);
+
+/** Currently selected manual SWD clock, or 0 for automatic probing. */
+uint32_t wt_tf_get_swd_clock(void);
+
+/**
+ * @brief Actual SWD clock the last successful link bring-up used.
+ *
+ * With automatic probing this is the first clock of the 4M/2M/1M/500k ladder
+ * that identified the target; it differs from wt_tf_get_swd_clock() (which
+ * reports the manual selection, 0 = auto).  0 means no successful bring-up
+ * since boot.
+ */
+uint32_t wt_tf_get_actual_swd_clock(void);
+
+/**
+ * @brief Read-only link/health diagnostics for GET /api/target/status.
+ *
+ * Everything here is a real measurement or driver state; fields that could not
+ * be measured are reported as 0/false instead of being fabricated.  This API
+ * never takes the DAP engine and never blocks on a running flash session.
+ */
+typedef struct {
+    /* Wi-Fi station link (read-only esp_wifi query; WiFi may also be off) */
+    bool wifi_connected;
+    int8_t wifi_rssi;              /**< dBm, valid when wifi_connected */
+    uint8_t wifi_channel;          /**< primary channel, valid when connected */
+    char wifi_ssid[33];            /**< connected SSID, empty when not connected */
+    /* Internal heap snapshot (same metric as the Web heap guard) */
+    uint32_t heap_free;
+    uint32_t heap_largest;
+    /* SWD link actually used by the last successful bring-up */
+    uint32_t swd_clock_actual_hz;  /**< 0 until a target was probed */
+    uint32_t swd_clock_manual_hz;  /**< 0 = auto */
+    /* USBIP<->DAP ring buffers (P0-2 early reservation) */
+    bool dap_ring_preallocated;    /**< backed by the early static reservation */
+    bool dap_ring_active;          /**< rings currently created */
+    uint32_t dap_ring_request_bytes;
+    uint32_t dap_ring_response_bytes;
+    /* Device-side USBIP<->DAP transaction latency (never a network RTT) */
+    uint32_t dap_xfer_count;
+    uint32_t dap_xfer_avg_us;
+    uint32_t dap_xfer_max_us;
+    uint32_t dap_xfer_last_us;
+} wt_tf_link_diag_t;
+
+/** Copy the link diagnostics snapshot (see wt_tf_link_diag_t; never blocks). */
+void wt_tf_get_link_diag(wt_tf_link_diag_t *out);
+
+/**
  * @brief Start a flash session: probe, halt the core, erase the sectors that
  *        cover the image.  Keeps the DAP engine until flash_end()/abort().
  *
@@ -208,6 +263,78 @@ esp_err_t wt_tf_reset_target(bool run);
  * @brief Copy the current status snapshot (never blocks on a running flash).
  */
 void wt_tf_get_status(wt_tf_status_t *out);
+
+/* ------------------------------------------------------------------------- */
+/* P1-19: nearby-device discovery (mDNS _http._tcp, read-only)                */
+/* ------------------------------------------------------------------------- */
+
+/** Maximum nearby devices returned by one discovery query. */
+#define WT_TF_DISCOVER_MAX          8U
+#define WT_TF_DISCOVER_NAME_MAX     64U
+#define WT_TF_DISCOVER_HOST_MAX     64U
+#define WT_TF_DISCOVER_TARGET_MAX   32U
+#define WT_TF_DISCOVER_VERSION_MAX  24U
+/** Default blocking mDNS query timeout (ms); /api/discover uses <= 2 s. */
+#define WT_TF_DISCOVER_TIMEOUT_MS   2000U
+
+/** One nearby DAP discovered through mDNS `_http._tcp`.  Only real values are
+ *  stored: `has_rssi=false` means the mDNS answer did not carry an RSSI (the
+ *  JSON formatter then omits the field instead of inventing one). */
+typedef struct {
+    char name[WT_TF_DISCOVER_NAME_MAX];       /**< TXT "name" or instance name */
+    char hostname[WT_TF_DISCOVER_HOST_MAX];   /**< SRV target hostname (no trailing '.')
+                                                   or empty when unknown */
+    char ip[16];                              /**< first IPv4 A record, "" when none */
+    uint16_t port;                            /**< SRV port */
+    bool has_rssi;                            /**< mDNS has no RSSI by default */
+    int8_t rssi;                              /**< dBm when has_rssi */
+    /* Optional TXT enrichment; empty when the advertiser does not publish it. */
+    char target[WT_TF_DISCOVER_TARGET_MAX];   /**< TXT "target"/"chip" */
+    char version[WT_TF_DISCOVER_VERSION_MAX]; /**< TXT "version"/"fw" */
+} wt_tf_discover_device_t;
+
+/**
+ * @brief Query nearby DAPs via mDNS `_http._tcp` (blocking, read-only).
+ *
+ * Filters the device's own mDNS answer, keeps only results with an IPv4
+ * address and deduplicates by (hostname, port).  Does not take the DAP engine
+ * and never touches the target.
+ *
+ * @param out           caller array (WT_TF_DISCOVER_MAX entries are enough)
+ * @param max_devices   array capacity
+ * @param timeout_ms    query timeout (clamped to 100..5000 ms; 0 = default 2 s)
+ * @return device count >= 0 on success (0 = no mDNS answer / mDNS not ready),
+ *         -(int)ESP_ERR_INVALID_ARG (bad arguments) or
+ *         -(int)ESP_ERR_INVALID_STATE (another query is already running).
+ */
+int wt_tf_discover(wt_tf_discover_device_t *out, size_t max_devices,
+                   uint32_t timeout_ms);
+
+/**
+ * @brief Format the discovery response JSON (pure, host-testable).
+ *
+ * Output: `{"ok":true,"devices":[{"name":..,"hostname":..,"ip":..,"port":..,
+ *          "rssi":..?,"target":..?,"version":..?}, ...]}`.
+ * `rssi`/`target`/`version` are omitted when not measured/published; invalid
+ * UTF-8 is passed through unchanged (mDNS TXT is UTF-8), control characters
+ * are \u-escaped so the response is always valid JSON.
+ *
+ * @return number of bytes written (excluding NUL), or -1 when buf is too small.
+ */
+int wt_tf_discover_format_json(const wt_tf_discover_device_t *devices,
+                               size_t count, char *buf, size_t buf_len);
+
+/**
+ * @brief Query + format the /api/discover response in one call.
+ *
+ * Single-query guard: while another discovery is running this returns
+ * ESP_ERR_INVALID_STATE (the HTTP layer answers 429).  mDNS not running /
+ * no answer still returns ESP_OK with `{"ok":true,"devices":[]}`.
+ *
+ * @param out_len written JSON length (excluding NUL); may be NULL.
+ */
+esp_err_t wt_tf_discover_json(char *buf, size_t buf_len, uint32_t timeout_ms,
+                              size_t *out_len);
 
 #ifdef __cplusplus
 }

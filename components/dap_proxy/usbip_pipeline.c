@@ -262,12 +262,17 @@ bool usbip_pipeline_handle_in(uint8_t *raw_header48)
         memcpy(s_in_hdrs[slot].hdr, raw_header48, USBIP_PL_HDR_SIZE);
         s_stat_queue_in++;
     } else if (action == USBIP_PL_IN_SEND) {
-        /* A response was already stored in the DAP OUT ring: answer now. */
+        /* A response was already stored in the DAP response ring: answer now.
+         * Take it directly into the payload area of the TX staging slot and
+         * patch the raw request header in front of it.  send_stage2_..._inplace()
+         * then sends header+payload with a single TCP write: only one copy of
+         * the payload (ring -> staging slot) instead of two. */
         uint32_t len = 0;
-        if (dap_take_response(s_resp_buf, sizeof(s_resp_buf), &len)) {
+        if (dap_take_response(s_tx_buf + USBIP_PL_HDR_SIZE,
+                              DAP_PACKET_SIZE, &len)) {
             memcpy(s_tx_buf, raw_header48, USBIP_PL_HDR_SIZE);
-            send_stage2_submit_data_fast((usbip_stage2_header *)s_tx_buf,
-                                         s_resp_buf, (int32_t)len);
+            send_stage2_submit_data_inplace((usbip_stage2_header *)s_tx_buf,
+                                            (int32_t)len);
             s_stat_send_now++;
         } else {
             /* Book-keeping says a response is queued but the ring is empty:
@@ -358,14 +363,25 @@ void usbip_pipeline_complete_response(const uint8_t *data, uint32_t length)
 
     if (action == USBIP_PL_RESP_SEND) {
         if (s_in_hdrs[slot].seq == seq) {
+            /* IN URB already parked: copy the response payload once into the
+             * payload area of the staging slot (header in front), then one TCP
+             * write - no second payload copy (docs/dap-copy-budget.md). */
+            uint32_t len = (length > (uint32_t)DAP_PACKET_SIZE)
+                               ? (uint32_t)DAP_PACKET_SIZE
+                               : length;
             memcpy(s_tx_buf, s_in_hdrs[slot].hdr, USBIP_PL_HDR_SIZE);
-            send_stage2_submit_data_fast((usbip_stage2_header *)s_tx_buf, data,
-                                         (int32_t)length);
+            if (len > 0U) {
+                memcpy(s_tx_buf + USBIP_PL_HDR_SIZE, data, len);
+            }
+            send_stage2_submit_data_inplace((usbip_stage2_header *)s_tx_buf,
+                                            (int32_t)len);
             s_stat_send_now++;
         } else {
             s_stat_error++;
         }
     } else if (action == USBIP_PL_RESP_QUEUE) {
+        /* No IN URB yet: push the payload-only item into the response ring
+         * directly from the DAP output buffer (single ring copy, no staging). */
         if (dap_push_response_data(data, length)) {
             s_stat_queue_resp++;
         } else {

@@ -30,8 +30,11 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_timer.h>
+#include <esp_wifi.h>
 
 #include <mbedtls/sha256.h>
 
@@ -74,6 +77,9 @@ static uint8_t s_sha_expected[32];
 static uint8_t s_sha_actual[32];
 static uint64_t s_op_start_ms;
 static tf_debug_result_t s_debug_result;
+/* P0-8: actual SWD clock of the last successful link bring-up (0 = none yet).
+ * Written by the target worker task, read by GET /api/target/status. */
+static volatile uint32_t s_actual_swd_hz;
 
 /* ------------------------------------------------------------------------- */
 /* init / locks                                                              */
@@ -564,23 +570,44 @@ static void tf_target_set_unknown(uint32_t idcode, uint32_t cpuid, uint32_t dpid
  * Link the DAP to SWD and identify the target; fills s_target/s_info.
  * The caller must already own the DAP engine.
  *
- * The SWD clock is retried from 2 MHz down to 500 kHz: the STM32H7 setup in
- * the field only answers at <=1 MHz (OpenOCD: "cannot read IDR" at 2 MHz),
- * while F4 boards work at the default 2 MHz.  Each attempt re-runs the full
- * line-reset/JTAG-to-SWD/DP power-up sequence with the new clock.
+ * Automatic SWD clock probe (P0-8): 4 MHz -> 2 MHz -> 1 MHz -> 500 kHz.  The
+ * STM32H7 setup in the field only answers at <=1 MHz (OpenOCD: "cannot read
+ * IDR" at 2 MHz), while F4 boards usually work at the faster clocks; the first
+ * clock that identifies the target is kept and reported as the actual clock.
+ * A manual clock (wt_tf_set_swd_clock) skips the walk.  Each attempt re-runs
+ * the full line-reset/JTAG-to-SWD/DP power-up sequence with the new clock.
  */
+esp_err_t wt_tf_set_swd_clock(uint32_t clock_hz)
+{
+    if (clock_hz != 0U && (clock_hz < 100000U || clock_hz > 10000000U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    tf_swd_set_forced_clock(clock_hz);
+    return ESP_OK;
+}
+
+uint32_t wt_tf_get_swd_clock(void)
+{
+    return tf_swd_get_forced_clock();
+}
+
 static esp_err_t tf_probe_link(void)
 {
     static const uint32_t clock_try[] = {
-        TF_SWD_CLOCK_HZ, TF_SWD_CLOCK_FALLBACK1_HZ, TF_SWD_CLOCK_FALLBACK2_HZ
+        TF_SWD_CLOCK_HZ, TF_SWD_CLOCK_FALLBACK1_HZ, TF_SWD_CLOCK_FALLBACK2_HZ,
+        TF_SWD_CLOCK_FALLBACK3_HZ
     };
+    uint32_t forced_hz = tf_swd_get_forced_clock();
+    uint32_t forced_try[1] = { forced_hz };
+    const uint32_t *clocks = forced_hz != 0U ? forced_try : clock_try;
+    size_t clock_count = forced_hz != 0U ? 1U : (sizeof(clock_try) / sizeof(clock_try[0]));
     esp_err_t last_err = ESP_ERR_NOT_FOUND;
     bool saw_cpuid = false;
 
     tf_info_clear();
 
-    for (size_t ci = 0U; ci < (sizeof(clock_try) / sizeof(clock_try[0])); ci++) {
-        uint32_t clock_hz = clock_try[ci];
+    for (size_t ci = 0U; ci < clock_count; ci++) {
+        uint32_t clock_hz = clocks[ci];
         uint32_t dpidr = 0U;
         uint32_t cpuid = 0U;
         esp_err_t err;
@@ -596,6 +623,9 @@ static esp_err_t tf_probe_link(void)
         }
         s_target.dpidr = dpidr;
         s_target.swd_clock_hz = clock_hz;
+        /* P0-8: remember the clock that actually brought the link up so the
+         * status endpoint reports the real value (not the requested max). */
+        s_actual_swd_hz = clock_hz;
 
         TF_STAGE(21U);
         if (tf_swd_read_u32(TF_REG_CPUID, &cpuid) != ESP_OK) {
@@ -1204,6 +1234,52 @@ esp_err_t wt_tf_reset_target(bool run)
         return err;
     }
     return tf_submit(tf_job_reset_target, &a);
+}
+
+uint32_t wt_tf_get_actual_swd_clock(void)
+{
+    return s_actual_swd_hz;
+}
+
+void wt_tf_get_link_diag(wt_tf_link_diag_t *out)
+{
+    wifi_ap_record_t ap;
+    dap_ring_info_t ring;
+    dap_xfer_stats_t xfer;
+
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    /* Wi-Fi STA link: esp_wifi_sta_get_ap_info() is read-only and returns
+     * ESP_ERR_WIFI_NOT_CONNECT / NOT_INIT when there is no station link. */
+    memset(&ap, 0, sizeof(ap));
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        out->wifi_connected = true;
+        out->wifi_rssi = ap.rssi;
+        out->wifi_channel = ap.primary;
+        memcpy(out->wifi_ssid, ap.ssid, sizeof(ap.ssid));
+        out->wifi_ssid[sizeof(out->wifi_ssid) - 1U] = '\0';
+    }
+
+    out->heap_free = (uint32_t)esp_get_free_heap_size();
+    out->heap_largest = (uint32_t)heap_caps_get_largest_free_block(
+        MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    out->swd_clock_actual_hz = s_actual_swd_hz;
+    out->swd_clock_manual_hz = tf_swd_get_forced_clock();
+
+    dap_handle_get_ring_info(&ring);
+    out->dap_ring_preallocated = ring.preallocated;
+    out->dap_ring_active = ring.active;
+    out->dap_ring_request_bytes = ring.request_ring_bytes;
+    out->dap_ring_response_bytes = ring.response_ring_bytes;
+
+    dap_handle_get_xfer_stats(&xfer);
+    out->dap_xfer_count = xfer.transactions;
+    out->dap_xfer_avg_us = xfer.avg_us;
+    out->dap_xfer_max_us = xfer.max_us;
+    out->dap_xfer_last_us = xfer.last_us;
 }
 
 void wt_tf_get_status(wt_tf_status_t *out)

@@ -17,6 +17,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `check-release-versions.sh` | 固件 tag / Web version / protocol / 镜像内嵌版本交叉校验 | WP-143 |
 | `check-protocol-version.sh` | 协议版本三源一致性门禁：C 头 == `docs/protocol.md` == `web/src/api/index.ts` | WP-143/审计 B6 |
 | `device_smoke.sh` | 设备就绪**只读**冒烟：USBIP/HTTP/WS 握手 + WS ping + OTA GET_INFO，聚合 PASS/FAIL | WP-305 |
+| `hil_gate.py` | 真机 **HIL 回归/性能门禁**：目标检测 → 本地采样 1/5 系列 → 帧率/丢帧/heap/诊断字段 → 页面 smoke；只读、JSON+退出码、内置 `--dry-run` | task-59 |
 | `ota_upload.py` | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库） | WP-205/305 |
 | `README.md` | 本文档 | — |
 
@@ -226,6 +227,32 @@ scripts/device_smoke.sh --host 192.168.1.1 --skip-ws
 dap_smoke 的 USBIP 探测会打断正在进行的调试会话——调试时请勿运行（或用 `--skip-dap`）。
 本目录若缺少 `dap_smoke.py`/`e2e_ws_client.py`（main 分支合并后才提供），对应步骤 FAIL 并提示
 合并主分支；本地无设备自测可用 `DEVICE_SMOKE_SCRIPTS_DIR=<dir>` 指向 mock 工具目录（测试钩子）。
+
+## HIL 回归/性能门禁：hil_gate.py
+
+**只读**真机门禁（不写目标 Flash、不 OTA、不复位目标）：`GET /api/target/info`
+检测 → `target/status` 诊断字段 → `curve/start` 1 系列冒烟 → `curve/start`
+5 系列 10 s 性能窗口（计算有效帧率/丢帧/invalid）→ `curve/stop` → heap/无泄漏
+→ 页面 smoke（首页 + `/#/target`、`/#/debug-curve`、`/#/update`，Playwright
+可选）→ JSON/人体可读报告 + CI 退出码。文档：[`docs/hil-gate.md`](../docs/hil-gate.md)。
+
+```bash
+# 标准门禁（默认 <device-ip>:80；JSON 报告 + 退出码）
+python3 scripts/hil_gate.py --host <device-ip> --json --report /tmp/hil.json
+
+# 旧固件（尚无 target/status 诊断字段）临时跑性能部分
+python3 scripts/hil_gate.py --host <device-ip> --allow-legacy-firmware
+
+# 无设备离线自测（5 个 fake 场景断言退出码；host 测试也会跑它）
+python3 scripts/hil_gate.py --dry-run
+```
+
+退出码：`0` PASS；`1` required 检查/阈值失败；`2` 参数错误；`3` 设备不可达。
+关键阈值：有效帧率 ≥ 35 fps（名义 50 Hz 的 70%）、`invalid` ≤ 1%、
+`missing_seqs/gap = 0`、`heap_free` ≥ 32 KiB、`heap_largest` ≥ 8 KiB、
+采样前后 `heap_free` 下降 ≤ 16 KiB。阈值依据与实测 baseline 见 `docs/hil-gate.md` §5。
+与 `device_smoke.sh` 互补：后者覆盖 USBIP/WS/OTA 传输层，本门禁覆盖设备本地采样
+闭环 + 性能 + 新诊断字段。
 
 ## OTA 真机上传/查询：ota_upload.py
 

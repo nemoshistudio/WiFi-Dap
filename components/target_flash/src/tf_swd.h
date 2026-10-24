@@ -31,6 +31,17 @@ extern "C" {
  */
 esp_err_t tf_swd_link_init(uint32_t clock_hz, uint32_t *dpidr);
 
+/**
+ * Select a forced SWD clock for subsequent link bring-ups (0 = auto probe).
+ * Valid manual values are 100 kHz..10 MHz; the caller (Web/API) validates the
+ * range before this call.  Shared by target_flash and curve_sampler so the
+ * Web choice applies to both detect/flash and local sampling.
+ */
+void tf_swd_set_forced_clock(uint32_t clock_hz);
+
+/** @brief Forced SWD clock, or 0 when automatic probing is enabled. */
+uint32_t tf_swd_get_forced_clock(void);
+
 /** Clear DP/AP sticky errors and re-arm the AHB-AP CSW after a failed access
  *  (wrong DBGMCU base probes use this before trying the next candidate). */
 esp_err_t tf_swd_recover_bus(void);

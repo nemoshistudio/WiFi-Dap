@@ -103,6 +103,45 @@ export function chooseBreakpointFunction(functions: readonly FunctionSymbol[], a
     return functions.find((symbol) => symbol.address === normalized) ?? null
 }
 
+/** PC -> 所在函数（backtrace 帧映射用；调用方需传入按地址升序的列表）。 */
+export interface FunctionAddressMatch {
+    symbol: FunctionSymbol
+    /** PC 相对函数入口的偏移（字节）。 */
+    offset: number
+    /** true = PC 落在符号 size 范围内；false = 只有最近的前置符号（可能已越界/符号表被截断）。 */
+    exact: boolean
+}
+
+/**
+ * PC -> 函数（二分查找最近的前置符号）。
+ *
+ * `buildFunctionSymbols()` 的返回值按地址升序排列；对栈回溯的返回地址，PC 可能落在
+ * 函数体内任意位置（调用方会对返回地址做 -1 归一，见 curveBacktrace）。
+ * 找不到任何前置符号（PC 小于首个函数）返回 null；`exact=false` 表示只有最近符号，
+ * UI 必须如实标注而不是把 PC 说成该函数内的确定帧。
+ */
+export function findFunctionForPc(functions: readonly FunctionSymbol[], pc: number): FunctionAddressMatch | null {
+    if (functions.length === 0) return null
+    const address = pc >>> 0
+    let low = 0
+    let high = functions.length - 1
+    let candidate = -1
+    while (low <= high) {
+        const middle = (low + high) >> 1
+        if (functions[middle].address <= address) {
+            candidate = middle
+            low = middle + 1
+        } else {
+            high = middle - 1
+        }
+    }
+    if (candidate < 0) return null
+    const symbol = functions[candidate]
+    const offset = address - symbol.address
+    const exact = symbol.size > 0 ? offset < symbol.size : false
+    return {symbol, offset, exact}
+}
+
 /** 断点地址展示格式：0x%08X（大写、bit0 清 0）。 */
 export function formatBreakpointAddress(address: number): string {
     return formatHex32(normalizeBreakpointAddress(address))

@@ -43,24 +43,39 @@
 #include <freertos/ringbuf.h>
 #include <freertos/semphr.h>
 
-#if DAP_PROXY_STATS
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
-#endif
 
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 
 /* Pipeline depth of the two USBIP<->DAP ring buffers.
  *
- * The RAM budget is kept at ~41 KB (the A3 value: 20 slots * 1028 B) whatever
- * packet size B1 selects:
- *   DAP_PACKET_SIZE  1024 -> 20 slots  (2 * 1028 * 20 = 41 KB)
- *                    1280 -> 16 slots  (2 * 1284 * 16 = 41 KB)
- *                    4048 ->  5 slots  (2 * 4052 *  5 = 40 KB)
+ * RAM budget is kept at ~41 KB whatever packet size B1 selects:
+ *   DAP_PACKET_SIZE  1024 -> 20 slots
+ *                    1280 -> 16 slots
+ *                    4048 ->  5 slots
  * The host (OpenOCD cmsis-dap) keeps at most MAX_PENDING_REQUESTS=3 blocks in
  * flight and the B1 pipeline parks at most that many OUT commands / responses,
- * so 5 slots are the minimum with some slack.  Item size is DAP_HANDLE_SIZE
- * (unchanged), so fast_reply()/ring sizing stay consistent. */
+ * so 5 slots are the minimum with some slack.
+ *
+ * Copy budget (docs/dap-copy-budget.md): the two rings carry two different
+ * payload shapes, which removes the old fixed 4-byte-length+1280-byte staging
+ * item and its per-transaction memcpy/memset:
+ *
+ *  - request ring (BYTEBUF): items are exactly DAP_PACKET_SIZE bytes of DAP
+ *    request payload.  The ring size is an exact multiple of the item size, so
+ *    a byte-buffer item can never be split at the buffer wrap point and
+ *    xRingbufferReceiveUpTo() always returns a whole request.  The TCP task
+ *    writes the payload straight from its RX buffer (tail zero-filled for the
+ *    N8 stale-byte guard) - no staging copy.
+ *
+ *  - response ring (NOSPLIT): one item per DAP response, item size == response
+ *    length (0..DAP_PACKET_SIZE).  NOSPLIT guarantees the item is contiguous,
+ *    so the response is pushed straight from the DAP command layer's output
+ *    buffer - no staging copy - and the consumer gets the exact length from
+ *    xRingbufferReceive().  The per-slot overhead covers the FreeRTOS item
+ *    header and a possible wrap dummy header. */
 #if DAP_PACKET_SIZE > 2048U
 #define DAP_BUFFER_NUM 5
 #elif DAP_PACKET_SIZE > 1024U
@@ -68,6 +83,11 @@
 #else
 #define DAP_BUFFER_NUM 20
 #endif
+
+#define DAP_REQUEST_RING_SIZE  ((size_t)DAP_PACKET_SIZE * DAP_BUFFER_NUM)
+/* 8 bytes item header + 8 bytes wrap/dummy slack per slot (see
+ * prvCheckItemFitsDefault/prvGetItemDefault in esp_ringbuf/ringbuf.c). */
+#define DAP_RESPONSE_RING_SIZE (((size_t)DAP_PACKET_SIZE + 8U) * DAP_BUFFER_NUM + 64U)
 
 /* Bounded wait used when pushing a response into the OUT ring buffer, so that a
  * reset request (ring buffer ownership change) is always observed. */
@@ -78,26 +98,26 @@
 #define DAP_RINGBUF_SEND_RETRIES 500
 
 /* --------------------------------------------------------------------------
- * A3: optional USBIP<->DAP transaction statistics (compile-time off).
+ * A3: USBIP<->DAP transaction latency statistics (always-on, tiny counters).
  *
- * Build with -DDAP_PROXY_STATS=1 to print the per-transaction latency seen by
- * the host: the time between "OUT URB queued for the DAP task" and "the IN URB
- * that returns the response is being answered".  This is the latency the
- * OpenOCD CMSIS-DAP driver pays per command over Wi-Fi/USBIP, so it isolates
- * transport/scheduling overhead from the SWD bit-banging time.
+ * The device-side latency the host CMSIS-DAP driver pays per command: the time
+ * between "OUT URB queued for the DAP task" and "the IN URB that returns the
+ * response is being answered".  This isolates transport/scheduling overhead
+ * from the SWD bit-banging time and is exposed by GET /api/target/status as
+ * dap_xfer_count/avg_us/max_us/last_us.  It is NOT a network RTT.
  *
- * Default 0: no code, no RAM cost in release builds.
+ * Kept in RAM (4 counters) so diagnostics are available in release builds;
+ * -DDAP_PROXY_STATS=1 additionally prints a periodic summary (old behavior).
  * -------------------------------------------------------------------------- */
 #ifndef DAP_PROXY_STATS
 #define DAP_PROXY_STATS 0
 #endif
 
-#if DAP_PROXY_STATS
-static int64_t s_stats_out_us;
-static uint32_t s_stats_pairs;
-static uint32_t s_stats_sum_us;
+static int64_t s_stats_out_us;      /* 0 = no OUT URB waiting for its IN */
+static uint32_t s_stats_count;      /* measured transactions since boot */
+static uint32_t s_stats_sum_us;     /* sum of latency samples (u32 wrap ok) */
 static uint32_t s_stats_max_us;
-#define DAP_STATS_REPORT_EVERY 128U
+static uint32_t s_stats_last_us;
 
 static inline void dap_stats_mark_out(void)
 {
@@ -119,44 +139,43 @@ static inline void dap_stats_mark_in(void)
     }
     dt_us = (uint32_t)(now_us - s_stats_out_us);
     s_stats_out_us = 0;
+    s_stats_count++;
     s_stats_sum_us += dt_us;
+    s_stats_last_us = dt_us;
     if (dt_us > s_stats_max_us) {
         s_stats_max_us = dt_us;
     }
-    if (++s_stats_pairs >= DAP_STATS_REPORT_EVERY) {
+#if DAP_PROXY_STATS
+    if ((s_stats_count % 128U) == 0U) {
         printf("DAP_STATS transactions=%lu avg=%lu us max=%lu us\r\n",
-               (unsigned long)s_stats_pairs,
-               (unsigned long)(s_stats_sum_us / s_stats_pairs),
+               (unsigned long)s_stats_count,
+               (unsigned long)(s_stats_sum_us / s_stats_count),
                (unsigned long)s_stats_max_us);
-        s_stats_pairs = 0;
-        s_stats_sum_us = 0;
-        s_stats_max_us = 0;
     }
+#endif
 }
-#else
-#define dap_stats_mark_out() do { } while (0)
-#define dap_stats_mark_in()  do { } while (0)
-#endif /* DAP_PROXY_STATS */
 
-typedef struct
+void dap_handle_get_xfer_stats(dap_xfer_stats_t *out)
 {
-    uint32_t length; /* actual DAP response length (0 for requests) */
-    uint8_t buf[DAP_PACKET_SIZE];
-} DapPacket_t;
-
-#define DAP_HANDLE_SIZE (sizeof(DapPacket_t))
-
+    if (out == NULL) {
+        return;
+    }
+    out->transactions = s_stats_count;
+    out->avg_us = (s_stats_count != 0U) ? (s_stats_sum_us / s_stats_count) : 0U;
+    out->max_us = s_stats_max_us;
+    out->last_us = s_stats_last_us;
+}
 
 int kRestartDAPHandle = NO_SIGNAL;
 TaskHandle_t kDAPTaskHandle = NULL;
 
 
-static DapPacket_t DAPDataProcessed;
+/* Output buffer of one DAP command.  The response is pushed to the OUT ring
+ * (or straight into the USBIP staging slot) directly from here; the old
+ * {length, buf[]} struct was only needed because the ring item had a fixed
+ * staging layout. */
+static uint8_t DAPDataProcessed[DAP_PACKET_SIZE];
 static int dap_respond = 0;
-/* N8: bounded, zero-filled copy of one OUT URB request.  Only the TCP task
- * (handle_dap_data_request) touches it, and xRingbufferSend() copies it
- * immediately, so a single static buffer is sufficient. */
-static DapPacket_t dap_request_packet;
 
 // SWO Trace
 static uint8_t *swo_data_to_send = NULL;
@@ -171,35 +190,141 @@ static SemaphoreHandle_t data_response_mux = NULL;
 static SemaphoreHandle_t dap_reset_done = NULL;
 
 
+/* ------------------------------------------------------------------------- */
+/* P0-2: startup reservation of the ring storage blocks                      */
+/* ------------------------------------------------------------------------- */
+
+/* Raw storage + static wrapper for the two rings.  Reserved from the fresh
+ * boot heap before USB-NCM/WiFi start; the normal xRingbufferCreate() path is
+ * kept as fallback when the reservation failed. */
+static uint8_t *s_prealloc_req_storage;
+static uint8_t *s_prealloc_resp_storage;
+static StaticRingbuffer_t s_prealloc_req_struct;
+static StaticRingbuffer_t s_prealloc_resp_struct;
+static bool s_prealloc_ready;
+
+esp_err_t dap_handle_prealloc_ringbuffers(void)
+{
+    if (s_prealloc_ready) {
+        return ESP_OK;
+    }
+    if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+        return ESP_OK; /* a session already created them (unexpected early) */
+    }
+    if (s_prealloc_req_storage == NULL) {
+        s_prealloc_req_storage = (uint8_t *)heap_caps_malloc(
+            DAP_REQUEST_RING_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    }
+    if (s_prealloc_resp_storage == NULL) {
+        s_prealloc_resp_storage = (uint8_t *)heap_caps_malloc(
+            DAP_RESPONSE_RING_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    }
+    if (s_prealloc_req_storage == NULL || s_prealloc_resp_storage == NULL) {
+        free(s_prealloc_req_storage);
+        free(s_prealloc_resp_storage);
+        s_prealloc_req_storage = NULL;
+        s_prealloc_resp_storage = NULL;
+        printf("DAP: ring prealloc failed (no contiguous %u+%u B)\r\n",
+               (unsigned)DAP_REQUEST_RING_SIZE,
+               (unsigned)DAP_RESPONSE_RING_SIZE);
+        return ESP_ERR_NO_MEM;
+    }
+    /* No FreeRTOS objects here: DAP_Thread creates the mutex/completion
+     * semaphore itself.  Keeping this function to plain heap reservations
+     * avoids touching unrelated subsystems before USB/WiFi finish init. */
+    s_prealloc_ready = true;
+    printf("DAP: ring storage reserved early: request %u B, response %u B "
+           "(static wrappers, largest free now %u B)\r\n",
+           (unsigned)DAP_REQUEST_RING_SIZE,
+           (unsigned)DAP_RESPONSE_RING_SIZE,
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+                                                      MALLOC_CAP_INTERNAL));
+    return ESP_OK;
+}
+
+bool dap_handle_ringbuffers_preallocated(void)
+{
+    return s_prealloc_ready;
+}
+
+void dap_handle_get_ring_info(dap_ring_info_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    out->request_ring_bytes = (uint32_t)DAP_REQUEST_RING_SIZE;
+    out->response_ring_bytes = (uint32_t)DAP_RESPONSE_RING_SIZE;
+    out->preallocated = s_prealloc_ready;
+    out->active = (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL);
+}
+
+/** Create one ring: static storage when reserved early, heap otherwise. */
+static RingbufHandle_t dap_ring_create(size_t bytes, RingbufferType_t type,
+                                       uint8_t *static_storage,
+                                       StaticRingbuffer_t *static_struct)
+{
+    if (static_storage != NULL && static_struct != NULL) {
+        return xRingbufferCreateStatic(bytes, type, static_storage,
+                                       static_struct);
+    }
+    return xRingbufferCreate(bytes, type);
+}
+
 void malloc_dap_ringbuf(void) {
     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
     {
         if (dap_dataIN_handle == NULL) {
-            dap_dataIN_handle = xRingbufferCreate(DAP_HANDLE_SIZE * DAP_BUFFER_NUM, RINGBUF_TYPE_BYTEBUF);
+            /* Request ring: fixed DAP_PACKET_SIZE payload items (no split, the
+             * ring size is an exact multiple of the item size). */
+            dap_dataIN_handle = dap_ring_create(
+                DAP_REQUEST_RING_SIZE, RINGBUF_TYPE_BYTEBUF,
+                s_prealloc_ready ? s_prealloc_req_storage : NULL,
+                s_prealloc_ready ? &s_prealloc_req_struct : NULL);
         }
         if (dap_dataOUT_handle == NULL) {
-            dap_dataOUT_handle = xRingbufferCreate(DAP_HANDLE_SIZE * DAP_BUFFER_NUM, RINGBUF_TYPE_BYTEBUF);
+            /* Response ring: variable-size payload items, each one contiguous. */
+            dap_dataOUT_handle = dap_ring_create(
+                DAP_RESPONSE_RING_SIZE, RINGBUF_TYPE_NOSPLIT,
+                s_prealloc_ready ? s_prealloc_resp_storage : NULL,
+                s_prealloc_ready ? &s_prealloc_resp_struct : NULL);
         }
 
         xSemaphoreGive(data_response_mux);
     }
 }
 
-/* Drain one bytebuf ring without freeing it.  Used by the USBIP session reset
- * below: discarding the payloads is enough to start a new session, and keeping
- * the buffers allocated avoids a 20 KiB xRingbufferCreate() per session.  With
+/* Drain one ring without freeing it.  Used by the USBIP session reset below:
+ * discarding the payloads is enough to start a new session, and keeping the
+ * buffers allocated avoids a 20 KiB xRingbufferCreate() per session.  With
  * TinyUSB installed the heap is fragmented enough that the re-create failed
  * (largest free block 20480 B < ring size 20544 B + overhead); the old failure
  * path deleted the DAP task, so the next USBIP session died with
  * "CMSIS-DAP command CMD_INFO failed" (C1 second-session bug). */
-static void drain_one_ringbuf(RingbufHandle_t rb)
+static void drain_request_ringbuf(RingbufHandle_t rb)
 {
     if (rb == NULL) {
         return;
     }
     for (;;) {
         size_t item_size = 0;
-        void *item = xRingbufferReceiveUpTo(rb, &item_size, 0, DAP_HANDLE_SIZE);
+        void *item = xRingbufferReceiveUpTo(rb, &item_size, 0, DAP_PACKET_SIZE);
+        if (item == NULL) {
+            break;
+        }
+        vRingbufferReturnItem(rb, item);
+    }
+}
+
+/* NOSPLIT rings return whole items only, so use the item-based API (the
+ * xRingbufferReceiveUpTo() byte-buffer API asserts on NOSPLIT rings). */
+static void drain_response_ringbuf(RingbufHandle_t rb)
+{
+    if (rb == NULL) {
+        return;
+    }
+    for (;;) {
+        size_t item_size = 0;
+        void *item = xRingbufferReceive(rb, &item_size, 0);
         if (item == NULL) {
             break;
         }
@@ -253,14 +378,17 @@ int dap_handle_wait_reset(uint32_t timeout_ms)
 
 void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
 {
-    const uint8_t *data_in = (const uint8_t *)header + sizeof(usbip_stage2_header);
-    /* Point to the beginning of the URB payload */
+    uint8_t *data_in = (uint8_t *)header + sizeof(usbip_stage2_header);
+    /* Point to the beginning of the URB payload (inside the caller's RX buffer,
+     * which is at least sizeof(header)+DAP_PACKET_SIZE bytes: usbip_urb_process
+     * validates that, and dap_proxy/tcp_server.c provides a 4096-byte buffer). */
 
     /* N8 (docs/security-review-dap.md, P2): only the bytes actually received
-     * belong to this request.  The old code always copied DAP_HANDLE_SIZE
-     * (516 B) from the shared TCP buffer, so a short OUT URB forwarded stale
-     * bytes from the previous URB/session into the DAP command parser.
-     * Copy `length` bytes and zero-fill the rest of the fixed-size packet. */
+     * belong to this request.  The DAP command parser may read a fixed-size
+     * request based on the command byte, so everything behind `length` must be
+     * zero.  We zero the tail in place instead of copying the request into a
+     * separate zeroed staging packet: the ring buffer copies the whole fixed
+     * DAP_PACKET_SIZE item anyway (docs/dap-copy-budget.md). */
     if (length > DAP_PACKET_SIZE) {
         length = DAP_PACKET_SIZE;
     }
@@ -276,12 +404,16 @@ void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
         return;
     }
 
-    memset(&dap_request_packet, 0, sizeof(dap_request_packet));
-    if (length > 0) {
-        memcpy(dap_request_packet.buf, data_in, length);
+    if (length < DAP_PACKET_SIZE) {
+        memset(data_in + length, 0, (size_t)DAP_PACKET_SIZE - length);
     }
 
-    xRingbufferSend(dap_dataIN_handle, &dap_request_packet, DAP_HANDLE_SIZE, portMAX_DELAY);
+    /* Push the fixed-size request payload straight from the RX buffer. */
+    if (xRingbufferSend(dap_dataIN_handle, data_in, DAP_PACKET_SIZE,
+                        portMAX_DELAY) != pdTRUE) {
+        printf("DAP: data IN ring buffer full, request dropped\r\n");
+        return;
+    }
     if (kDAPTaskHandle)
         xTaskNotifyGive(kDAPTaskHandle);
 
@@ -318,19 +450,22 @@ void SWO_QueueTransfer(uint8_t *buf, uint32_t num)
 }
 
 /**
- * @brief Push one processed DAP response into the OUT ring buffer.
+ * @brief Push one processed DAP response into the response ring buffer.
  *
- * The send is bounded so that a pending reset request (the only way the ring
- * buffers are released) is always observed; if the host never drains the OUT
- * ring the response is dropped after a bounded time instead of dead-locking the
- * DAP and TCP tasks.  Returns true when the response was queued.
+ * The response ring stores the payload only (item size == response length), so
+ * this is a single copy from the caller's DAP output buffer: the old code first
+ * copied into a fixed-size staging packet and then sent that.  The send is
+ * bounded so that a pending reset request (the only way the ring buffers are
+ * released) is always observed; if the host never drains the ring the response
+ * is dropped after a bounded time instead of dead-locking the DAP and TCP
+ * tasks.  Returns true when the response was queued.
  */
-static bool dap_push_response(const DapPacket_t *packet)
+static bool dap_push_response(const uint8_t *data, size_t length)
 {
     int retries = 0;
 
     while (dap_dataOUT_handle != NULL &&
-           xRingbufferSend(dap_dataOUT_handle, (void *)packet, DAP_HANDLE_SIZE,
+           xRingbufferSend(dap_dataOUT_handle, (void *)data, length,
                            pdMS_TO_TICKS(DAP_RINGBUF_SEND_TIMEOUT_MS)) != pdTRUE)
     {
         if (kRestartDAPHandle != NO_SIGNAL) {
@@ -343,43 +478,41 @@ static bool dap_push_response(const DapPacket_t *packet)
         }
     }
 
-    return dap_dataOUT_handle != NULL;
+    if (dap_dataOUT_handle != NULL) {
+        if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+            ++dap_respond;
+            xSemaphoreGive(data_response_mux);
+        }
+        return true;
+    }
+    return false;
 }
-
-/* B1: staging copy for responses that must wait in the OUT ring until their IN
- * URB arrives (pipeline mode).  The DAP task is the only writer. */
-static DapPacket_t dap_response_staging;
 
 bool dap_push_response_data(const uint8_t *data, uint32_t length)
 {
-    uint32_t len = (length > DAP_PACKET_SIZE) ? DAP_PACKET_SIZE : length;
-
     if (dap_dataOUT_handle == NULL) {
         return false;
     }
-
-    memset(&dap_response_staging, 0, sizeof(dap_response_staging));
-    dap_response_staging.length = len;
-    if (len > 0 && data != NULL) {
-        memcpy(dap_response_staging.buf, data, len);
+    /* Boundary guard: the response ring can only hold DAP_PACKET_SIZE bytes per
+     * item; the DAP layer clips the response before calling here, so an
+     * oversized value means a firmware bug - drop it instead of corrupting the
+     * ring item / the host response length. */
+    if (length > (uint32_t)DAP_PACKET_SIZE) {
+        printf("DAP: response length %lu exceeds DAP_PACKET_SIZE %u, dropped\r\n",
+               (unsigned long)length, (unsigned)DAP_PACKET_SIZE);
+        return false;
     }
-
-    if (!dap_push_response(&dap_response_staging)) {
+    if (data == NULL && length != 0U) {
         return false;
     }
 
-    if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
-        ++dap_respond;
-        xSemaphoreGive(data_response_mux);
-    }
-    return true;
+    return dap_push_response(data, (size_t)length);
 }
 
 bool dap_take_response(uint8_t *buf, uint32_t buf_size, uint32_t *length)
 {
-    DapPacket_t *item;
-    size_t packetSize = 0;
-    uint32_t len;
+    void *item;
+    size_t item_size = 0;
 
     if (length) {
         *length = 0;
@@ -388,26 +521,29 @@ bool dap_take_response(uint8_t *buf, uint32_t buf_size, uint32_t *length)
         return false;
     }
 
-    item = (DapPacket_t *)xRingbufferReceiveUpTo(dap_dataOUT_handle, &packetSize, 0,
-                                                 DAP_HANDLE_SIZE);
-    if (packetSize != DAP_HANDLE_SIZE) {
-        if (item != NULL) {
-            vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
-        }
+    /* NOSPLIT ring: the whole response is one contiguous item and its size is
+     * the response length (no fixed-size staging item any more). */
+    item = xRingbufferReceive(dap_dataOUT_handle, &item_size, 0);
+    if (item == NULL) {
         return false;
     }
 
-    len = item->length;
-    if (len > buf_size) {
-        len = buf_size;
+    /* Boundary checks: never truncate silently and never copy more than the
+     * caller's buffer can hold. */
+    if (item_size > (size_t)DAP_PACKET_SIZE || item_size > buf_size) {
+        printf("DAP: response item %u B does not fit (cap %u/%u), dropped\r\n",
+               (unsigned)item_size, (unsigned)DAP_PACKET_SIZE, (unsigned)buf_size);
+        vRingbufferReturnItem(dap_dataOUT_handle, item);
+        return false;
     }
-    if (len > 0) {
-        memcpy(buf, item->buf, len);
+
+    if (item_size > 0) {
+        memcpy(buf, item, item_size);
     }
     if (length) {
-        *length = len;
+        *length = (uint32_t)item_size;
     }
-    vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+    vRingbufferReturnItem(dap_dataOUT_handle, item);
 
     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
         --dap_respond;
@@ -420,12 +556,25 @@ void DAP_Thread(void *argument)
 {
     size_t packetSize;
     int resLength;
-    DapPacket_t *item;
+    uint8_t *item;
 
-    dap_dataIN_handle = xRingbufferCreate(DAP_HANDLE_SIZE * DAP_BUFFER_NUM, RINGBUF_TYPE_BYTEBUF);
-    dap_dataOUT_handle = xRingbufferCreate(DAP_HANDLE_SIZE * DAP_BUFFER_NUM, RINGBUF_TYPE_BYTEBUF);
-    data_response_mux = xSemaphoreCreateMutex();
-    dap_reset_done = xSemaphoreCreateBinary();
+    /* P0-2: rings/mux may already exist from the early app_main()
+     * reservation (dap_handle_prealloc_ringbuffers); reuse them instead of
+     * overwriting the handles and leaking the reservation. */
+    if (data_response_mux == NULL) {
+        data_response_mux = xSemaphoreCreateMutex();
+    }
+    if (dap_reset_done == NULL) {
+        dap_reset_done = xSemaphoreCreateBinary();
+    }
+#if BIRDIEBOT_DAP_RING_PREALLOC
+    /* Second chance for the ring storage reservation (only when the optional
+     * P0-2 reservation is enabled; default off, see DAP_handle.h). */
+    if (!s_prealloc_ready) {
+        (void)dap_handle_prealloc_ringbuffers();
+    }
+#endif
+    malloc_dap_ringbuf();
     kDAPTaskHandle = xTaskGetCurrentTaskHandle();
 
     /* A 2025: initialize the CMSIS-DAP status LEDs (board pins, no-op when the
@@ -464,8 +613,8 @@ void DAP_Thread(void *argument)
                             dap_respond = 0;
                             xSemaphoreGive(data_response_mux);
                         }
-                        drain_one_ringbuf(dap_dataIN_handle);
-                        drain_one_ringbuf(dap_dataOUT_handle);
+                        drain_request_ringbuf(dap_dataIN_handle);
+                        drain_response_ringbuf(dap_dataOUT_handle);
                     } else {
                         /* Re-create after a previous DELETE_HANDLE.  Retry a
                          * few times: a transient allocation failure must not
@@ -504,29 +653,32 @@ void DAP_Thread(void *argument)
 
 
             packetSize = 0;
-            item = (DapPacket_t *)xRingbufferReceiveUpTo(dap_dataIN_handle, &packetSize,
-                                                         pdMS_TO_TICKS(1), DAP_HANDLE_SIZE);
+            item = (uint8_t *)xRingbufferReceiveUpTo(dap_dataIN_handle, &packetSize,
+                                                     pdMS_TO_TICKS(1), DAP_PACKET_SIZE);
             if (packetSize == 0)
             {
                 break;
             }
 
-            else if (packetSize < DAP_HANDLE_SIZE)
+            else if (packetSize != (size_t)DAP_PACKET_SIZE)
             {
-                printf("Wrong data in packet size:%d , data in remain: %d\r\n", packetSize,
-                       (int) xRingbufferGetMaxItemSize(dap_dataIN_handle));
+                /* Cannot happen with the fixed-size request items and a ring
+                 * size that is an exact multiple of the item size; keep the
+                 * defensive drop instead of parsing a truncated request. */
+                printf("Wrong data in packet size:%u , data in remain: %u\r\n",
+                       (unsigned)packetSize,
+                       (unsigned)xRingbufferGetMaxItemSize(dap_dataIN_handle));
                 vRingbufferReturnItem(dap_dataIN_handle, (void *)item);
                 break;
-                // This may not happen because there is a semaphore acquisition
             }
 
-            if (item->buf[0] == ID_DAP_QueueCommands)
+            if (item[0] == ID_DAP_QueueCommands)
             {
-                item->buf[0] = ID_DAP_ExecuteCommands;
+                item[0] = ID_DAP_ExecuteCommands;
             }
 
-            resLength = DAP_ProcessCommand((uint8_t *)item->buf, (uint8_t *)DAPDataProcessed.buf); // use first 4 byte to save length
-            resLength &= 0xFFFF;                                                                   // res length in lower 16 bits
+            resLength = DAP_ProcessCommand(item, DAPDataProcessed);
+            resLength &= 0xFFFF; /* res length in lower 16 bits */
 
             vRingbufferReturnItem(dap_dataIN_handle, (void *)item); // process done.
 
@@ -540,20 +692,15 @@ void DAP_Thread(void *argument)
                 resLength = (int)DAP_PACKET_SIZE;
             }
 
-            // now prepare to reply (actual length for USBIP/WinUSB)
-            DAPDataProcessed.length = resLength;
+            /* Now prepare to reply (actual length for USBIP/WinUSB).  The
+             * response is pushed straight from DAPDataProcessed: no staging
+             * packet, no fixed-size ring item (docs/dap-copy-budget.md). */
             if (usbip_pipeline_is_active()) {
                 /* B1: pair the response with a parked IN URB and send it from
                  * this task, or store it in the OUT ring until the IN arrives. */
-                usbip_pipeline_complete_response(DAPDataProcessed.buf,
-                                                 DAPDataProcessed.length);
-            } else if (dap_push_response(&DAPDataProcessed))
-            {
-                if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
-                {
-                    ++dap_respond;
-                    xSemaphoreGive(data_response_mux);
-                }
+                usbip_pipeline_complete_response(DAPDataProcessed, (uint32_t)resLength);
+            } else {
+                (void)dap_push_response_data(DAPDataProcessed, (uint32_t)resLength);
             }
         }
     }
@@ -564,8 +711,8 @@ int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num)
     usbip_stage2_header *buf_header = (usbip_stage2_header *)buf;
 
     if (dap_req_num > 0) {
-        DapPacket_t *item;
-        size_t packetSize = 0;
+        void *item;
+        size_t reply_len = 0;
 
         /* No ring buffer means the DAP data path is currently owned by a
          * WebSocket/elaphureLink session (see DAP_handle.h).  Answer with an
@@ -580,14 +727,16 @@ int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num)
             return 0;
         }
 
-        item = (DapPacket_t *)xRingbufferReceiveUpTo(dap_dataOUT_handle, &packetSize,
-                                                     portMAX_DELAY, DAP_HANDLE_SIZE);
-        if (packetSize == DAP_HANDLE_SIZE) {
-            uint32_t reply_len = item->length;
-            if (reply_len > DAP_PACKET_SIZE) {
-                reply_len = DAP_PACKET_SIZE;
+        /* NOSPLIT response ring: item size is the DAP response length. */
+        item = xRingbufferReceive(dap_dataOUT_handle, &reply_len, portMAX_DELAY);
+        if (item != NULL) {
+            if (reply_len > (size_t)DAP_PACKET_SIZE) {
+                printf("Wrong data out packet size:%u!\r\n", (unsigned)reply_len);
+                vRingbufferReturnItem(dap_dataOUT_handle, item);
+                return 0;
             }
-            send_stage2_submit_data_fast((usbip_stage2_header *)buf, item->buf, (int32_t)reply_len);
+            send_stage2_submit_data_fast((usbip_stage2_header *)buf, item,
+                                         (int32_t)reply_len);
             dap_stats_mark_in(); /* A3: response reached the host IN URB */
 
             if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
@@ -595,13 +744,8 @@ int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num)
                 xSemaphoreGive(data_response_mux);
             }
 
-            vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+            vRingbufferReturnItem(dap_dataOUT_handle, item);
             return 1;
-        } else if (packetSize > 0) {
-            printf("Wrong data out packet size:%d!\r\n", packetSize);
-            /* Do not leak the ring buffer item and do not leave the host URB
-             * hanging (analysis/REPORT.md P2 #7). */
-            vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
         }
         ////TODO: fast reply
     } else {
@@ -634,25 +778,19 @@ void handle_dap_unlink()
     // In general, we assume that there is at most one piece of data that has not yet been returned.
     if (dap_respond > 0 && dap_dataOUT_handle != NULL)
     {
-        DapPacket_t *item;
-        size_t packetSize = 0;
-        item = (DapPacket_t *)xRingbufferReceiveUpTo(dap_dataOUT_handle, &packetSize,
-                                                     pdMS_TO_TICKS(10), DAP_HANDLE_SIZE);
-        if (packetSize == DAP_HANDLE_SIZE)
+        void *item;
+        size_t item_size = 0;
+        item = xRingbufferReceive(dap_dataOUT_handle, &item_size, pdMS_TO_TICKS(10));
+        if (item != NULL)
         {
+            /* Any stored response item is discarded (NOSPLIT: whole item). */
             if (xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE)
             {
                 --dap_respond;
                 xSemaphoreGive(data_response_mux);
             }
 
-            vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
-        }
-        else if (packetSize > 0)
-        {
-            /* Return non-full items as well instead of leaking ring space
-             * (analysis/REPORT.md P2 #7). */
-            vRingbufferReturnItem(dap_dataOUT_handle, (void *)item);
+            vRingbufferReturnItem(dap_dataOUT_handle, item);
         }
     }
 }

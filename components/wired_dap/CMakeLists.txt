@@ -1,12 +1,12 @@
 # WiFi Dap - C1 wired DAP: USB-NCM MVP (w6/c1ncm)
 #
-# The wired transport is an INDEPENDENT build variant:
-#   default  : CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NONE -> only the stub in
-#              src/wired_dap.c has code; app_main() never calls into this
-#              component and the Wi-Fi product behaviour is unchanged.
-#   wired    : CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y -> TinyUSB CDC-NCM +
-#              a minimal esp_netif/lwIP Ethernet driver (src/ncm_netif.c).
-#              Built with sdkconfig.wired.defaults via scripts/build-wired.sh.
+# On ESP32-S3 the default build enables NCM + Wi-Fi in one image
+# (CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM=y in sdkconfig.defaults.esp32s3):
+#   default : TinyUSB CDC-NCM + minimal esp_netif/lwIP driver + DHCP server,
+#             while Wi-Fi AP/STA remains active.
+#   C3/ESP32: CONFIG_NONE -> only the stub in src/wired_dap.c is compiled.
+# The old scripts/build-wired.sh + sdkconfig.wired.defaults remain as a
+# compatibility variant.
 #
 # NOTE on dependencies (IDF build-system rule): REQUIRES/PRIV_REQUIRES must not
 # depend on CONFIG_xxx choices (requirements are expanded before the project

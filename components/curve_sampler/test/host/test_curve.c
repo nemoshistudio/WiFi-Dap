@@ -600,6 +600,27 @@ static void test_status_json(void)
     st.watchpoint_address = 0x20000000U;
     st.watchpoint_hits = 4U;
     st.trigger_seq = 9U;
+    st.watch_count = 2U;
+    st.watchpoint2_armed = true;
+    st.watchpoint2_address = 0x24000000U;
+    st.watchpoint2_hits = 3U;
+    st.watchpoint3_armed = true;
+    st.watchpoint3_address = 0x24000010U;
+    st.watchpoint3_hits = 2U;
+    st.watchpoint4_armed = true;
+    st.watchpoint4_address = 0x08001000U;
+    st.watchpoint4_hits = 1U;
+    st.last_watch_index = 4U;
+    st.snapshot_state = (uint8_t)CURVE_SNAPSHOT_CAPTURING;
+    st.snapshot_after = 8U;
+    st.snapshot_trigger_seq = 10U;
+    st.snapshot_pre_frames = 5U;
+    st.snapshot_post_frames = 3U;
+    st.trace_active = true;
+    st.trace_bytes = 1234U;
+    st.trace_dropped = 56U;
+    st.backtrace_valid = true;
+    st.backtrace_count = 5U;
     st.condition_armed = true;
     st.condition_met = true;
     st.condition_hits = 3U;
@@ -609,6 +630,10 @@ static void test_status_json(void)
     st.series_count = 2U;
     st.halt = true;
     st.link_hz = 2000000U;
+    st.sample_every_max = 8U;
+    st.series_stale = 123U;
+    st.heap_free = 54321U;
+    st.heap_largest = 7777U;
     st.consecutive_errors = 0U;
     st.ring_capacity = 512U;
     st.served_seq = 11U;
@@ -635,6 +660,31 @@ static void test_status_json(void)
     CHECK(strstr(buf, "\"watchpoint_address\":536870912") != NULL);
     CHECK(strstr(buf, "\"watchpoint_hits\":4") != NULL);
     CHECK(strstr(buf, "\"trigger_seq\":9") != NULL);
+    CHECK(strstr(buf, "\"sample_every_max\":8") != NULL);
+    CHECK(strstr(buf, "\"series_stale\":123") != NULL);
+    CHECK(strstr(buf, "\"heap_free\":54321") != NULL);
+    CHECK(strstr(buf, "\"heap_largest\":7777") != NULL);
+    CHECK(strstr(buf, "\"watch_count\":2") != NULL);
+    CHECK(strstr(buf, "\"watchpoint2_armed\":true") != NULL);
+    CHECK(strstr(buf, "\"watchpoint2_address\":603979776") != NULL);
+    CHECK(strstr(buf, "\"watchpoint2_hits\":3") != NULL);
+    CHECK(strstr(buf, "\"watchpoint3_armed\":true") != NULL);
+    CHECK(strstr(buf, "\"watchpoint3_address\":603979792") != NULL);
+    CHECK(strstr(buf, "\"watchpoint3_hits\":2") != NULL);
+    CHECK(strstr(buf, "\"watchpoint4_armed\":true") != NULL);
+    CHECK(strstr(buf, "\"watchpoint4_address\":134221824") != NULL);
+    CHECK(strstr(buf, "\"watchpoint4_hits\":1") != NULL);
+    CHECK(strstr(buf, "\"last_watch_index\":4") != NULL);
+    CHECK(strstr(buf, "\"snapshot_state\":\"capturing\"") != NULL);
+    CHECK(strstr(buf, "\"snapshot_after\":8") != NULL);
+    CHECK(strstr(buf, "\"snapshot_trigger_seq\":10") != NULL);
+    CHECK(strstr(buf, "\"snapshot_pre_frames\":5") != NULL);
+    CHECK(strstr(buf, "\"snapshot_post_frames\":3") != NULL);
+    CHECK(strstr(buf, "\"trace_active\":true") != NULL);
+    CHECK(strstr(buf, "\"trace_bytes\":1234") != NULL);
+    CHECK(strstr(buf, "\"trace_dropped\":56") != NULL);
+    CHECK(strstr(buf, "\"backtrace_valid\":true") != NULL);
+    CHECK(strstr(buf, "\"backtrace_count\":5") != NULL);
     CHECK(strstr(buf, "\"condition_armed\":true") != NULL);
     CHECK(strstr(buf, "\"condition_met\":true") != NULL);
     CHECK(strstr(buf, "\"condition_hits\":3") != NULL);
@@ -655,8 +705,33 @@ static void test_status_json(void)
     st.watchpoint_address = 4294967295U;
     st.watchpoint_hits = 4294967295U;
     st.trigger_seq = 4294967295U;
+    st.watch_count = 2U;
+    st.watchpoint2_armed = true;
+    st.watchpoint2_address = 4294967295U;
+    st.watchpoint2_hits = 4294967295U;
+    st.last_watch_index = 4U;
+    st.watchpoint3_armed = true;
+    st.watchpoint3_address = 4294967295U;
+    st.watchpoint3_hits = 4294967295U;
+    st.watchpoint4_armed = true;
+    st.watchpoint4_address = 4294967295U;
+    st.watchpoint4_hits = 4294967295U;
+    st.snapshot_state = (uint8_t)CURVE_SNAPSHOT_CAPTURING;
+    st.snapshot_after = 255U;
+    st.snapshot_trigger_seq = 4294967295U;
+    st.snapshot_pre_frames = 4294967295U;
+    st.snapshot_post_frames = 4294967295U;
+    st.trace_active = true;
+    st.trace_bytes = 4294967295U;
+    st.trace_dropped = 4294967295U;
+    st.backtrace_valid = true;
+    st.backtrace_count = 255U;
     st.condition_hits = 4294967295U;
     st.condition_trigger_seq = 4294967295U;
+    st.sample_every_max = 255U;
+    st.series_stale = 4294967295U;
+    st.heap_free = 4294967295U;
+    st.heap_largest = 4294967295U;
     st.errors = 4294967295U;
     st.group_count = 8U;
     st.current_group = 7U;
@@ -677,7 +752,9 @@ static void test_status_json(void)
     st.message[sizeof(st.message) - 1U] = '\0';
     len = curve_status_format_json(&st, buf, sizeof(buf));
     CHECK(len > 0);
-    CHECK(len < 1280); /* httpd s_json size in curve_http.c */
+    /* Must fit the httpd static JSON buffer (CURVE_STATUS_JSON_MAX). */
+    CHECK(len < (int)CURVE_STATUS_JSON_MAX);
+    CHECK(len < (int)sizeof(buf));
     CHECK(strstr(buf, "\"trigger\":\"periodic\"") != NULL);
     CHECK(strstr(buf, "\"max_groups\":8") != NULL);
     CHECK(strstr(buf, "\"max_series\":256") != NULL);
@@ -820,6 +897,91 @@ static void test_watchpoint_params(void)
     CHECK(!curve_watchpoint_params_ok(0xE0001000U, 4U));
     CHECK(strcmp(curve_watch_access_name(0U), "write") == 0);
     CHECK(strcmp(curve_watch_access_name(1U), "readwrite") == 0);
+    CHECK(strcmp(curve_watch_access_name(2U), "read") == 0);
+    CHECK(strcmp(curve_watch_access_name(9U), "write") == 0); /* unknown -> write */
+    /* P1.8.1 DWT helpers: MASK = log2(size), FUNCTION 5/6/7. */
+    CHECK(curve_dwt_mask_for_size(1U) == 0U);
+    CHECK(curve_dwt_mask_for_size(2U) == 1U);
+    CHECK(curve_dwt_mask_for_size(4U) == 2U);
+    CHECK(curve_dwt_mask_for_size(3U) == 0U); /* invalid: no mask */
+    CHECK(curve_dwt_function_for_access((uint8_t)CURVE_WATCH_ACCESS_WRITE) ==
+          CURVE_DWT_FUNC_WRITE);
+    CHECK(curve_dwt_function_for_access((uint8_t)CURVE_WATCH_ACCESS_READ) ==
+          CURVE_DWT_FUNC_READ);
+    CHECK(curve_dwt_function_for_access((uint8_t)CURVE_WATCH_ACCESS_RW) ==
+          CURVE_DWT_FUNC_ACCESS);
+    CHECK(curve_dwt_function_for_access(9U) == CURVE_DWT_FUNC_WRITE);
+}
+
+static void test_dwt_comparator_alloc(void)
+{
+    uint32_t functions[CURVE_DWT_MAX_COMP] = {0U, 0U, 0U, 0U};
+    uint8_t indices[CURVE_MAX_WATCHPOINTS] = {0U, 0U, 0U, 0U};
+
+    /* All comparators free: primary request keeps comparator 0 (old behavior). */
+    functions[0] = 0U;
+    functions[1] = 0U;
+    CHECK(curve_dwt_alloc_comparators(4U, functions, 1U, indices));
+    CHECK(indices[0] == 0U);
+    /* Second watchpoint gets the next free comparator. */
+    CHECK(curve_dwt_alloc_comparators(4U, functions, 2U, indices));
+    CHECK(indices[0] == 0U && indices[1] == 1U);
+    /* Comparator 0 busy (e.g. another probe): use the first free one. */
+    functions[0] = CURVE_DWT_FUNC_WRITE;
+    CHECK(curve_dwt_alloc_comparators(4U, functions, 1U, indices));
+    CHECK(indices[0] == 1U);
+    CHECK(curve_dwt_alloc_comparators(4U, functions, 2U, indices));
+    CHECK(indices[0] == 1U && indices[1] == 2U);
+    /* Only one comparator implemented: single watch OK (when free), second
+     * not supported. */
+    functions[0] = 0U;
+    CHECK(curve_dwt_alloc_comparators(1U, functions, 1U, indices));
+    CHECK(!curve_dwt_alloc_comparators(1U, functions, 2U, indices));
+    /* No comparator / too many requested / bad arguments. */
+    CHECK(!curve_dwt_alloc_comparators(0U, functions, 1U, indices));
+    CHECK(!curve_dwt_alloc_comparators(4U, functions, 5U, indices));
+    /* P1-12: up to 4 comparators can be requested. */
+    CHECK(curve_dwt_alloc_comparators(4U, functions, 3U, indices));
+    CHECK(curve_dwt_alloc_comparators(4U, functions, 4U, indices));
+    CHECK(indices[0] == 0U && indices[1] == 1U && indices[2] == 2U &&
+          indices[3] == 3U);
+    CHECK(!curve_dwt_alloc_comparators(3U, functions, 4U, indices));
+    CHECK(!curve_dwt_alloc_comparators(4U, NULL, 1U, indices));
+    CHECK(!curve_dwt_alloc_comparators(4U, functions, 1U, NULL));
+    /* NUMCOMP is clamped to the architectural maximum of 4. */
+    CHECK(curve_dwt_alloc_comparators(15U, functions, 2U, indices));
+
+    /* MATCHED-bit classification: bit n = slot n hit, not comparator index. */
+    {
+        uint32_t fn[CURVE_DWT_MAX_COMP] = {0U, 0U, 0U, 0U};
+        uint8_t idx[CURVE_MAX_WATCHPOINTS] = {2U, 0U, 1U, 3U};
+
+        CHECK(curve_dwt_hit_mask(fn, idx, 2U) == 0U);
+        fn[2] = CURVE_DWT_FUNCTION_MATCHED | CURVE_DWT_FUNC_WRITE;
+        CHECK(curve_dwt_hit_mask(fn, idx, 2U) == 0x01U);
+        fn[0] = CURVE_DWT_FUNCTION_MATCHED | CURVE_DWT_FUNC_READ;
+        CHECK(curve_dwt_hit_mask(fn, idx, 2U) == 0x03U);
+        /* 4 slots: bit n = watchpoint slot n (not comparator index). */
+        fn[1] = CURVE_DWT_FUNCTION_MATCHED | CURVE_DWT_FUNC_ACCESS;
+        fn[3] = CURVE_DWT_FUNCTION_MATCHED | CURVE_DWT_FUNC_WRITE;
+        CHECK(curve_dwt_hit_mask(fn, idx, 4U) == 0x0FU);
+        fn[3] = 0U;
+        CHECK(curve_dwt_hit_mask(fn, idx, 4U) == 0x07U);
+    }
+}
+
+static void test_snapshot_state_names(void)
+{
+    CHECK(strcmp(curve_snapshot_state_name(0U), "off") == 0);
+    CHECK(strcmp(curve_snapshot_state_name((uint8_t)CURVE_SNAPSHOT_ARMED),
+                 "armed") == 0);
+    CHECK(strcmp(curve_snapshot_state_name((uint8_t)CURVE_SNAPSHOT_CAPTURING),
+                 "capturing") == 0);
+    CHECK(strcmp(curve_snapshot_state_name((uint8_t)CURVE_SNAPSHOT_COMPLETE),
+                 "complete") == 0);
+    CHECK(strcmp(curve_snapshot_state_name((uint8_t)CURVE_SNAPSHOT_ABORTED),
+                 "aborted") == 0);
+    CHECK(strcmp(curve_snapshot_state_name(99U), "off") == 0);
 }
 
 static void test_parse_watchpoint(void)
@@ -892,7 +1054,7 @@ static void test_parse_watchpoint(void)
             "{\"kind\":\"addr\",\"address\":536870916}}]}";
         static const char *badaccess =
             "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
-            "\"watch_access\":\"read\",\"series\":[{\"size\":4,\"expr\":"
+            "\"watch_access\":\"execute\",\"series\":[{\"size\":4,\"expr\":"
             "{\"kind\":\"addr\",\"address\":536870916}}]}";
         static const char *badinterval =
             "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
@@ -921,6 +1083,555 @@ static void test_parse_watchpoint(void)
               ESP_OK);
         CHECK(cfg.variant_used == 1U);
     }
+
+    /* P1.8.1: watch_access="read" is now accepted (old firmware returned 400). */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch_access\":\"read\","
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch_access == (uint8_t)CURVE_WATCH_ACCESS_READ);
+        CHECK(!cfg.watch2_enabled);
+    }
+    /* P1.8.1: second comparator object, independent address/size/access. */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch_size\":4,\"watch_access\":\"read\","
+            "\"watch2\":{\"address\":603979776,\"size\":2,"
+            "\"access\":\"readwrite\"},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch2_enabled);
+        CHECK(cfg.watch2_address == 0x24000000U);
+        CHECK(cfg.watch2_size == 2U);
+        CHECK(cfg.watch2_access == (uint8_t)CURVE_WATCH_ACCESS_RW);
+        /* Defaults inside watch2: size 4, access write. */
+        json = "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+               "\"watch2\":{\"address\":536870928},"
+               "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+               "\"address\":536870916}}]}";
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch2_enabled);
+        CHECK(cfg.watch2_size == 4U);
+        CHECK(cfg.watch2_access == (uint8_t)CURVE_WATCH_ACCESS_WRITE);
+    }
+    /* watch2 error handling: not an object / missing/bad address / bad size /
+     * bad access / exact duplicate / wrong trigger mode. */
+    {
+        static const char *bad_object =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":42,\"series\":[{\"size\":4,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870916}}]}";
+        static const char *missing =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{},\"series\":[{\"size\":4,\"expr\":"
+            "{\"kind\":\"addr\",\"address\":536870916}}]}";
+        static const char *outside =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":268435456},\"series\":[{\"size\":4,"
+            "\"expr\":{\"kind\":\"addr\",\"address\":536870916}}]}";
+        static const char *misaligned =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":536870915,\"size\":4},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *badsize =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":536870916,\"size\":8},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *badaccess =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":536870916,\"access\":\"execute\"},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *duplicate =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":536870912,\"size\":4,"
+            "\"access\":\"write\"},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *wrong_trigger =
+            "{\"interval_us\":20000,\"watch2\":{\"address\":536870912},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(bad_object, strlen(bad_object), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch2 must be an object") != NULL);
+        CHECK(curve_config_parse(missing, strlen(missing), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "bad watch2 address") != NULL);
+        CHECK(curve_config_parse(outside, strlen(outside), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "bad watch2 address") != NULL);
+        CHECK(curve_config_parse(misaligned, strlen(misaligned), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "bad watch2 address") != NULL);
+        CHECK(curve_config_parse(badsize, strlen(badsize), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch2.size") != NULL);
+        CHECK(curve_config_parse(badaccess, strlen(badaccess), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch2.access") != NULL);
+        CHECK(curve_config_parse(duplicate, strlen(duplicate), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "duplicates") != NULL);
+        CHECK(curve_config_parse(wrong_trigger, strlen(wrong_trigger), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch2 requires") != NULL);
+    }
+    /* Same address with a different access is allowed (read + write split). */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch_access\":\"read\","
+            "\"watch2\":{\"address\":536870912,\"size\":4,"
+            "\"access\":\"write\"},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch2_enabled);
+    }
+}
+
+/* P1.8.2: function snapshot + backtrace request parsing. */
+/* ---- P1-12: 4 DWT comparators: watchpoints array + watch3/watch4 aliases - */
+
+static void test_watchpoints_array(void)
+{
+    static curve_config_t cfg;
+    char err[128];
+    static const char *base =
+        "{\"trigger\":\"watchpoint\",\"interval_us\":10000,\"series\":"
+        "[{\"size\":4,\"expr\":{\"kind\":\"addr\",\"address\":536870916}}],"
+        "\"watchpoints\":[";
+
+    /* Canonical array form: 4 comparators with independent size/access. */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"interval_us\":10000,\"series\":"
+            "[{\"size\":4,\"expr\":{\"kind\":\"addr\",\"address\":536870916}}],"
+            "\"watchpoints\":["
+            "{\"address\":536870912,\"size\":4,\"access\":\"write\"},"
+            "{\"address\":536870928,\"size\":2,\"access\":\"read\"},"
+            "{\"address\":603979776,\"size\":4,\"access\":\"readwrite\"},"
+            "{\"address\":134221824,\"size\":1}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch_count == 4U);
+        CHECK(cfg.watch_addr[0] == 0x20000000U);
+        CHECK(cfg.watch_addr[1] == 0x20000010U);
+        CHECK(cfg.watch_addr[2] == 0x24000000U);
+        CHECK(cfg.watch_addr[3] == 0x08001000U);
+        CHECK(cfg.watch_sz[1] == 2U && cfg.watch_sz[3] == 1U);
+        CHECK(cfg.watch_acc[1] == (uint8_t)CURVE_WATCH_ACCESS_READ);
+        CHECK(cfg.watch_acc[2] == (uint8_t)CURVE_WATCH_ACCESS_RW);
+        /* legacy slot views stay in sync */
+        CHECK(cfg.watch_address == cfg.watch_addr[0]);
+        CHECK(cfg.watch2_enabled);
+        CHECK(cfg.watch2_address == cfg.watch_addr[1]);
+        CHECK(cfg.watch2_size == cfg.watch_sz[1]);
+        CHECK(cfg.watch2_access == cfg.watch_acc[1]);
+    }
+    /* watch3/watch4 aliases without the array (contiguous slots). */
+    {
+        static const char *json =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":536870928,\"size\":2},"
+            "\"watch3\":{\"address\":603979776},"
+            "\"watch4\":{\"address\":134221824,\"access\":\"read\"},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.watch_count == 4U);
+        CHECK(cfg.watch_addr[3] == 0x08001000U);
+        CHECK(cfg.watch_acc[3] == (uint8_t)CURVE_WATCH_ACCESS_READ);
+    }
+    /* Duplicate address is rejected (one comparator cannot serve twice). */
+    {
+        static const char *dup = NULL;
+        static char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "%s{\"address\":536870912},{\"address\":536870912}]}", base);
+        dup = buf;
+        CHECK(curve_config_parse(dup, strlen(dup), &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "duplicates") != NULL);
+    }
+    /* More than 4 / no slots / mixed encodings / wrong trigger. */
+    {
+        static const char *too_many =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch2\":{\"address\":536870928},"
+            "\"watch3\":{\"address\":603979776},"
+            "\"watch4\":{\"address\":134221824},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}],"
+            "\"watchpoints\":[{\"address\":536870912},"
+            "{\"address\":536870928},{\"address\":603979776},"
+            "{\"address\":134221824}]}";
+        static const char *skip_slot =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watch4\":{\"address\":134221824},"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *empty =
+            "{\"trigger\":\"watchpoint\",\"watch_address\":536870912,"
+            "\"watchpoints\":[],"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *periodic =
+            "{\"interval_us\":10000,\"watchpoints\":[{\"address\":536870912}],"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(too_many, strlen(too_many), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "cannot be combined") != NULL);
+        CHECK(curve_config_parse(skip_slot, strlen(skip_slot), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "previous watchpoint slot") != NULL);
+        CHECK(curve_config_parse(empty, strlen(empty), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watchpoints count") != NULL);
+        CHECK(curve_config_parse(periodic, strlen(periodic), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "require") != NULL);
+    }
+}
+
+static void test_parse_snapshot(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+
+    /* snapshot_after is opt-in and only valid with trigger=breakpoint. */
+    {
+        static const char *json =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"snapshot_after\":8,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.snapshot_enabled);
+        CHECK(cfg.snapshot_after == 8U);
+        CHECK(!cfg.backtrace);
+    }
+    /* Presence with value 0 = capture only the trigger frame (still one-shot). */
+    {
+        static const char *json =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"snapshot_after\":0,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.snapshot_enabled);
+        CHECK(cfg.snapshot_after == 0U);
+    }
+    /* Absent -> continuous breakpoint behavior (legacy). */
+    {
+        static const char *json =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(!cfg.snapshot_enabled);
+        CHECK(cfg.snapshot_after == 0U);
+    }
+    /* Wrong trigger mode / out-of-range / wrong type. */
+    {
+        static const char *wrong_trigger =
+            "{\"interval_us\":20000,\"snapshot_after\":4,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *too_many =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"snapshot_after\":33,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *bad_type =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"snapshot_after\":\"many\","
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(wrong_trigger, strlen(wrong_trigger), &cfg,
+                                 err, sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "snapshot_after requires") != NULL);
+        CHECK(curve_config_parse(too_many, strlen(too_many), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "snapshot_after must be 0..") != NULL);
+        CHECK(curve_config_parse(bad_type, strlen(bad_type), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "snapshot_after must be 0..") != NULL);
+    }
+    /* backtrace: bool, breakpoint/watchpoint only. */
+    {
+        static const char *json =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"backtrace\":true,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *wrong_trigger =
+            "{\"interval_us\":20000,\"backtrace\":true,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+        static const char *bad_type =
+            "{\"trigger\":\"breakpoint\",\"breakpoint_address\":134356037,"
+            "\"backtrace\":1,"
+            "\"series\":[{\"size\":4,\"expr\":{\"kind\":\"addr\","
+            "\"address\":536870916}}]}";
+
+        CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+              ESP_OK);
+        CHECK(cfg.backtrace);
+        CHECK(curve_config_parse(wrong_trigger, strlen(wrong_trigger), &cfg,
+                                 err, sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "backtrace requires") != NULL);
+        CHECK(curve_config_parse(bad_type, strlen(bad_type), &cfg, err,
+                                 sizeof(err)) == ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "backtrace must be a boolean") != NULL);
+    }
+}
+
+/* P1.8.2 prototype: frame-pointer unwinder with a mock target memory. */
+struct bt_mem {
+    uint32_t addr;
+    uint32_t value;
+};
+
+static bool bt_mock_read(void *ctx, uint32_t addr, uint32_t *value)
+{
+    const struct bt_mem *mem = (const struct bt_mem *)ctx;
+
+    for (int i = 0; i < 16 && mem[i].addr != 0U; i++) {
+        if (mem[i].addr == addr) {
+            *value = mem[i].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_backtrace_unwind(void)
+{
+    static const struct bt_mem mem[] = {
+        {0x20001010U, 0x20001030U}, /* [fp0] = previous fp            */
+        {0x20001014U, 0x08020101U}, /* [fp0+4] = return address (Thumb)*/
+        {0x20001030U, 0x20001050U}, /* [fp1] = previous fp            */
+        {0x20001034U, 0x08030203U}, /* [fp1+4] = return address       */
+        {0x20001050U, 0x00000000U}, /* chain end (null fp)            */
+        {0U, 0U},
+    };
+    curve_backtrace_t bt;
+
+    /* pc + two return addresses; [fp2] is unreadable -> stop with 3 frames. */
+    CHECK(curve_backtrace_capture(0x08029A45U, 0x20001010U, bt_mock_read,
+                                  (void *)mem, &bt));
+    CHECK(bt.count == 3U);
+    CHECK(bt.pcs[0] == 0x08029A44U);
+    CHECK(bt.pcs[1] == 0x08020100U);
+    CHECK(bt.pcs[2] == 0x08030202U);
+    CHECK(!bt.truncated);
+
+    /* Invalid start PC / unreadable fp: capture fails, count stays 0. */
+    CHECK(!curve_backtrace_capture(0x20000000U, 0x20001010U, bt_mock_read,
+                                   (void *)mem, &bt));
+    CHECK(bt.count == 0U);
+    CHECK(curve_backtrace_capture(0x08029A45U, 0x00000000U, bt_mock_read,
+                                  (void *)mem, &bt));
+    CHECK(bt.count == 1U); /* the halted PC itself is still valid */
+    CHECK(!curve_backtrace_capture(0x08029A45U, 0x20001010U, NULL, NULL, &bt));
+
+    /* A return address outside flash (corrupted chain) ends the unwalk. */
+    {
+        static const struct bt_mem bad[] = {
+            {0x20002000U, 0x20002010U},
+            {0x20002004U, 0x12345679U}, /* not a Thumb flash address */
+            {0U, 0U},
+        };
+
+        CHECK(curve_backtrace_capture(0x08010001U, 0x20002000U, bt_mock_read,
+                                      (void *)bad, &bt));
+        CHECK(bt.count == 1U);
+    }
+    /* Backwards/self frame link (e.g. no frame pointers) ends the unwalk. */
+    {
+        static const struct bt_mem loop[] = {
+            {0x20003000U, 0x20003000U}, /* prev fp == fp */
+            {0x20003004U, 0x08010A03U},
+            {0U, 0U},
+        };
+
+        CHECK(curve_backtrace_capture(0x08010001U, 0x20003000U, bt_mock_read,
+                                      (void *)loop, &bt));
+        CHECK(bt.count == 1U);
+    }
+    /* Frame limit: a long valid chain marks truncated. */
+    {
+        static struct bt_mem chain[20];
+        uint32_t base = 0x20004000U;
+
+        for (int i = 0; i < 10; i++) {
+            chain[i * 2].addr = base + (uint32_t)i * 0x20U;
+            chain[i * 2].value = base + (uint32_t)(i + 1) * 0x20U;
+            chain[i * 2 + 1].addr = base + (uint32_t)i * 0x20U + 4U;
+            chain[i * 2 + 1].value = 0x08020001U + (uint32_t)i * 2U;
+        }
+        CHECK(curve_backtrace_capture(0x08010001U, base, bt_mock_read,
+                                      (void *)chain, &bt));
+        CHECK(bt.count == CURVE_BACKTRACE_MAX_FRAMES);
+        CHECK(bt.truncated);
+    }
+}
+
+/* P1.8.3 prototype: target-UART trace ring planning. */
+static void test_trace_ring(void)
+{
+    static uint8_t storage[8];
+    curve_trace_ring_t ring;
+    uint32_t first_seq = 0U;
+    bool gap = false;
+    curve_trace_seg_t seg[2];
+
+    curve_trace_ring_reset(&ring, storage, sizeof(storage));
+    CHECK(curve_trace_ring_plan(&ring, 0U, &first_seq, &gap, seg) == 0U);
+    /* No storage: bytes are counted as evicted, plan stays empty. */
+    {
+        curve_trace_ring_t none;
+
+        curve_trace_ring_reset(&none, NULL, 0U);
+        curve_trace_ring_append(&none, (const uint8_t *)"abc", 3U);
+        CHECK(none.total == 3U);
+        CHECK(curve_trace_ring_plan(&none, 0U, &first_seq, &gap, seg) == 0U);
+    }
+    /* Linear fill: since=0 starts at the oldest retained byte, no gap. */
+    curve_trace_ring_append(&ring, (const uint8_t *)"abcdef", 6U);
+    CHECK(ring.total == 6U);
+    CHECK(ring.used == 6U);
+    CHECK(curve_trace_ring_plan(&ring, 0U, &first_seq, &gap, seg) == 6U);
+    CHECK(first_seq == 0U && !gap);
+    CHECK(seg[0].offset == 0U && seg[0].len == 6U);
+    CHECK(seg[1].len == 0U);
+    /* Incremental read: only bytes newer than `since`. */
+    CHECK(curve_trace_ring_plan(&ring, 4U, &first_seq, &gap, seg) == 2U);
+    CHECK(first_seq == 4U && !gap);
+    CHECK(seg[0].offset == 4U && seg[0].len == 2U);
+    /* Nothing new / future seq. */
+    CHECK(curve_trace_ring_plan(&ring, 6U, &first_seq, &gap, seg) == 0U);
+    CHECK(curve_trace_ring_plan(&ring, 7U, &first_seq, &gap, seg) == 0U);
+    /* Wrap: appending "ghij" fills the ring, oldest bytes are evicted. */
+    curve_trace_ring_append(&ring, (const uint8_t *)"ghij", 4U);
+    CHECK(ring.total == 10U);
+    CHECK(ring.used == 8U);
+    CHECK(curve_trace_ring_plan(&ring, 2U, &first_seq, &gap, seg) == 8U);
+    CHECK(!gap && first_seq == 2U); /* since == oldest retained: no gap */
+    CHECK(seg[0].len + seg[1].len == 8U);
+    /* since=0 always means "from the oldest retained byte". */
+    CHECK(curve_trace_ring_plan(&ring, 0U, &first_seq, &gap, seg) == 8U);
+    CHECK(!gap && first_seq == 2U);
+    /* A chunk larger than the ring keeps only its newest part. */
+    curve_trace_ring_append(&ring, (const uint8_t *)"0123456789", 10U);
+    CHECK(ring.total == 20U);
+    CHECK(ring.used == 8U);
+    CHECK(curve_trace_ring_plan(&ring, 12U, &first_seq, &gap, seg) == 8U);
+    CHECK(first_seq == 12U && !gap);
+}
+
+static void test_trace_line_ring(void)
+{
+    static curve_trace_line_t storage[4];
+    static curve_trace_line_t out[4];
+    curve_trace_line_ring_t ring;
+    uint32_t first_seq = 0U;
+    bool gap = true;
+
+    /* P1-13 trigger match helper (NULL-safe, empty pattern never matches). */
+    CHECK(curve_trace_line_match("hello world", "world"));
+    CHECK(curve_trace_line_match("boot ok", "boot"));
+    CHECK(!curve_trace_line_match("hello", "world"));
+    CHECK(!curve_trace_line_match(NULL, "x"));
+    CHECK(!curve_trace_line_match("x", NULL));
+    CHECK(!curve_trace_line_match("x", ""));
+
+    curve_trace_line_ring_reset(&ring, storage, 4U);
+    /* Nothing completed yet. */
+    CHECK(curve_trace_line_ring_plan(&ring, 0U, 4U, out, &first_seq, &gap) ==
+          0U);
+    CHECK(!gap);
+    CHECK(first_seq == 0U);
+
+    for (uint32_t i = 0U; i < 6U; i++) {
+        char text[16];
+
+        (void)snprintf(text, sizeof(text), "line%u", (unsigned)i);
+        curve_trace_line_ring_append(&ring, 1000U + i, text, strlen(text),
+                                     false);
+    }
+    CHECK(ring.total == 6U);
+    CHECK(ring.count == 4U);
+    /* since=0 on a ring that already evicted lines -> gap, oldest retained. */
+    CHECK(curve_trace_line_ring_plan(&ring, 0U, 4U, out, &first_seq, &gap) ==
+          4U);
+    CHECK(!gap);            /* since=0 = initial request, no gap reported */
+    CHECK(first_seq == 3U); /* lines 3,4,5,6 (seq 1-based) */
+    CHECK(out[0].seq == 3U);
+    CHECK(strcmp(out[0].text, "line2") == 0);
+    CHECK(out[3].seq == 6U);
+    CHECK(out[3].t_us == 1005U);
+    /* since = next expected seq -> nothing new. */
+    CHECK(curve_trace_line_ring_plan(&ring, 7U, 4U, out, &first_seq, &gap) ==
+          0U);
+    /* Only the newest 2 lines. */
+    CHECK(curve_trace_line_ring_plan(&ring, 5U, 4U, out, &first_seq, &gap) ==
+          2U);
+    CHECK(!gap);
+    CHECK(first_seq == 5U);
+    CHECK(out[1].seq == 6U);
+    /* max clamps the response size. */
+    CHECK(curve_trace_line_ring_plan(&ring, 3U, 1U, out, &first_seq, &gap) ==
+          1U);
+    CHECK(first_seq == 3U);
+    /* Long line is flagged truncated and clamped to the text buffer. */
+    {
+        char long_text[CURVE_TRACE_LINE_TEXT_MAX + 8U];
+
+        memset(long_text, 'a', sizeof(long_text));
+        curve_trace_line_ring_append(&ring, 2000U, long_text,
+                                     (uint32_t)sizeof(long_text), true);
+        CHECK(curve_trace_line_ring_plan(&ring, 6U, 4U, out, &first_seq,
+                                         &gap) == 2U);
+        CHECK(out[1].seq == 7U);
+        CHECK(out[1].len == CURVE_TRACE_LINE_TEXT_MAX);
+        CHECK((out[1].flags & CURVE_TRACE_LINE_FLAG_TRUNCATED) != 0U);
+        CHECK(out[1].text[CURVE_TRACE_LINE_TEXT_MAX] == '\0');
+    }
+    /* Capacity 0 / NULL storage are safe no-ops. */
+    curve_trace_line_ring_reset(&ring, NULL, 4U);
+    curve_trace_line_ring_append(&ring, 1U, "x", 1U, false);
+    CHECK(curve_trace_line_ring_plan(&ring, 0U, 4U, out, &first_seq, &gap) ==
+          0U);
 }
 
 static void test_ring_group_trigger_marker(void)
@@ -1605,6 +2316,316 @@ static void test_cvf2_wire(void)
     CHECK(header[5] == CURVE_CVF2_FLAG_CONDITION);
 }
 
+/* ---- P0-3: per-series sample_every (exact refresh rate) ------------------ */
+
+static void test_sample_due(void)
+{
+    /* divider 1 = every tick */
+    CHECK(curve_sample_due(1U, 0U));
+    CHECK(curve_sample_due(1U, 7U));
+    /* divider 4 = ticks 0,4,8,... */
+    CHECK(curve_sample_due(4U, 0U));
+    CHECK(!curve_sample_due(4U, 1U));
+    CHECK(!curve_sample_due(4U, 2U));
+    CHECK(!curve_sample_due(4U, 3U));
+    CHECK(curve_sample_due(4U, 4U));
+    CHECK(curve_sample_due(4U, 8U));
+    /* divider 64 (max) */
+    CHECK(curve_sample_due(64U, 0U));
+    CHECK(!curve_sample_due(64U, 63U));
+    CHECK(curve_sample_due(64U, 64U));
+    /* divider 3 */
+    CHECK(curve_sample_due(3U, 6U));
+    CHECK(!curve_sample_due(3U, 5U));
+}
+
+static void test_parse_sample_every(void)
+{
+    static curve_config_t cfg;
+    char err[96];
+    const char *json =
+        "{\"interval_us\":10000,\"groups\":[{\"series\":["
+        "{\"size\":4,\"sample_every\":7,\"expr_s\":\"A20000000\"},"
+        "{\"size\":2,\"divisor\":3,\"expr_s\":\"A20000004\"},"
+        "{\"size\":1,\"expr_s\":\"A20000008\"}]}]}";
+
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.series_count == 3U);
+    CHECK(cfg.series[0].sample_every == 7U);
+    CHECK(cfg.series[1].sample_every == 3U); /* divisor alias */
+    CHECK(cfg.series[2].sample_every == 1U); /* default */
+
+    /* Out-of-range divider -> clear 400-class parse error. */
+    const char *bad_zero =
+        "{\"interval_us\":10000,\"series\":["
+        "{\"size\":4,\"sample_every\":0,\"expr_s\":\"A20000000\"}]}";
+    CHECK(curve_config_parse(bad_zero, strlen(bad_zero), &cfg, err,
+                             sizeof(err)) == ESP_ERR_INVALID_ARG);
+    CHECK(strstr(err, "sample_every") != NULL);
+    const char *bad_big =
+        "{\"interval_us\":10000,\"series\":["
+        "{\"size\":4,\"sample_every\":65,\"expr_s\":\"A20000000\"}]}";
+    CHECK(curve_config_parse(bad_big, strlen(bad_big), &cfg, err,
+                             sizeof(err)) == ESP_ERR_INVALID_ARG);
+    CHECK(strstr(err, "sample_every") != NULL);
+    /* sizeof(curve_series_t) must stay 16 (reserved byte reused). */
+    CHECK(sizeof(curve_series_t) == 16U);
+}
+
+/* ---- P0-3: CVF2 per-series valid/stale footer ---------------------------- */
+
+static void test_cvf2_series_mask(void)
+{
+    uint8_t header[CURVE_FRAME_HEADER_BYTES];
+    uint8_t mask[CURVE_CVF2_SERIES_MASK_BYTES];
+
+    CHECK(curve_cvf2_write_header_ex(header, 2U, 5U, 16U,
+                                     CURVE_CVF2_FLAG_SERIES_MASK, false, true,
+                                     false, false) == CURVE_FRAME_HEADER_BYTES);
+    CHECK(header[5] == (CURVE_CVF2_FLAG_SERIES_MASK |
+                        CURVE_CVF2_FLAG_PC_PRESENT));
+    CHECK(header[0] == 'C' && header[3] == '2');
+    CHECK(header[4] == 2U); /* still CVF2 v2: no version bump */
+    CHECK(header[12] == 16U && header[13] == 0U);
+
+    /* Footer mask is a plain little-endian u64. */
+    CHECK(curve_cvf2_write_series_mask(mask, 0x1122334455667788ULL) ==
+          CURVE_CVF2_SERIES_MASK_BYTES);
+    CHECK(mask[0] == 0x88U && mask[1] == 0x77U && mask[2] == 0x66U &&
+          mask[3] == 0x55U);
+    CHECK(mask[4] == 0x44U && mask[5] == 0x33U && mask[6] == 0x22U &&
+          mask[7] == 0x11U);
+    /* Bit semantics: bit i = group series slot i is fresh this tick. */
+    uint64_t valid = 0U;
+    valid |= (uint64_t)1U << 0U;  /* series 0 sampled */
+    valid |= (uint64_t)1U << 5U;  /* series 5 sampled */
+    CHECK((valid & 1U) != 0U);
+    CHECK((valid & (1U << 1U)) == 0U); /* series 1 stale */
+    /* Old decoder compatibility: flags bit4 clear means no footer at all. */
+    CHECK(curve_cvf2_write_header(header, 0U, 1U, 8U, false, false, false,
+                                  false) == CURVE_FRAME_HEADER_BYTES);
+    CHECK((header[5] & CURVE_CVF2_FLAG_SERIES_MASK) == 0U);
+}
+
+/* ---- P0-1: compact binary (CBS1) start request --------------------------- */
+
+typedef struct {
+    uint8_t *buf;
+    size_t len;
+    size_t cap;
+} binw_t;
+
+static void binw_bytes(binw_t *w, const void *data, size_t len)
+{
+    if (w->len + len <= w->cap) {
+        memcpy(w->buf + w->len, data, len);
+    }
+    w->len += len;
+}
+
+static void binw_u8(binw_t *w, uint8_t v)
+{
+    binw_bytes(w, &v, 1U);
+}
+
+static void binw_u16(binw_t *w, uint16_t v)
+{
+    uint8_t b[2] = {(uint8_t)(v & 0xFFU), (uint8_t)((v >> 8U) & 0xFFU)};
+    binw_bytes(w, b, sizeof(b));
+}
+
+static void binw_u32(binw_t *w, uint32_t v)
+{
+    uint8_t b[4] = {(uint8_t)(v & 0xFFU), (uint8_t)((v >> 8U) & 0xFFU),
+                    (uint8_t)((v >> 16U) & 0xFFU),
+                    (uint8_t)((v >> 24U) & 0xFFU)};
+    binw_bytes(w, b, sizeof(b));
+}
+
+static void binw_expr(binw_t *w, const char *text)
+{
+    size_t len = strlen(text);
+
+    binw_u16(w, (uint16_t)len);
+    binw_bytes(w, text, len);
+}
+
+/** Build a 4-group x 64-series CBS1 body (256 series, 4 B each). */
+static size_t build_cbs1_256(uint8_t *buf, size_t cap)
+{
+    binw_t w = {.buf = buf, .len = 0U, .cap = cap};
+
+    binw_bytes(&w, "CBS1", 4U);
+    binw_u8(&w, CURVE_BIN_VERSION);
+    binw_u8(&w, CURVE_BIN_FLAG_HALT | CURVE_BIN_FLAG_WANT_PC);
+    binw_u8(&w, (uint8_t)CURVE_TRIGGER_PERIODIC);
+    binw_u8(&w, 0U); /* watch_count */
+    binw_u32(&w, 20000U);
+    binw_u32(&w, 0U); /* breakpoint_address */
+    binw_u32(&w, 0U); /* cond_address */
+    binw_u32(&w, 0U); /* cond_value */
+    binw_u8(&w, 0U);  /* cond_size */
+    binw_u8(&w, 0U);  /* cond_op */
+    binw_u8(&w, 0U);  /* cond_mode */
+    binw_u8(&w, 0U);  /* cond_flags */
+    binw_u8(&w, 0U);  /* snapshot_after */
+    binw_u8(&w, 4U);  /* group_count */
+    binw_u16(&w, 0U); /* reserved */
+    for (int g = 0; g < 4; g++) {
+        binw_u8(&w, 1U);  /* weight */
+        binw_u8(&w, 64U); /* series_count */
+        binw_u16(&w, 0U); /* reserved */
+        for (int i = 0; i < 64; i++) {
+            unsigned index = (unsigned)(g * 64 + i);
+            char expr[12];
+            uint8_t every = ((index % 2U) == 0U) ? 1U : 2U;
+
+            binw_u8(&w, 4U);          /* size */
+            binw_u8(&w, 0U);          /* flags */
+            binw_u8(&w, every);       /* sample_every */
+            binw_u8(&w, 0U);          /* variant_count */
+            binw_u32(&w, 0U);         /* pc_low */
+            binw_u32(&w, 0U);         /* pc_high */
+            (void)snprintf(expr, sizeof(expr), "A%08X",
+                           0x20000000U + index * 4U);
+            binw_expr(&w, expr);
+        }
+    }
+    return w.len;
+}
+
+static void test_bin_parse_256(void)
+{
+    static uint8_t body[CURVE_BIN_BODY_MAX];
+    static curve_config_t cfg;
+    char err[128];
+    size_t len = build_cbs1_256(body, sizeof(body));
+
+    CHECK(len > 0U);
+    CHECK(len < (size_t)CURVE_BIN_BODY_MAX);
+    CHECK(curve_bin_parse_mem(body, len, &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 4U);
+    CHECK(cfg.series_count == 256U);
+    CHECK(cfg.sample_bytes == 256U);
+    CHECK(cfg.pool_used == 256U); /* one unique address node per series */
+    CHECK(cfg.series[0].sample_every == 1U);
+    CHECK(cfg.series[1].sample_every == 2U);
+    CHECK(cfg.series[255].sample_every == 2U);
+    CHECK(cfg.interval_us == 20000U);
+    CHECK(cfg.halt);
+    CHECK(cfg.want_pc);
+    CHECK(cfg.needs_regs == false);
+    CHECK(cfg.groups[1].series_first == 64U);
+    CHECK(cfg.groups[1].series_count == 64U);
+    CHECK(cfg.schedule_len == 4U);
+}
+
+static void test_bin_parse_errors(void)
+{
+    static uint8_t body[CURVE_BIN_BODY_MAX];
+    static curve_config_t cfg;
+    char err[128];
+    size_t len = build_cbs1_256(body, sizeof(body));
+
+    /* Bad magic. */
+    {
+        uint8_t saved = body[0];
+        body[0] = 'X';
+        CHECK(curve_bin_parse_mem(body, len, &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        body[0] = saved;
+    }
+    /* Truncated body: every short length must fail, not over-read. */
+    CHECK(curve_bin_parse_mem(body, len - 1U, &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(curve_bin_parse_mem(body, 10U, &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    /* Unsupported version. */
+    CHECK(curve_bin_parse_mem(body, len, &cfg, err, sizeof(err)) == ESP_OK);
+    {
+        uint8_t *version = body + 4U;
+        uint8_t saved = *version;
+        *version = 2U;
+        CHECK(curve_bin_parse_mem(body, len, &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        *version = saved;
+    }
+    /* group_count = 0. */
+    {
+        /* group_count is the byte right before the trailing reserved u16. */
+        uint8_t *group_count = body + len - (4U * (4U + 64U * 23U)) - 3U;
+        uint8_t saved;
+
+        /* Rebuild to locate it robustly instead of relying on layout math. */
+        saved = *group_count;
+        *group_count = 0U;
+        CHECK(curve_bin_parse_mem(body, len, &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        *group_count = saved;
+    }
+    /* Empty body. */
+    CHECK(curve_bin_parse_mem(body, 0U, &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+}
+
+static void test_bin_parse_watchpoints(void)
+{
+    static curve_config_t cfg;
+    static uint8_t body[256];
+    binw_t w = {.buf = body, .len = 0U, .cap = sizeof(body)};
+    char err[96];
+
+    /* watchpoint trigger with one watchpoint: COMP/MASK params encoded. */
+    binw_bytes(&w, "CBS1", 4U);
+    binw_u8(&w, CURVE_BIN_VERSION);
+    binw_u8(&w, CURVE_BIN_FLAG_HALT); /* not WANT_PC */
+    binw_u8(&w, (uint8_t)CURVE_TRIGGER_WATCHPOINT);
+    binw_u8(&w, 1U); /* watch_count */
+    binw_u32(&w, 5000U);
+    binw_u32(&w, 0U);
+    binw_u32(&w, 0U);
+    binw_u32(&w, 0U);
+    binw_u8(&w, 0U);
+    binw_u8(&w, 0U);
+    binw_u8(&w, 0U);
+    binw_u8(&w, 0U);
+    binw_u8(&w, 0U);
+    binw_u8(&w, 1U);  /* group_count */
+    binw_u16(&w, 0U);
+    /* one watchpoint entry */
+    binw_u32(&w, 0x20000000U);
+    binw_u8(&w, 4U);
+    binw_u8(&w, (uint8_t)CURVE_WATCH_ACCESS_WRITE);
+    /* one group / one series */
+    binw_u8(&w, 1U);
+    binw_u8(&w, 1U);
+    binw_u16(&w, 0U);
+    binw_u8(&w, 4U);
+    binw_u8(&w, 0U);
+    binw_u8(&w, 1U);
+    binw_u8(&w, 0U);
+    binw_u32(&w, 0U);
+    binw_u32(&w, 0U);
+    binw_expr(&w, "A20000000");
+
+    CHECK(curve_bin_parse_mem(body, w.len, &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.trigger == (uint8_t)CURVE_TRIGGER_WATCHPOINT);
+    CHECK(cfg.watch_address == 0x20000000U);
+    CHECK(cfg.watch_size == 4U);
+    CHECK(cfg.want_pc == false);
+    CHECK(cfg.group_count == 1U);
+
+    /* A watchpoint on a non-watchpoint trigger must be rejected. */
+    {
+        uint8_t *trigger = body + 6U;
+
+        *trigger = (uint8_t)CURVE_TRIGGER_PERIODIC;
+        CHECK(curve_bin_parse_mem(body, w.len, &cfg, err, sizeof(err)) ==
+              ESP_ERR_INVALID_ARG);
+        CHECK(strstr(err, "watch") != NULL);
+    }
+}
+
 static void test_config_static_budget(void)
 {
     /* Static single instance owned by the HTTP layer (8 groups, 256 series,
@@ -2109,6 +3130,13 @@ int main(void)
     test_want_pc_parse();
     test_watchpoint_params();
     test_parse_watchpoint();
+    test_dwt_comparator_alloc();
+    test_snapshot_state_names();
+    test_parse_snapshot();
+    test_watchpoints_array();
+    test_backtrace_unwind();
+    test_trace_ring();
+    test_trace_line_ring();
     test_ring_group_trigger_marker();
     test_ws_core_attach();
     test_ws_core_subscribe();
@@ -2116,6 +3144,12 @@ int main(void)
     test_ws_core_ack();
     test_expr_read_cache();
     test_compact_256_series_body();
+    test_sample_due();
+    test_parse_sample_every();
+    test_cvf2_series_mask();
+    test_bin_parse_256();
+    test_bin_parse_errors();
+    test_bin_parse_watchpoints();
     test_condition_match();
     test_parse_condition();
     test_config_static_budget();

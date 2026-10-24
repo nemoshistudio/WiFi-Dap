@@ -5,11 +5,11 @@ hardware:
 
   * **N8** (P2) -- USBIP OUT short packet: the old handler always copied
     ``DAP_HANDLE_SIZE`` (516 B) from the shared TCP buffer, so stale bytes from
-    a previous URB/session reached the DAP parser. The fix copies only the
-    received ``length`` into a zero-filled packet. Tests: a Python model of the
-    fixed handler (old-data marker + short packet -> tail all zero, long packet
-    clamped at DAP_PACKET_SIZE) plus a source guard against re-introducing the
-    old fixed-size copy.
+    a previous URB/session reached the DAP parser. The fix clamps the received
+    ``length`` and zero-fills the tail of the fixed-size request packet. Tests:
+    a Python model of the fixed handler (old-data marker + short packet -> tail
+    all zero, long packet clamped at DAP_PACKET_SIZE) plus a source guard
+    against re-introducing the old fixed-size copy.
   * **N2** (P0) -- USB string descriptor: remote-controlled ``wValue.u8lo``
     used as a ``strings_list[]`` index and an unbounded ``strlen`` into a
     ``char temp_buff[64]``. Tests: descriptor boundary/truncation/clip table
@@ -43,7 +43,9 @@ DAP_C = ROOT / "components/DAP/cmsis-dap/source/DAP.c"
 DAP_HARNESS_C = ROOT / "tests/host/dap/harness.c"
 
 DAP_PACKET_SIZE = 512
-DAP_HANDLE_SIZE = 4 + DAP_PACKET_SIZE  # DapPacket_t: uint32 length + buf[512]
+# Pre-fix staging packet: uint32 length + buf[512].  Only used to model the old
+# behaviour in the negative test below.
+OLD_DAP_HANDLE_SIZE = 4 + DAP_PACKET_SIZE
 USB_DT_STRING = 3
 USB_STR_STAGE_BUFFER = 64
 USB_STR_MAX_CHARS = (USB_STR_STAGE_BUFFER - 2) // 2  # bLength + bDescriptorType => 31
@@ -66,36 +68,40 @@ def strip_c_comments(src: str) -> str:
 # ---------------------------------------------------------------------------
 
 def fixed_out_packet_model(payload: bytes, stale_marker: int = 0xAA) -> bytes:
-    """Model of the fixed DAP_handle.c handle_dap_data_request() (N8).
+    """Model of the current DAP_handle.c handle_dap_data_request() (N8).
 
-    The static ``dap_request_packet`` is pre-filled with stale marker bytes
+    The RX-buffer payload area is pre-filled with stale marker bytes
     (simulating data from a previous URB/session), then the fix does:
-        memset(&dap_request_packet, 0, sizeof(dap_request_packet));
-        memcpy(dap_request_packet.buf, data_in, length);   // length clamped
-    Returns the 516-byte packet (4-byte length prefix + 512-byte payload buf).
+        if (length > DAP_PACKET_SIZE) length = DAP_PACKET_SIZE;   // clamp
+        memset(data_in + length, 0, DAP_PACKET_SIZE - length);    // tail zero
+        xRingbufferSend(ring, data_in, DAP_PACKET_SIZE, ...);     // fixed item
+    Returns the DAP_PACKET_SIZE-byte request payload that reaches the DAP ring
+    (the pre-fix 4-byte length prefix staging packet is gone: the request ring
+    stores raw payload items, docs/dap-copy-budget.md).
     """
-    packet = bytearray([stale_marker]) * DAP_HANDLE_SIZE
+    data_in = bytearray([stale_marker]) * DAP_PACKET_SIZE
     length = min(len(payload), DAP_PACKET_SIZE)
-    packet[:] = b"\x00" * DAP_HANDLE_SIZE  # memset(&dap_request_packet, 0, ...)
-    packet[4:4 + length] = payload[:length]  # memcpy(..., data_in, length)
-    return bytes(packet)
+    data_in[:length] = payload[:length]                    # recv() wrote the URB
+    if length < DAP_PACKET_SIZE:
+        data_in[length:] = b"\x00" * (DAP_PACKET_SIZE - length)  # tail zero-fill
+    return bytes(data_in)
 
 
 class TestN8StaleOutData(unittest.TestCase):
     def test_short_packet_tail_is_zeroed(self) -> None:
         payload = b"\x01\x02Hello"
         packet = fixed_out_packet_model(payload)
-        self.assertEqual(len(packet), DAP_HANDLE_SIZE)
-        self.assertEqual(packet[4:4 + len(payload)], payload)
+        self.assertEqual(len(packet), DAP_PACKET_SIZE)
+        self.assertEqual(packet[:len(payload)], payload)
         # N8 regression: the tail must be zero, never the stale 0xAA marker.
-        self.assertEqual(packet[4 + len(payload):], b"\x00" * (DAP_PACKET_SIZE - len(payload)))
+        self.assertEqual(packet[len(payload):], b"\x00" * (DAP_PACKET_SIZE - len(payload)))
         self.assertNotIn(0xAA, packet)
 
     def test_old_fixed_size_copy_would_have_leaked_marker(self) -> None:
         # Demonstrates the pre-fix behaviour (copying DAP_HANDLE_SIZE from the
         # RX buffer) would forward stale marker bytes; documents why N8 matters.
         payload = b"\x7F\x01\x00"
-        stale_rx = bytearray([0xAA]) * DAP_HANDLE_SIZE
+        stale_rx = bytearray([0xAA]) * OLD_DAP_HANDLE_SIZE
         stale_rx[:len(payload)] = payload
         old_packet = bytes(stale_rx)  # old: ring item was the raw RX buffer slice
         self.assertIn(0xAA, old_packet[len(payload):])
@@ -106,24 +112,23 @@ class TestN8StaleOutData(unittest.TestCase):
     def test_long_packet_is_clamped_to_dap_packet_size(self) -> None:
         payload = bytes([(i & 0xFF) for i in range(DAP_PACKET_SIZE + 88)])
         packet = fixed_out_packet_model(payload)
-        self.assertEqual(packet[4:], payload[:DAP_PACKET_SIZE])
-        self.assertEqual(len(packet), DAP_HANDLE_SIZE)  # no OOB write
+        self.assertEqual(packet, payload[:DAP_PACKET_SIZE])
+        self.assertEqual(len(packet), DAP_PACKET_SIZE)  # no OOB write
 
     def test_source_guard_fix_markers(self) -> None:
         src = read(DAP_HANDLE_C)
         self.assertIn("N8", src, "N8 fix comment missing from DAP_handle.c")
         self.assertIn("if (length > DAP_PACKET_SIZE)", src,
                       "N8: OUT length must be clamped to DAP_PACKET_SIZE")
-        self.assertIn("memset(&dap_request_packet, 0, sizeof(dap_request_packet));", src,
-                      "N8: request packet must be zero-filled before the bounded copy")
-        self.assertIn("memcpy(dap_request_packet.buf, data_in, length);", src,
-                      "N8: only the received data_length may be copied")
-        self.assertIn("xRingbufferSend(dap_dataIN_handle, &dap_request_packet,", src,
-                      "N8: the fixed-size packet (not the raw RX buffer) is queued")
-        # Old pattern must not come back: copying DAP_HANDLE_SIZE from data_in.
+        self.assertIn("memset(data_in + length, 0, (size_t)DAP_PACKET_SIZE - length);", src,
+                      "N8: the request tail must be zero-filled before queuing")
+        self.assertIn("xRingbufferSend(dap_dataIN_handle, data_in, DAP_PACKET_SIZE,", src,
+                      "N8: the fixed-size request payload is queued from the RX buffer")
+        # Old pattern must not come back: a fixed-size copy from data_in into a
+        # staging packet (that also re-introduced the extra memcpy).
         code = strip_c_comments(src)
-        self.assertNotIn("data_in - sizeof(uint32_t)", code,
-                         "N8 regression: raw RX buffer copy with fixed 516B size is back")
+        self.assertNotIn("dap_request_packet", code,
+                         "N8 regression: fixed-size staging request packet is back")
         self.assertNotIn("data_in), DAP_HANDLE_SIZE", code)
 
 
