@@ -1303,7 +1303,12 @@ import {
   formatTraceLinesView,
   type TraceLineLike,
 } from '@/utils/curveDebugText'
-import type {ChartDrawMessage, ChartGeometry} from '@/utils/curveChartCore'
+import {
+  resolveChartWebglMode,
+  type ChartDrawMessage,
+  type ChartGeometry,
+  type ChartWebglMode,
+} from '@/utils/curveChartCore'
 import {
   DAP_COMMAND_INDEX_EVENT,
   DAP_COMMAND_INDEX_VERSION_KEY,
@@ -5847,6 +5852,10 @@ const diagnosticsData = computed(() => {
       samplePosts: chartSamplePosts,
       last: chartWorkerStats,
       derivedFallback: drawnSeriesList.value.some((item) => item.derived),
+      // task-67：WebGL 后备（feature flag 默认 off；renderer 为 Worker 实际后端）。
+      webglMode: chartWebglMode,
+      renderer: chartWebglRenderer,
+      webglFallback: chartWebglFallback,
     },
     recording: {active: recordingActive.value, rows: recordRowCount.value, saved: recordings.value.length},
     activeFrame: {
@@ -7136,9 +7145,45 @@ const chartRenderMode = ref<'offscreen' | 'main'>('main')
 /** 采样消息计数 + 最近一次 Worker 绘制统计（只用于 __curveDebug 测量，不影响逻辑）。 */
 let chartSamplePosts = 0
 let chartWorkerEmptyStreak = 0
-let chartWorkerStats: {series: number; decimated: boolean; segments: number; columnsDrawn: number; startOrder: number; drawMs: number} | null = null
+let chartWorkerStats: {
+  renderer: string
+  series: number
+  decimated: boolean
+  segments: number
+  columnsDrawn: number
+  startOrder: number
+  drawMs: number
+  uploadBytes?: number
+  uploadCalls?: number
+  drawCalls?: number
+  vertices?: number
+  rangeMs?: number
+  uploadMode?: string
+} | null = null
+
+// ---- task-67：可选 WebGL 曲线渲染（feature flag，默认关闭） -------------------
+// 打开方式（显式 opt-in，不做自动开启）：
+//   URL `?chartWebgl=1`（本次会话）或 localStorage `birdiebot.chart.webgl=1|auto|force`；
+// 打开后 Worker 只在“大系列（>= CHART_WEBGL_MIN_SERIES）+ 无平滑”时走 WebGL，
+// 小系列/不支持/context lost/导出/冻结仍走现有 Canvas/Worker 路径。
+// 默认关闭的原因：本机无目标机 GPU，Node/headless 只能证明 CPU 段收益，不能证明
+// 真机端到端帧率；详见 docs/web-variable-curve.md §24。
+const CHART_WEBGL_STORAGE_KEY = 'birdiebot.chart.webgl'
+let chartWebglMode: ChartWebglMode = 'off'
+/** Worker 上报的最近一帧实际渲染后端（webgl2/webgl1/canvas2d）。 */
+let chartWebglRenderer: string | null = null
+let chartWebglFallback: string | null = null
+
+function readChartWebglMode(): ChartWebglMode {
+  let stored: string | null = null
+  try {
+    stored = window.localStorage.getItem(CHART_WEBGL_STORAGE_KEY)
+  } catch { /* localStorage 不可用（隐私模式）→ 仅看 URL */ }
+  return resolveChartWebglMode(window.location.search, stored)
+}
 
 function initChartWorker(): void {
+  chartWebglMode = readChartWebglMode()
   if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') {
     chartRenderMode.value = 'main'
     return
@@ -7153,7 +7198,13 @@ function initChartWorker(): void {
       drawMs?: number
       error?: string
       geometry?: ChartGeometry
-      stats?: {series?: number; decimated?: number; segments?: number; columnsDrawn?: number; startOrder?: number}
+      renderer?: string
+      webglFallback?: string | null
+      stats?: {
+        series?: number; decimated?: number; segments?: number; columnsDrawn?: number
+        startOrder?: number; renderer?: string; uploadBytes?: number; uploadCalls?: number
+        drawCalls?: number; vertices?: number; rangeMs?: number; uploadMode?: string
+      }
     }>) => {
       const message = event.data
       if (message.type === 'error') {
@@ -7166,15 +7217,25 @@ function initChartWorker(): void {
         return
       }
       if (message.type !== 'bitmap') return
+      // task-67：记录 Worker 实际使用的渲染后端 / WebGL 回退原因（诊断用）。
+      chartWebglRenderer = message.renderer ?? message.stats?.renderer ?? 'canvas2d'
+      chartWebglFallback = message.webglFallback ?? null
       const geometry = message.geometry
       if (message.stats) {
         chartWorkerStats = {
+          renderer: message.stats.renderer ?? chartWebglRenderer,
           series: message.stats.series ?? 0,
           decimated: (message.stats.decimated ?? 0) !== 0,
           segments: message.stats.segments ?? 0,
           columnsDrawn: message.stats.columnsDrawn ?? 0,
           startOrder: message.stats.startOrder ?? 0,
           drawMs: message.drawMs ?? 0,
+          uploadBytes: message.stats.uploadBytes,
+          uploadCalls: message.stats.uploadCalls,
+          drawCalls: message.stats.drawCalls,
+          vertices: message.stats.vertices,
+          rangeMs: message.stats.rangeMs,
+          uploadMode: message.stats.uploadMode,
         }
       }
       if (!geometry) {
@@ -7247,7 +7308,7 @@ function initChartWorker(): void {
       scheduleDraw()
     }
     // 主线程 ring 容量固定 MAX_POINTS：Worker 用同一容量保持 order/seq 语义一致。
-    worker.postMessage({type: 'reset', maxPoints: MAX_POINTS})
+    worker.postMessage({type: 'reset', maxPoints: MAX_POINTS, webgl: chartWebglMode})
     chartWorkerReady = true
     chartRenderMode.value = 'offscreen'
   } catch {
@@ -7279,7 +7340,7 @@ function postChartSampleToWorker(time: number, slot: number, snapshot: readonly 
 /** Worker ring 复位（clearData 时；与主线程 ring 同一步清空）。 */
 function resetChartWorkerRing(): void {
   if (!chartWorker || !chartWorkerReady || chartWorkerFailed) return
-  chartWorker.postMessage({type: 'reset', maxPoints: MAX_POINTS})
+  chartWorker.postMessage({type: 'reset', maxPoints: MAX_POINTS, webgl: chartWebglMode})
   chartWorkerStats = null
 }
 
@@ -7890,6 +7951,9 @@ function installDebugSnapshot(): void {
     renderMode: chartRenderMode.value,
     chartSamplePosts,
     chartWorkerStats,
+    chartWebglMode,
+    chartWebglRenderer,
+    chartWebglFallback,
     localCapabilities: localCapabilities.value,
     preciseRates: localPreciseActive.value,
     sampleEveryMax: localSampleEveryMax.value,

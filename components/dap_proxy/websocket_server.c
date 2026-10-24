@@ -30,9 +30,10 @@
  *  - The whole file is compiled only when CONFIG_BIRDIEBOT_DAP_WS_ENABLE=y
  *    (default y, analysis/INTEGRATION-PLAN.md P7.1).  tcp_server.c gates the
  *    dispatch accordingly.
- *  - The DAP ring buffers are owned by the DAP task (see DAP_handle.h): this
- *    file posts dap_handle_request_reset(DELETE_HANDLE) and waits for the
- *    buffers to be released before it runs DAP commands inline.
+ *  - The DAP data path is owned by the DAP task (see DAP_handle.h): this file
+ *    posts dap_handle_request_reset(DELETE_HANDLE) and waits until the USBIP
+ *    data path is detached (ring buffers kept allocated, task-66) before it
+ *    runs DAP commands inline.
  */
 #include <stdint.h>
 #include <string.h>

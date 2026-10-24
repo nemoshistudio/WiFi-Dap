@@ -62,9 +62,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import {execFileSync} from 'node:child_process'
 import {fileURLToPath, pathToFileURL} from 'node:url'
 
-const SCRIPT_VERSION = '1.0.0'
+const SCRIPT_VERSION = '1.1.0'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const WEB_ROOT = path.resolve(__dirname, '..')
 
@@ -89,6 +90,13 @@ function parseArgs(argv) {
     playwright: '',
     selftest: false,
     fromJson: '',
+    mode: 'device',
+    series: '',
+    points: 6000,
+    frames: 0,
+    seed: 1,
+    screenshot: '',
+    outExplicit: false,
     help: false,
   }
   for (let i = 0; i < argv.length; i++) {
@@ -101,7 +109,7 @@ function parseArgs(argv) {
     switch (arg) {
       case '--url': opts.url = next(); break
       case '--elf': opts.elf = next(); break
-      case '--out': opts.out = next(); break
+      case '--out': opts.out = next(); opts.outExplicit = true; break
       case '--md': opts.md = next(); break
       case '--compare': opts.compare = next(); break
       case '--label': opts.label = next(); break
@@ -115,6 +123,12 @@ function parseArgs(argv) {
       case '--keep-open': opts.keepOpen = true; break
       case '--selftest': opts.selftest = true; break
       case '--from-json': opts.fromJson = next(); break
+      case '--mode': opts.mode = next(); break
+      case '--series': opts.series = next(); break
+      case '--points': opts.points = Number(next()); break
+      case '--frames': opts.frames = Number(next()); break
+      case '--seed': opts.seed = Number(next()); break
+      case '--screenshot': opts.screenshot = next(); break
       case '--help': case '-h': opts.help = true; break
       default: throw new Error(`未知参数 ${arg}（--help 查看用法）`)
     }
@@ -129,6 +143,16 @@ function parseArgs(argv) {
     opts.warmup = 1000
     opts.out = opts.out.replace(/\.json$/i, '') + '-selftest.json'
   }
+  if (!['device', 'node', 'headless'].includes(opts.mode)) {
+    throw new Error(`未知 --mode ${opts.mode}（可选 device|node|headless）`)
+  }
+  if (!opts.outExplicit) {
+    if (opts.mode === 'node') opts.out = '/tmp/curve-perf-webgl-node.json'
+    else if (opts.mode === 'headless') opts.out = '/tmp/curve-perf-webgl-headless.json'
+  }
+  if (opts.mode === 'node' && !opts.series) opts.series = '40,128,256'
+  if (opts.mode === 'headless' && !opts.series) opts.series = '128,256'
+  if (!opts.frames) opts.frames = opts.mode === 'headless' ? 40 : 60
   return opts
 }
 
@@ -153,7 +177,22 @@ const HELP = `DebugCurve 多变量性能基准
   --playwright <path>  playwright 模块路径
   --from-json <json>   不跑基准，仅用既有 JSON 重新生成 Markdown/对比
   --selftest           冒烟测试 (40 路 / 3s)
+  --mode <m>           device(默认,真机 Playwright) | node(离线 CPU 合成) | headless(离线浏览器合成)
+  --series <list>      node/headless 合成基准的 series 数 (默认 node:40,128,256 headless:128,256)
+  --points <n>         合成 ring 点数 (默认 6000)
+  --frames <n>         合成基准测量帧数 (默认 node 60 / headless 40)
+  --seed <n>           合成数据 LCG 种子 (默认 1)
+  --screenshot <dir>   headless 模式保存 canvas/webgl 最后一帧 PNG（可视化核对）
   -h, --help           显示帮助
+
+模式说明:
+  device    真实设备页面 + Playwright，需要 OTA 后的设备与调试 ELF；测端到端 FPS/longtask/draw。
+  node      纯 Node 合成基准（esbuild 打包 curveChartCore/curveChartWebgl 后运行）：
+            对比 2D Worker 的 range+envelope CPU 与 WebGL 路径的 range+增量上传 CPU。
+            **不含 GPU 光栅**，不能单独证明 WebGL 端到端收益。
+  headless  Playwright Chromium + 内联 Worker + 合成 A 系列数据（不需要设备）：
+            分别跑 2D 与 WebGL(强制) 两条路径，测量 roundtrip 与 Worker drawMs；
+            本机无 GPU 时 Chromium 用 SwiftShader（软件 GL），结果偏悲观。
 `
 
 // 场景表：series=勾选曲线数（固定地址全局/静态变量），mode=B 默认绘制上限 / A 全部绘制
@@ -1257,6 +1296,670 @@ function fmtDelta(entry) {
 // ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// task-67 / P1-15：离线 WebGL 后备基准（--mode node / --mode headless）
+// ---------------------------------------------------------------------------
+const BENCH_COLORS = [
+  '#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2',
+  '#db2777', '#65a30d', '#4f46e5', '#ea580c', '#0d9488', '#9333ea',
+  '#b91c1c', '#047857', '#a16207', '#1d4ed8', '#c026d3', '#475569',
+  '#15803d', '#be123c', '#4338ca', '#0f766e', '#a21caf', '#92400e',
+]
+
+function parseSeriesList(raw) {
+  const list = String(raw || '')
+    .split(',')
+    .map((item) => Number(item.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  if (list.length === 0) throw new Error('--series 需要至少一个正整数，例如 --series 40,128,256')
+  return [...new Set(list)].sort((a, b) => a - b)
+}
+
+/** 用 repo 自带 esbuild 打包 TS 模块（node=esm / headless=iife worker）。 */
+async function bundleEntry(entryFile, format, platform) {
+  const esbuild = path.join(WEB_ROOT, 'node_modules', '.bin', 'esbuild')
+  if (!fs.existsSync(esbuild)) throw new Error(`esbuild 不存在: ${esbuild}（先 cd web && npm ci）`)
+  const suffix = format === 'iife' ? 'js' : 'mjs'
+  const outfile = path.join(os.tmpdir(), `bench-curve-${path.basename(entryFile, '.ts')}-${process.pid}.${suffix}`)
+  execFileSync(esbuild, [
+    entryFile, '--bundle', `--format=${format}`, `--platform=${platform}`, '--log-level=error',
+    `--outfile=${outfile}`,
+  ], {stdio: 'pipe'})
+  return outfile
+}
+
+/** 合成数据生成器（LCG，确定性 seed；A 模式多路不同相位 + 少量噪声）。 */
+function makeSyntheticReader(seed) {
+  let state = (Math.floor(seed) >>> 0) || 1
+  return (frame, seriesCount, out) => {
+    for (let index = 0; index < seriesCount; index++) {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+      out[index] = Math.sin((frame + index * 7) * 0.01) * 100 + (state / 0x100000000) * 5
+    }
+    return out
+  }
+}
+
+function fillSyntheticRing(core, points, seriesCount, reader) {
+  const store = new core.ChartRingStore(points)
+  const ids = Array.from({length: seriesCount}, (_, index) => index + 1)
+  const values = new Float64Array(seriesCount)
+  const startedAt = performance.now()
+  for (let sample = 0; sample < points; sample++) {
+    reader(sample, seriesCount, values)
+    store.push(sample / 50, ids, values)
+  }
+  return {store, ids, values, fillMs: performance.now() - startedAt}
+}
+
+function summarizeLatency(values) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b)
+  const pick = (ratio) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * ratio)))]
+  const mean = sorted.reduce((sum, value) => sum + value, 0) / Math.max(1, sorted.length)
+  return {
+    count: sorted.length,
+    meanMs: round(mean, 3),
+    medianMs: round(pick(0.5), 3),
+    p90Ms: round(pick(0.9), 3),
+    maxMs: round(sorted[sorted.length - 1], 3),
+  }
+}
+
+/** fake WebGL：Node 侧只用于模拟 CPU 段（buffer/draw 调用开销），不做光栅。 */
+function createBenchFakeWebgl() {
+  const state = {buffers: 0, bufferData: [], bufferSubData: [], draws: 0, lost: false}
+  const gl = {
+    ARRAY_BUFFER: 0x8892, FLOAT: 0x1406, DYNAMIC_DRAW: 0x88E8, BLEND: 0x0BE2,
+    SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303, COLOR_BUFFER_BIT: 0x4000,
+    LINE_STRIP: 3, VERTEX_SHADER: 0x8B31, FRAGMENT_SHADER: 0x8B30,
+    COMPILE_STATUS: 0x8B81, LINK_STATUS: 0x8B82,
+    createShader: () => ({}),
+    shaderSource() {},
+    compileShader() {},
+    getShaderParameter: () => true,
+    getShaderInfoLog: () => '',
+    createProgram: () => ({}),
+    attachShader() {},
+    linkProgram() {},
+    getProgramParameter: () => true,
+    getProgramInfoLog: () => '',
+    deleteShader() {},
+    deleteProgram() {},
+    useProgram() {},
+    createBuffer: () => { state.buffers += 1; return {} },
+    bindBuffer() {},
+    deleteBuffer() {},
+    bufferData: (_target, size) => state.bufferData.push(size),
+    bufferSubData: (_target, offset, data) => state.bufferSubData.push({offset, bytes: data?.byteLength ?? 0}),
+    getAttribLocation: (_program, name) => ({a_time: 0, a_seq: 1, a_value: 2}[name] ?? -1),
+    getUniformLocation: (_program, name) => ({name}),
+    enableVertexAttribArray() {},
+    vertexAttribPointer() {},
+    uniform1f() {},
+    uniform4f() {},
+    uniform1i() {},
+    viewport() {},
+    clearColor() {},
+    clear() {},
+    enable() {},
+    blendFunc() {},
+    lineWidth() {},
+    drawArrays: () => { state.draws += 1 },
+    isContextLost: () => state.lost,
+  }
+  return {gl, state}
+}
+
+function benchScene(series, pointsPerSecond, lastTime, width = 1200, height = 500) {
+  return {
+    type: 'draw',
+    requestId: 1,
+    width,
+    height,
+    dpr: 1,
+    padding: {left: 58, right: 14, top: 12, bottom: 26},
+    xMin: Math.max(0, lastTime - 20),
+    xMax: lastTime,
+    yMode: 'auto',
+    smoothingWindow: 1,
+    palette: {bg: '#ffffff', grid: '#eeeeee', text: '#333333', axis: '#cccccc'},
+    series,
+  }
+}
+
+/** 2D Worker 路径 CPU 模型：精确 Y 范围 + 每 series 像素列包络（与 curveChartWorker 一致）。 */
+function measureCanvasModel(core, store, specs, frames, plotWidth = 1000) {
+  const columnScale = specs.length > 192 ? 20 : specs.length > 96 ? 4 : 1
+  const orderStep = specs.length > 192 ? 4 : 1
+  const options = {
+    left: 58, plotWidth, columnScale, orderStep, xMin: 0, xMax: (store.count - 1) / 50,
+    yMode: 'auto', smoothingWindow: 1,
+  }
+  const cache = new Map()
+  let rangeMs = 0
+  let envelopeMs = 0
+  let rangeCount = 0
+  for (let frame = 0; frame < frames + 2; frame++) {
+    const startedRange = performance.now()
+    core.computeChartRange(store, specs, 0, 'auto')
+    const finishedRange = performance.now()
+    for (const spec of specs) {
+      const envelope = core.buildColumnEnvelope(store, spec, 0, options, cache.get(spec.id) ?? null)
+      if (envelope) cache.set(spec.id, envelope)
+    }
+    const finishedEnvelope = performance.now()
+    if (frame >= 2) {
+      rangeMs += finishedRange - startedRange
+      envelopeMs += finishedEnvelope - finishedRange
+      rangeCount += 1
+    }
+  }
+  const totalMs = (rangeMs + envelopeMs) / Math.max(1, rangeCount)
+  return {
+    rangeMs: round(rangeMs / Math.max(1, rangeCount), 3),
+    envelopeMs: round(envelopeMs / Math.max(1, rangeCount), 3),
+    totalMs: round(totalMs, 3),
+    columnScale, orderStep,
+    note: 'CPU only (range+envelope build)；2D 光栅不在此模型内',
+  }
+}
+
+/** WebGL 路径 CPU 模型：抽样 Y 范围 + 增量上传 staging + draw 提交（fake GL，无 GPU 光栅）。 */
+function measureWebglModel(core, webgl, store, specs, frames, reader, ids, values) {
+  const {gl} = createBenchFakeWebgl()
+  const canvas = {
+    width: 1,
+    height: 1,
+    getContext: (kind) => (kind === 'webgl2' ? gl : null),
+    transferToImageBitmap: () => ({close() {}}),
+  }
+  const renderer = new webgl.ChartWebglRenderer(canvas, gl, 'webgl2')
+  renderer.resize(store.capacity)
+  const scene = benchScene(specs, 50, (store.count - 1) / 50)
+  const firstDraw = renderer.draw(scene, store)
+  let cpuMs = 0
+  let rangeMs = 0
+  let uploadBytes = 0
+  let uploadCalls = 0
+  let drawCalls = 0
+  const samples = []
+  for (let frame = 0; frame < frames + 2; frame++) {
+    for (let extra = 0; extra < 2; extra++) {
+      const nextSample = store.count + (frame - 2) * 2 + extra
+      reader(nextSample, ids.length, values)
+      store.push(nextSample / 50, ids, values)
+      renderer.onSample(store)
+    }
+    const started = performance.now()
+    const frameResult = renderer.draw(scene, store)
+    const elapsed = performance.now() - started
+    if (frame >= 2) {
+      samples.push(elapsed)
+      cpuMs += elapsed
+      rangeMs += frameResult.stats.rangeMs
+      uploadBytes += frameResult.stats.uploadBytes
+      uploadCalls += frameResult.stats.uploadCalls
+      drawCalls += frameResult.stats.drawCalls
+    }
+  }
+  const measured = Math.max(1, frames)
+  return {
+    cpuMs: round(cpuMs / measured, 3),
+    cpuLatency: summarizeLatency(samples),
+    rangeMs: round(rangeMs / measured, 3),
+    uploadBytesPerFrame: Math.round(uploadBytes / measured),
+    uploadCallsPerFrame: round(uploadCalls / measured, 1),
+    drawCallsPerFrame: Math.round(drawCalls / measured),
+    firstFullUploadBytes: firstDraw.stats.uploadBytes,
+    firstDrawMs: round(firstDraw.stats.drawMs, 3),
+    renderer: firstDraw.stats.renderer,
+    note: 'CPU-only model (fake GL, no GPU raster)',
+  }
+}
+
+function writeBenchmarkOutputs(opts, result, markdown) {
+  fs.mkdirSync(path.dirname(path.resolve(opts.out)), {recursive: true})
+  fs.writeFileSync(path.resolve(opts.out), JSON.stringify(result, null, 2) + '\n')
+  perfLog(`结果已写入 ${path.resolve(opts.out)}`)
+  if (opts.md) {
+    fs.mkdirSync(path.dirname(path.resolve(opts.md)), {recursive: true})
+    fs.writeFileSync(path.resolve(opts.md), markdown + '\n')
+    perfLog(`Markdown 已写入 ${path.resolve(opts.md)}`)
+  }
+}
+
+function buildSyntheticMarkdown(result) {
+  const lines = [
+    `# DebugCurve WebGL 后备基准（${result.mode}）`,
+    '',
+    `- 生成时间: ${result.createdAt}`,
+    `- 脚本: bench-curve-perf.mjs v${result.scriptVersion}`,
+    `- 配置: ${JSON.stringify(result.config)}`,
+    '',
+  ]
+  if (result.mode === 'node') {
+    lines.push('| series | 2D CPU range | 2D CPU envelope | 2D 合计 | WebGL CPU | WebGL Y 范围 | 增量上传/帧 | N 倍 | 降幅 |')
+    lines.push('| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+    for (const row of result.results) {
+      const speedup = row.webgl.cpuMs > 0 ? row.canvas.totalMs / row.webgl.cpuMs : null
+      lines.push(`| ${row.series} | ${row.canvas.rangeMs} ms | ${row.canvas.envelopeMs} ms | ${row.canvas.totalMs} ms | `
+        + `${row.webgl.cpuMs} ms | ${row.webgl.rangeMs} ms | ${row.webgl.uploadBytesPerFrame} B | `
+        + `${round(speedup, 1)}× | ${row.savingsPct}% |`)
+    }
+    lines.push('')
+    lines.push('> Node 模式只测 Worker CPU（2D = 精确 Y 范围 + 像素列包络；WebGL = 抽样 Y 范围 +')
+    lines.push('> 增量上传 staging + draw 提交）。GPU 光栅/合成不在本模式内，不能单独证明端到端收益：')
+    lines.push('> 因此 WebGL feature flag 仍默认关闭（显式 opt-in: URL `?chartWebgl=1` 或')
+    lines.push('> localStorage `birdiebot.chart.webgl=1|auto|force`），真机 A/B 后再决定是否默认开启。')
+  } else {
+    lines.push(`- GL: ${result.env.gl.renderer || 'unknown'} (${result.env.gl.kind || 'none'})`)
+    lines.push(`- WebGL 实际启用: ${result.verdict.webglUsed ? '是' : '否（环境不支持/已回退）'}；`
+      + '本机无 GPU 时 Chromium 走 SwiftShader 软件 GL，结果不代表真机 GPU。')
+    lines.push('')
+    lines.push('| series | path | renderer | median roundtrip | worker drawMs(中位) | 上传/帧 | drawCalls/帧 | 包络列/顶点(帧) | 非背景像素 |')
+    lines.push('| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |')
+    for (const row of result.results) {
+      const workload = row.mode === 'canvas'
+        ? `${row.stats.columnsDrawnPerFrame} cols / ${row.stats.segmentsPerFrame} seg`
+        : `${row.stats.verticesPerFrame} verts`
+      lines.push(`| ${row.series} | ${row.mode} | ${row.renderer || 'n/a'} | ${row.roundtripMs.medianMs} ms | `
+        + `${row.workerDrawMs.medianMs} ms | ${row.uploadBytesPerFrame} B | ${row.drawCallsPerFrame} | ${workload} | ${row.pixelDiff} |`)
+    }
+    if (result.verdict.comparisons?.length) {
+      lines.push('')
+      lines.push('| series | 2D 中位 roundtrip | WebGL 中位 roundtrip | 倍数 (canvas/webgl) |')
+      lines.push('| ---: | ---: | ---: | ---: |')
+      for (const row of result.verdict.comparisons) {
+        lines.push(`| ${row.series} | ${row.canvasMedianMs} ms | ${row.webglMedianMs} ms | ${row.speedup}× |`)
+      }
+    }
+    lines.push('')
+    lines.push('> 视觉非等价（已用非背景像素数量化）：2D Worker 画的是每像素列 min/max 包络（竖线，视觉更密），')
+    lines.push('> WebGL 画的是全分辨率折线（细线，单点尖峰像素可能不同）；两者都是大数据量下的近似可视化。')
+    lines.push('> roundtrip 含主线程 postMessage → Worker 绘制/合成 → transfer 回主线程；同模式横比有意义，')
+    lines.push('> 跨机器/跨浏览器不可直接比。')
+    lines.push('')
+    lines.push('结论：Node CPU 段 WebGL 明显更低；headless 软件 GL 下端到端混合（小窗口/细线场景 WebGL 快，')
+    lines.push('> 大系列全分辨率折线在软件光栅下可能慢于 2D 包络）。**本机无目标 GPU，不能证明真机收益，')
+    lines.push('> WebGL feature flag 默认关闭**；真机验证用 device 模式 + `?chartWebgl=1` 复测后再决定。')
+  }
+  return lines.join('\n')
+}
+
+async function runNodeBenchmark(opts) {
+  perfLog(`DebugCurve 性能基准 v${SCRIPT_VERSION} — mode=node（离线合成，不需要设备/浏览器）`)
+  const seriesList = parseSeriesList(opts.series)
+  const points = Math.max(100, Math.floor(opts.points))
+  const frames = Math.max(3, Math.floor(opts.frames))
+  perfLog(`配置: series=${seriesList.join(',')} points=${points} frames=${frames} seed=${opts.seed}`)
+  const coreOut = await bundleEntry(path.join(WEB_ROOT, 'src/utils/curveChartCore.ts'), 'esm', 'node')
+  const webglOut = await bundleEntry(path.join(WEB_ROOT, 'src/utils/curveChartWebgl.ts'), 'esm', 'node')
+  const core = await import(pathToFileURL(coreOut).href)
+  const webgl = await import(pathToFileURL(webglOut).href)
+  fs.rmSync(coreOut, {force: true})
+  fs.rmSync(webglOut, {force: true})
+  const createdAt = nowIso()
+  const results = []
+  for (const seriesCount of seriesList) {
+    const reader = makeSyntheticReader(opts.seed)
+    const ring = fillSyntheticRing(core, points, seriesCount, reader)
+    const specs = ring.ids.map((id, index) => ({id, color: BENCH_COLORS[index % BENCH_COLORS.length], startSeq: 0}))
+    const canvas = measureCanvasModel(core, ring.store, specs, frames)
+    const model = measureWebglModel(core, webgl, ring.store, specs, frames, reader, ring.ids, ring.values)
+    const savingsMs = round(canvas.totalMs - model.cpuMs, 3)
+    const savingsPct = round(canvas.totalMs > 0 ? (savingsMs / canvas.totalMs) * 100 : 0, 1)
+    results.push({series: seriesCount, points, fillMs: round(ring.fillMs, 1), canvas, webgl: model, savingsMs, savingsPct})
+    perfLog(`  ${seriesCount} series: 2D CPU ${canvas.totalMs.toFixed(2)} ms/draw `
+      + `(range ${canvas.rangeMs.toFixed(2)} + envelope ${canvas.envelopeMs.toFixed(2)}) → `
+      + `WebGL CPU ${model.cpuMs.toFixed(2)} ms/draw (range ${model.rangeMs.toFixed(2)}, `
+      + `delta ${model.uploadBytesPerFrame} B/frame)；首次全量上传 ${(model.firstFullUploadBytes / 1048576).toFixed(2)} MB`)
+  }
+  const result = {
+    schemaVersion: 2,
+    mode: 'node',
+    scriptVersion: SCRIPT_VERSION,
+    createdAt,
+    finishedAt: nowIso(),
+    env: {
+      platform: `${os.platform()} ${os.release()} ${os.arch()}`,
+      cpuModel: os.cpus()[0]?.model || 'unknown',
+      cpuCount: os.cpus().length,
+      totalMemMb: Math.round(os.totalmem() / 1048576),
+      node: process.version,
+      hostname: os.hostname(),
+    },
+    config: {series: seriesList, points, frames, seed: opts.seed},
+    results,
+    verdict: {
+      nodeCpuBenefit: results.every((row) => row.savingsMs > 0),
+      gpuRasterMeasured: false,
+      defaultFeatureFlag: 'off',
+      note: 'Node 模式只测 Worker CPU 段；GPU 光栅/合成与端到端 FPS 需 --mode headless 或真机 device 模式。'
+        + ' 在拿到真机 GPU 数据前 WebGL feature flag 保持默认关闭（opt-in: ?chartWebgl=1 / localStorage）。',
+    },
+  }
+  const markdown = buildSyntheticMarkdown(result)
+  perfLog('\n=== 摘要（CPU-only）===')
+  for (const row of results) {
+    perfLog(`  ${row.series} series: 2D ${row.canvas.totalMs} ms → WebGL CPU ${row.webgl.cpuMs} ms `
+      + `(${row.savingsPct}% lower CPU; GPU raster NOT measured)`)
+  }
+  writeBenchmarkOutputs(opts, result, markdown)
+  return 0
+}
+
+async function runHeadlessBenchmark(opts) {
+  perfLog(`DebugCurve 性能基准 v${SCRIPT_VERSION} — mode=headless（合成数据，不需要设备）`)
+  const seriesList = parseSeriesList(opts.series)
+  const points = Math.max(100, Math.floor(opts.points))
+  const frames = Math.max(3, Math.floor(opts.frames))
+  const workerOut = await bundleEntry(path.join(WEB_ROOT, 'src/utils/curveChartWorker.ts'), 'iife', 'browser')
+  const workerSource = fs.readFileSync(workerOut, 'utf8')
+  fs.rmSync(workerOut, {force: true})
+  const {module: playwright, resolvedFrom} = await resolvePlaywright(opts.playwright)
+  perfLog(`Playwright 来自 ${resolvedFrom}`)
+  const browser = await playwright.chromium.launch({
+    headless: !opts.headed,
+    args: [
+      '--enable-precise-memory-info',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--force-device-scale-factor=1',
+      '--disable-features=CalculateNativeWinOcclusion',
+      // 无 GPU 的 CI/VM：允许 Chromium 用 SwiftShader 软件 WebGL（结果按软件光栅解读）。
+      '--enable-unsafe-swiftshader',
+    ],
+  })
+  const browserVersion = browser.version()
+  const page = await browser.newPage({viewport: {width: 1600, height: 1000}})
+  const pageErrors = []
+  page.on('pageerror', (error) => pageErrors.push(String(error).slice(0, 400)))
+  page.on('console', (message) => {
+    if (message.type() === 'error') pageErrors.push(`console: ${message.text().slice(0, 300)}`)
+  })
+  try {
+    await page.setContent('<!doctype html><html><body><canvas id="probe" width="1" height="1"></canvas></body></html>')
+    const glEnv = await page.evaluate(() => {
+      const probe = document.getElementById('probe')
+      let kind = null
+      let gl = null
+      try {
+        gl = probe.getContext('webgl2')
+        if (gl) kind = 'webgl2'
+      } catch { /* ignore */ }
+      if (!gl) {
+        try {
+          gl = probe.getContext('webgl')
+          if (gl) kind = 'webgl1'
+        } catch { /* ignore */ }
+      }
+      let renderer = null
+      let vendor = null
+      if (gl) {
+        const info = gl.getExtension('WEBGL_debug_renderer_info')
+        renderer = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
+        vendor = info ? gl.getParameter(info.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR)
+      }
+      return {kind, renderer: renderer ? String(renderer) : null, vendor: vendor ? String(vendor) : null, ua: navigator.userAgent}
+    })
+    perfLog(`浏览器 WebGL: ${glEnv.kind ?? 'unavailable'} · ${glEnv.renderer ?? 'n/a'}`)
+    if (!glEnv.kind) perfLog('警告: 当前 Chromium 无 WebGL（SwiftShader 也失败）→ WebGL 路径将回退 2D，仅能测得回退行为。')
+    const results = await page.evaluate(async (input) => {
+      const {workerSource: source, seriesList: list, points: pointCount, frames: frameCount, colors, wantScreenshots} = input
+      const width = 1200
+      const height = 500
+      const summarize = (values) => {
+        const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b)
+        const pick = (ratio) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * ratio)))]
+        const mean = sorted.reduce((sum, value) => sum + value, 0) / Math.max(1, sorted.length)
+        const round3 = (value) => (Number.isFinite(value) ? Number(value.toFixed(3)) : null)
+        return {count: sorted.length, meanMs: round3(mean), medianMs: round3(pick(0.5)), p90Ms: round3(pick(0.9)), maxMs: round3(sorted[sorted.length - 1])}
+      }
+      const createHarness = (webglMode) => {
+        const worker = new Worker(URL.createObjectURL(new Blob([source], {type: 'text/javascript'})))
+        const pending = new Map()
+        const errors = []
+        let nextId = 0
+        worker.onmessage = (event) => {
+          const message = event.data
+          if (message.type === 'error') {
+            const callback = pending.get(message.requestId)
+            if (callback) {
+              pending.delete(message.requestId)
+              callback.reject(new Error(message.error))
+            } else errors.push(String(message.error))
+            return
+          }
+          if (message.type !== 'bitmap') return
+          const callback = pending.get(message.requestId)
+          if (!callback) { message.bitmap?.close?.(); return }
+          pending.delete(message.requestId)
+          callback.resolve(message)
+        }
+        worker.onerror = (event) => errors.push(String(event.message || 'worker error'))
+        worker.postMessage({type: 'reset', maxPoints: pointCount, webgl: webglMode === 'webgl' ? 'force' : 'off'})
+        return {
+          errors,
+          push(time, ids, values) { worker.postMessage({type: 'samples', time, ids, values}) },
+          draw(scene) {
+            return new Promise((resolve, reject) => {
+              const id = ++nextId
+              pending.set(id, {resolve, reject})
+              worker.postMessage({...scene, requestId: id})
+            })
+          },
+          terminate() { worker.terminate() },
+        }
+      }
+      const results = []
+      for (const seriesCount of list) {
+        for (const mode of ['canvas', 'webgl']) {
+          const harness = createHarness(mode)
+          const ids = Array.from({length: seriesCount}, (_, index) => index + 1)
+          const values = new Float64Array(seriesCount)
+          const series = ids.map((id, index) => ({id, color: colors[index % colors.length], startSeq: 0}))
+          const sceneFor = (lastTime) => ({
+            type: 'draw',
+            width,
+            height,
+            dpr: 1,
+            padding: {left: 58, right: 14, top: 12, bottom: 26},
+            xMin: Math.max(0, lastTime - 20),
+            xMax: lastTime,
+            yMode: 'auto',
+            smoothingWindow: 1,
+            palette: {bg: '#ffffff', grid: '#eeeeee', text: '#333333', axis: '#cccccc'},
+            series,
+          })
+          let state = 0x2545f491
+          const fill = (frame) => {
+            for (let index = 0; index < seriesCount; index++) {
+              state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+              values[index] = Math.sin((frame + index * 7) * 0.01) * 100 + (state / 0x100000000) * 5
+            }
+          }
+          try {
+            for (let sample = 0; sample < pointCount; sample++) {
+              fill(sample)
+              harness.push(sample / 50, ids, values)
+            }
+            const firstMessage = await harness.draw(sceneFor((pointCount - 1) / 50))
+            const renderer = firstMessage.renderer ?? firstMessage.stats?.renderer ?? null
+            const fallback = firstMessage.webglFallback ?? null
+            firstMessage.bitmap?.close?.()
+            const roundtrips = []
+            const workerDraws = []
+            const uploads = []
+            const drawCalls = []
+            const columns = []
+            const segments = []
+            const vertices = []
+            let pixelDiff = null
+            let screenshotDataUrl = null
+            let lastRenderer = renderer
+            let lastFallback = fallback
+            for (let frame = 0; frame < frameCount; frame++) {
+              for (let extra = 0; extra < 2; extra++) {
+                const sample = pointCount + frame * 2 + extra
+                fill(sample)
+                harness.push(sample / 50, ids, values)
+              }
+              const started = performance.now()
+              const message = await harness.draw(sceneFor((pointCount - 1 + frame * 2 + 2) / 50))
+              roundtrips.push(performance.now() - started)
+              workerDraws.push(message.drawMs ?? 0)
+              uploads.push(message.stats?.uploadBytes ?? 0)
+              drawCalls.push(message.stats?.drawCalls ?? 0)
+              columns.push(message.stats?.columnsDrawn ?? 0)
+              segments.push(message.stats?.segments ?? 0)
+              vertices.push(message.stats?.vertices ?? 0)
+              lastRenderer = message.renderer ?? lastRenderer
+              lastFallback = message.webglFallback ?? lastFallback
+              if (frame === frameCount - 1 && message.bitmap) {
+                const composite = document.createElement('canvas')
+                composite.width = width
+                composite.height = height
+                const context = composite.getContext('2d', {willReadFrequently: true})
+                context.drawImage(message.bitmap, 0, 0, width, height)
+                const pixels = context.getImageData(0, 0, width, height).data
+                let diff = 0
+                for (let offset = 0; offset < pixels.length; offset += 4) {
+                  if (pixels[offset] < 250 || pixels[offset + 1] < 250 || pixels[offset + 2] < 250) diff += 1
+                }
+                pixelDiff = diff
+                if (wantScreenshots) screenshotDataUrl = composite.toDataURL('image/png')
+              }
+              message.bitmap?.close?.()
+            }
+            const mean = (items) => (items.length ? Math.round(items.reduce((sum, value) => sum + value, 0) / items.length) : 0)
+            results.push({
+              series: seriesCount,
+              mode,
+              renderer: lastRenderer,
+              fallback: lastFallback,
+              roundtripMs: summarize(roundtrips),
+              workerDrawMs: summarize(workerDraws),
+              uploadBytesPerFrame: mean(uploads),
+              drawCallsPerFrame: mean(drawCalls),
+              stats: {
+                columnsDrawnPerFrame: mean(columns),
+                segmentsPerFrame: mean(segments),
+                verticesPerFrame: mean(vertices),
+              },
+              pixelDiff,
+              screenshotDataUrl,
+              errors: harness.errors.slice(0, 5),
+            })
+          } catch (error) {
+            results.push({
+              series: seriesCount,
+              mode,
+              renderer: null,
+              fallback: String(error && error.message ? error.message : error),
+              roundtripMs: {count: 0, meanMs: null, medianMs: null, p90Ms: null, maxMs: null},
+              workerDrawMs: {count: 0, meanMs: null, medianMs: null, p90Ms: null, maxMs: null},
+              uploadBytesPerFrame: 0,
+              drawCallsPerFrame: 0,
+              stats: {columnsDrawnPerFrame: 0, segmentsPerFrame: 0, verticesPerFrame: 0},
+              pixelDiff: null,
+              screenshotDataUrl: null,
+              errors: harness.errors.slice(0, 5),
+            })
+          } finally {
+            harness.terminate()
+          }
+        }
+      }
+      return results
+    }, {workerSource, seriesList, points, frames, colors: BENCH_COLORS, wantScreenshots: Boolean(opts.screenshot)})
+    const createdAt = nowIso()
+    const webglRows = results.filter((row) => row.mode === 'webgl')
+    const webglUsed = webglRows.length > 0 && webglRows.every((row) => typeof row.renderer === 'string' && row.renderer.startsWith('webgl'))
+    // 截图落盘（可选）：可视化核对 2D 包络 vs WebGL 折线，不作为通过/失败判据。
+    const screenshotPaths = []
+    if (opts.screenshot) {
+      const dir = path.resolve(opts.screenshot)
+      fs.mkdirSync(dir, {recursive: true})
+      for (const row of results) {
+        const dataUrl = row.screenshotDataUrl
+        delete row.screenshotDataUrl
+        if (!dataUrl) continue
+        const file = path.join(dir, `curve-${row.mode}-${row.series}.png`)
+        fs.writeFileSync(file, Buffer.from(String(dataUrl).split(',')[1] || '', 'base64'))
+        screenshotPaths.push(file)
+      }
+      if (screenshotPaths.length) perfLog(`截图已写入: ${screenshotPaths.join(', ')}`)
+    }
+    const comparisons = seriesList.map((series) => {
+      const canvasRow = results.find((row) => row.series === series && row.mode === 'canvas')
+      const webglRow = results.find((row) => row.series === series && row.mode === 'webgl')
+      const canvasMedian = canvasRow?.roundtripMs?.medianMs
+      const webglMedian = webglRow?.roundtripMs?.medianMs
+      return {
+        series,
+        canvasMedianMs: canvasMedian ?? null,
+        webglMedianMs: webglMedian ?? null,
+        speedup: Number.isFinite(canvasMedian) && Number.isFinite(webglMedian) && webglMedian > 0
+          ? round(canvasMedian / webglMedian, 2)
+          : null,
+      }
+    })
+    const result = {
+      schemaVersion: 2,
+      mode: 'headless',
+      scriptVersion: SCRIPT_VERSION,
+      createdAt,
+      finishedAt: nowIso(),
+      env: {
+        platform: `${os.platform()} ${os.release()} ${os.arch()}`,
+        cpuModel: os.cpus()[0]?.model || 'unknown',
+        cpuCount: os.cpus().length,
+        totalMemMb: Math.round(os.totalmem() / 1048576),
+        node: process.version,
+        hostname: os.hostname(),
+        browser: `chromium ${browserVersion} (playwright)`,
+        playwrightSource: resolvedFrom,
+        headless: !opts.headed,
+        gl: glEnv,
+      },
+      config: {series: seriesList, points, frames},
+      results,
+      pageErrors,
+      screenshots: screenshotPaths,
+      verdict: {
+        webglUsed,
+        comparisons,
+        gpuAccelerated: glEnv.renderer ? !/swiftshader|software|llvmpipe/i.test(glEnv.renderer) : false,
+        defaultFeatureFlag: 'off',
+        recommendation: 'keep-off-until-real-device-benchmark',
+        note: webglUsed
+          ? 'headless 环境已实际走 WebGL 路径；无 GPU 时 Chromium 使用 SwiftShader 软件 GL，数值偏悲观，真机需 device 模式复测。'
+          : 'headless 环境未能启用 WebGL（回退 2D）；只能验证回退行为，不能评价 WebGL 收益。',
+      },
+    }
+    const markdown = buildSyntheticMarkdown(result)
+    perfLog('\n=== 摘要（headless 合成数据）===')
+    for (const row of results) {
+      perfLog(`  ${row.series} series ${row.mode}: renderer=${row.renderer ?? 'n/a'} `
+        + `median roundtrip ${row.roundtripMs.medianMs ?? 'n/a'} ms · worker draw ${row.workerDrawMs.medianMs ?? 'n/a'} ms · `
+        + `upload ${row.uploadBytesPerFrame} B/frame · curvePixels ${row.pixelDiff ?? 'n/a'}`)
+    }
+    for (const row of comparisons) {
+      perfLog(`  对比 ${row.series} series: 2D 中位 ${row.canvasMedianMs ?? 'n/a'} ms → WebGL 中位 ${row.webglMedianMs ?? 'n/a'} ms`
+        + `（${row.speedup ?? 'n/a'}×）；视觉非等价，见 markdown 说明`)
+    }
+    if (!webglUsed) perfLog('警告: WebGL 未被实际启用（见上）；feature flag 仍默认关闭。')
+    if (pageErrors.length) perfLog(`page errors: ${pageErrors.slice(0, 3).join(' | ')}`)
+    writeBenchmarkOutputs(opts, result, markdown)
+    return 0
+  } finally {
+    await page.close().catch(() => {})
+    await browser.close().catch(() => {})
+  }
+}
+
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
   if (opts.help) {
@@ -1272,6 +1975,9 @@ async function main() {
     perfLog(`已从 ${opts.fromJson} 重新生成 Markdown: ${path.resolve(opts.md)}`)
     return 0
   }
+  // task-67：离线 WebGL 后备基准（不需要设备；device 模式保持原有行为）。
+  if (opts.mode === 'node') return runNodeBenchmark(opts)
+  if (opts.mode === 'headless') return runHeadlessBenchmark(opts)
   if (!fs.existsSync(opts.elf)) throw new Error(`ELF 不存在: ${opts.elf}`)
   const base = deviceBase(opts.url)
   perfLog(`DebugCurve 性能基准 v${SCRIPT_VERSION}`)

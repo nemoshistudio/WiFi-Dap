@@ -16,13 +16,20 @@
  *   ------------------------                    --------
  *   Host/Origin / Content-Type / Content-Length /   wt_ota_upload_begin()
  *   size checks (no flash erase on errors)          (erase target slot)
- *   httpd_req_async_handler_begin()  ------>   then, per chunk received from
- *   recv body chunk by chunk (static                the httpd task:
- *   double buffer, hand-off queue)  ------>    wt_ota_upload_write()
- *   return ESP_OK (body fully consumed)        wt_ota_upload_finish()
- *                                              send HTTP 200 JSON (async req)
+ *   DAP ring buffers released (task-66b)       then, per chunk received from
+ *   httpd_req_async_handler_begin()  ------>   the httpd task:
+ *   recv body chunk by chunk (static                wt_ota_upload_write()
+ *   double buffer, hand-off queue)  ------>    wt_ota_upload_finish()
+ *   return ESP_OK (body fully consumed)        send HTTP 200 JSON (async req)
  *                                              wt_ota_apply_and_reboot(1000)
  *
+ * task-66b: the unified Wi-Fi+USB-NCM image keeps the DAP ring buffers resident
+ * (~41 KiB); with them allocated heap_largest is ~4.6 KiB, below the 5120-byte
+ * OTA task stack, and every upload used to answer 503 "ota service
+ * unavailable".  The handler therefore releases the rings with
+ * dap_handle_release_ringbuffers() before deferring the request; a failed
+ * upload restores them (dap_handle_restore_ringbuffers()), a successful one
+ * reboots the device.
  * Why the body is received in the httpd task (deviation from the literal
  * "recv in the OTA task" wording of docs/ota-local-upload.md §3.2, which the
  * ESP-IDF 5.2 async-request API cannot provide safely): `httpd_req_async_handler
@@ -39,9 +46,12 @@
 #include "web_host_guard.h"
 
 #include "wt_ota.h"
+#include "DAP_handle.h"
 
 #include <esp_http_server.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_system.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -255,6 +265,56 @@ static void ota_free_slot(uint8_t slot)
 	(void) xQueueSend(s_free_queue, &item, 0);
 }
 
+/* ------------------------------------------------------------------------- */
+/* DAP ring-buffer hand-off for the upload (task-66b)                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * Why this exists: the unified Wi-Fi+USB-NCM image keeps the two DAP ring
+ * buffers (request 20,480 B + response 20,672 B) resident for the whole boot
+ * after the task-66 "CMD_INFO" fix.  With them allocated the device reports
+ * heap_free≈17.8 KiB / heap_largest≈4.6 KiB, and this handler's
+ * xTaskCreate(.., OTA_UPLOAD_TASK_STACK=5120, ..) cannot allocate its stack:
+ * every upload answered 503 "ota service unavailable" (found on real hardware
+ * 2026-10-25 after OTA of the task-66 candidate).
+ *
+ * The upload is a front-end to a reboot, so the DAP data path may be dropped:
+ * release the ~41 KiB before deferring the request / creating the OTA task and
+ * restore the rings only if the upload fails without rebooting (a successful
+ * upload reboots, and the next boot re-creates them in DAP_Thread).
+ * GET /api/target/status exposes the transient state as dap_ring_active=false.
+ */
+#define OTA_DAP_RELEASE_TIMEOUT_MS 500
+#define OTA_DAP_RESTORE_TIMEOUT_MS 1500
+
+static void ota_dap_release_rings(void)
+{
+	esp_err_t err = dap_handle_release_ringbuffers(OTA_DAP_RELEASE_TIMEOUT_MS);
+	if (err == ESP_OK) {
+		ESP_LOGI(TAG, "DAP ring buffers released for OTA upload "
+		         "(heap_free=%u largest=%u B)",
+		         (unsigned) esp_get_free_heap_size(),
+		         (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+		                                                     MALLOC_CAP_INTERNAL));
+	} else {
+		/* Best effort: continue and let the normal OTA path report its own
+		 * failure (with the old behaviour the upload answered 503 here). */
+		ESP_LOGW(TAG, "DAP ring buffer release failed: %s (continuing)",
+		         esp_err_to_name(err));
+	}
+}
+
+static void ota_dap_restore_rings(void)
+{
+	esp_err_t err = dap_handle_restore_ringbuffers(OTA_DAP_RESTORE_TIMEOUT_MS);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "DAP ring buffer restore failed: %s "
+		         "(USBIP DAP path unavailable until reboot)",
+		         esp_err_to_name(err));
+	} else {
+		ESP_LOGI(TAG, "DAP ring buffers restored after aborted OTA upload");
+	}
+}
+
 /**
  * @brief Complete the async request and optionally close the TCP session.
  *
@@ -353,11 +413,19 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 		snprintf(s_ctx.sha256, sizeof(s_ctx.sha256), "%s", sha256_header);
 	}
 
+	/* task-66b: give the ~41 KiB of the DAP ring buffers back BEFORE the async
+	 * request copy and the 5120-byte OTA task stack are allocated (with the
+	 * rings resident heap_largest is ~4.6 KiB -> xTaskCreate failed -> every
+	 * upload answered 503 "ota service unavailable").  A failed upload restores
+	 * them in ota_upload_task(); a successful one reboots the device. */
+	ota_dap_release_rings();
+
 	/* Deferred response: the OTA task sends the final JSON and completes the
 	 * async request (or the handler does it when the body transfer aborts). */
 	esp_err_t err = httpd_req_async_handler_begin(req, &s_ctx.async_req);
 	if (err != ESP_OK) {
 		s_upload_active = false;
+		ota_dap_restore_rings();
 		ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
 		return ESP_OK;
 	}
@@ -367,6 +435,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 		httpd_req_async_handler_complete(s_ctx.async_req);
 		s_ctx.async_req = NULL;
 		s_upload_active = false;
+		ota_dap_restore_rings();
 		ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
 		return ESP_OK;
 	}
@@ -476,6 +545,7 @@ static void ota_upload_task(void *arg)
 		} else if (err == ESP_OK) {
 			(void) wt_ota_upload_fail("internal error");
 		}
+		ota_dap_restore_rings(); /* no reboot: USBIP DAP path comes back */
 		s_upload_active = false;
 		vTaskDelete(NULL);
 		return;
@@ -496,6 +566,9 @@ static void ota_upload_task(void *arg)
 		ota_respond_error(async_req, wt_ota_err_to_http_status(err),
 		                  wt_ota_err_to_json_code(err), wt_ota_err_to_str(err));
 		ota_complete_request(async_req, true);
+		/* task-66b: the upload failed without a reboot, so the DAP data path
+		 * must come back (the rings were released before this task started). */
+		ota_dap_restore_rings();
 		s_upload_active = false;
 		vTaskDelete(NULL);
 		return;
@@ -509,6 +582,8 @@ static void ota_upload_task(void *arg)
 	esp_err_t apply_err = wt_ota_apply_and_reboot(OTA_REBOOT_DELAY_MS);
 	if (apply_err != ESP_OK) {
 		ESP_LOGE(TAG, "ota apply failed: %s", esp_err_to_name(apply_err));
+		/* No reboot scheduled: bring the released DAP ring buffers back. */
+		ota_dap_restore_rings();
 	}
 
 	/* Worker task must not return (FreeRTOS abort); success reboots via timer. */

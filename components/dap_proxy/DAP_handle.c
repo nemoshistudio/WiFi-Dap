@@ -17,6 +17,11 @@
  *    keeps the Wi-Fi/mDNS/web stack, so the 10-slot layout is used.
  *  - Ring buffer lifecycle is owned by this task only (see DAP_handle.h).
  *    The TCP/WebSocket tasks post reset requests; they never free the buffers.
+ *    The buffers are created once when the task starts and are only drained
+ *    afterwards: the Wi-Fi+NCM heap cannot reliably provide the 20,672-byte
+ *    contiguous response ring again (task-66 "CMD_INFO failed" root cause).
+ *  - DELETE_HANDLE detaches the USBIP data path (drain + gate) while another
+ *    transport runs DAP_ExecuteCommand() inline; RESET_HANDLE restores it.
  *  - Host-side response clipping keeps an over-long DAP response (P0 in
  *    analysis/REPORT.md) from being pushed to the USBIP/WS transports.
  *  - The A-tree 8266 target is not supported by this project; no 8266 branch.
@@ -185,9 +190,42 @@ static uint32_t swo_data_num;
 static RingbufHandle_t dap_dataIN_handle = NULL;
 static RingbufHandle_t dap_dataOUT_handle = NULL;
 static SemaphoreHandle_t data_response_mux = NULL;
-/* Signalled by the DAP task after a requested ring buffer (re)configuration has
- * been applied; see dap_handle_wait_reset(). */
+/* Signalled by the DAP task after a requested reset/hand-off has been applied;
+ * see dap_handle_wait_reset(). */
 static SemaphoreHandle_t dap_reset_done = NULL;
+
+/* "Detached" data path (task-66).
+ *
+ * A DELETE_HANDLE request means another transport (WebSocket-DAP, elaphureLink,
+ * target-flash probe/flash or curve_sampler) takes exclusive ownership of the
+ * CMSIS-DAP engine and runs DAP_ExecuteCommand() inline.  While this flag is
+ * set the USBIP request path must not feed the rings (the transport is being
+ * torn down; its request gets the same empty RET_SUBMIT as before) and the DAP
+ * task must not consume ring items, otherwise it would race the inline
+ * executor on the global DAP/SWD state.
+ *
+ * The ring buffers themselves are NOT freed for a DELETE_HANDLE any more
+ * (task-66): freeing them made the following RESET_HANDLE re-create fail on the
+ * Wi-Fi+NCM-fragmented heap (the 20,672-byte response ring does not fit into the
+ * measured 20,480-byte largest contiguous block), leaving the next USBIP session
+ * with no data path and a "CMSIS-DAP command CMD_INFO failed" timeout.  They are
+ * created once when the DAP task starts and only drained from then on.
+ *
+ * RELEASE_HANDLE (task-66b) is the explicit exception used by the OTA upload
+ * path: it frees the rings on purpose (s_rings_released) because the OTA task
+ * stack + upload path need that ~41 KiB; the rings come back on RESTORE_HANDLE
+ * or at the next boot. */
+static volatile bool s_data_path_detached = false;
+
+/* "Released" ring buffers (task-66b).
+ *
+ * Set by RELEASE_HANDLE / dap_handle_release_ringbuffers(): the OTA upload path
+ * needs the ~41 KiB of the two DAP ring buffers back (the Wi-Fi+NCM image has
+ * heap_largest ~4.6 KiB with them allocated, below the 5120-byte OTA task
+ * stack).  While set, RESET_HANDLE (e.g. from a tearing-down USBIP session) does
+ * NOT lazily re-create the rings: the memory must stay available until the OTA
+ * upload either reboots the device or fails and calls RESTORE_HANDLE. */
+static volatile bool s_rings_released = false;
 
 
 /* ------------------------------------------------------------------------- */
@@ -293,13 +331,14 @@ void malloc_dap_ringbuf(void) {
     }
 }
 
-/* Drain one ring without freeing it.  Used by the USBIP session reset below:
- * discarding the payloads is enough to start a new session, and keeping the
- * buffers allocated avoids a 20 KiB xRingbufferCreate() per session.  With
- * TinyUSB installed the heap is fragmented enough that the re-create failed
- * (largest free block 20480 B < ring size 20544 B + overhead); the old failure
- * path deleted the DAP task, so the next USBIP session died with
- * "CMSIS-DAP command CMD_INFO failed" (C1 second-session bug). */
+/* Drain one ring without freeing it.  Used by both reset modes: discarding the
+ * payloads is enough to start a new session / hand the engine over, and keeping
+ * the buffers allocated avoids a 20 KiB xRingbufferCreate() from the
+ * Wi-Fi+NCM-fragmented heap.  The re-create used to fail there (response ring
+ * 20,672 B > largest free block 20,480 B), which left the next USBIP session
+ * without a data path ("CMSIS-DAP command CMD_INFO failed"): C1 second-session
+ * bug (RESET_HANDLE) and task-66 (target/info probe handing the DAP off through
+ * DELETE_HANDLE). */
 static void drain_request_ringbuf(RingbufHandle_t rb)
 {
     if (rb == NULL) {
@@ -332,6 +371,21 @@ static void drain_response_ringbuf(RingbufHandle_t rb)
     }
 }
 
+/* Discard pending payloads without touching the ring allocation; used when the
+ * data path is detached or restored so a previous transport's payloads can
+ * never be paired with a new session's URBs.  The DAP task calls this for both
+ * reset modes; it must not hold data_response_mux. */
+static void dap_reset_pending_frames(void)
+{
+    if (data_response_mux &&
+        xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+        dap_respond = 0;
+        xSemaphoreGive(data_response_mux);
+    }
+    drain_request_ringbuf(dap_dataIN_handle);
+    drain_response_ringbuf(dap_dataOUT_handle);
+}
+
 void free_dap_ringbuf(void) {
     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
         if (dap_dataIN_handle) {
@@ -345,6 +399,27 @@ void free_dap_ringbuf(void) {
         xSemaphoreGive(data_response_mux);
     }
 
+}
+
+/* Lazy-create fallback of the DAP task (only used when the rings were never
+ * created, or after dap_handle_restore_ringbuffers()).  Retry a few times: a
+ * transient allocation failure must not leave the device without a DAP data
+ * path (the old failure path killed the DAP task, C1 second-session bug). */
+static bool dap_create_rings_retry(void)
+{
+    for (int attempt = 0; attempt < 5; attempt++) {
+        malloc_dap_ringbuf();
+        if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+            if (s_rings_released) {
+                printf("DAP: ring buffers re-created after release\r\n");
+            }
+            return true;
+        }
+        free_dap_ringbuf();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    printf("Can not create DAP ringbuf!\r\n");
+    return false;
 }
 
 void dap_handle_request_reset(enum reset_handle_t mode)
@@ -376,6 +451,37 @@ int dap_handle_wait_reset(uint32_t timeout_ms)
     return 0;
 }
 
+esp_err_t dap_handle_release_ringbuffers(uint32_t timeout_ms)
+{
+    dap_handle_request_reset(RELEASE_HANDLE);
+    if (dap_handle_wait_reset(timeout_ms) != 0) {
+        printf("DAP: ring buffer release not applied within %u ms\r\n",
+               (unsigned)timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+esp_err_t dap_handle_restore_ringbuffers(uint32_t timeout_ms)
+{
+    dap_handle_request_reset(RESTORE_HANDLE);
+    if (dap_handle_wait_reset(timeout_ms) != 0) {
+        printf("DAP: ring buffer restore not applied within %u ms\r\n",
+               (unsigned)timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+    if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL) {
+        /* Re-create failed on the fragmented heap (documented best effort). */
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+bool dap_handle_ringbuffers_released(void)
+{
+    return s_rings_released;
+}
+
 void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
 {
     uint8_t *data_in = (uint8_t *)header + sizeof(usbip_stage2_header);
@@ -393,12 +499,17 @@ void handle_dap_data_request(usbip_stage2_header *header, uint32_t length)
         length = DAP_PACKET_SIZE;
     }
 
-    /* The ring buffers can legitimately be absent while a
-     * WebSocket/elaphureLink session owns the DAP data path (DAP_handle.h).
-     * The transport is about to be torn down in that case, so only answer the
-     * zero-length RET_SUBMIT and do not touch the ring buffer. */
+    /* The DAP data path can legitimately be unavailable while a
+     * WebSocket/elaphureLink/target-flash/curve transport owns the DAP engine
+     * after DELETE_HANDLE (DAP_handle.h).  The USBIP transport is about to be
+     * torn down in that case, so only answer the zero-length RET_SUBMIT and do
+     * not touch the ring buffer. */
     send_stage2_submit_data_fast(header, NULL, 0);
 
+    if (s_data_path_detached) {
+        printf("DAP: data path detached for hand-off, request dropped\r\n");
+        return;
+    }
     if (dap_dataIN_handle == NULL) {
         printf("DAP: data IN ring buffer not available, request dropped\r\n");
         return;
@@ -594,48 +705,81 @@ void DAP_Thread(void *argument)
         {
             if (kRestartDAPHandle != NO_SIGNAL)
             {
-                /* The DAP task owns the ring buffer lifecycle: free/recreate
+                /* The DAP task owns the ring buffer lifecycle: drain/recreate
                  * only here, never in the TCP/WebSocket tasks. */
                 enum reset_handle_t mode = (enum reset_handle_t)kRestartDAPHandle;
 
                 if (mode == RESET_HANDLE)
                 {
-                    /* A USBIP/OpenOCD session end only needs the payloads
-                     * discarded, not a free + re-create of the two ~20 KiB ring
-                     * buffers (C1: the re-create failed on a fragmented heap,
-                     * the old failure path killed this task and the next USBIP
-                     * session then timed out on CMD_INFO).  Keep the buffers
-                     * across sessions and drain them.  They are still freed for
-                     * DELETE_HANDLE (WebSocket / elaphureLink / target-flash
-                     * hand-off) and only created here when absent. */
+                    /* Restore the USBIP/WebSocket data path (session end or
+                     * end of a DELETE_HANDLE hand-off).  The rings are created
+                     * once when this task starts and are only drained here: a
+                     * free + re-create would need a 20,672-byte contiguous
+                     * block after Wi-Fi+NCM fragmented the heap (measured
+                     * largest free block 20,480 B), which failed and left the
+                     * next USBIP session without a data path (C1/task-66
+                     * "CMSIS-DAP command CMD_INFO failed").  Re-create only
+                     * when the rings were never created (very early reset or a
+                     * boot-time allocation failure) and were not explicitly
+                     * released for OTA (task-66b: the memory must stay free
+                     * until the OTA upload reboots or restores). */
                     if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
-                        if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
-                            dap_respond = 0;
-                            xSemaphoreGive(data_response_mux);
-                        }
-                        drain_request_ringbuf(dap_dataIN_handle);
-                        drain_response_ringbuf(dap_dataOUT_handle);
-                    } else {
-                        /* Re-create after a previous DELETE_HANDLE.  Retry a
-                         * few times: a transient allocation failure must not
-                         * kill the DAP task (it would take USBIP down for the
-                         * rest of the boot). */
-                        for (int attempt = 0; attempt < 5; attempt++) {
-                            malloc_dap_ringbuf();
-                            if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
-                                break;
-                            }
-                            free_dap_ringbuf();
-                            vTaskDelay(pdMS_TO_TICKS(20));
-                        }
-                        if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL) {
-                            printf("Can not re-create DAP ringbuf!\r\n");
-                        }
+                        dap_reset_pending_frames();
+                    } else if (!s_rings_released) {
+                        (void)dap_create_rings_retry();
                     }
+                    s_data_path_detached = false;
+                }
+                else if (mode == RELEASE_HANDLE)
+                {
+                    /* OTA memory-pressure hand-off (task-66b): block the USBIP
+                     * request path, drop pending payloads and FREE both ring
+                     * buffers so POST /api/ota/upload can allocate its 5120-byte
+                     * task stack (with the rings resident heap_largest was
+                     * ~4.6 KiB -> 503 "ota service unavailable").  RESET_HANDLE
+                     * does not re-create them until RESTORE_HANDLE/reboot. */
+                    s_data_path_detached = true;
+                    s_rings_released = true;
+                    if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+                        dap_reset_pending_frames();
+                        free_dap_ringbuf();
+                    }
+                    printf("DAP: ring buffers released for OTA/memory pressure "
+                           "(request %u B + response %u B freed)\r\n",
+                           (unsigned)DAP_REQUEST_RING_SIZE,
+                           (unsigned)DAP_RESPONSE_RING_SIZE);
+                }
+                else if (mode == RESTORE_HANDLE)
+                {
+                    /* OTA aborted/failed without a reboot: get the DAP data
+                     * path back (best effort; the re-create can fail on the
+                     * fragmented heap exactly like the old RESET_HANDLE path). */
+                    s_rings_released = false;
+                    if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+                        dap_reset_pending_frames();
+                    } else {
+                        (void)dap_create_rings_retry();
+                    }
+                    s_data_path_detached = false;
                 }
                 else /* DELETE_HANDLE */
                 {
-                    free_dap_ringbuf();
+                    /* Detach the DAP data path for a transport that runs
+                     * DAP_ExecuteCommand() inline (WebSocket-DAP, elaphureLink,
+                     * target-flash probe/flash, curve_sampler).  Set the flag
+                     * BEFORE draining so neither the TCP request path nor this
+                     * task can touch the rings afterwards.  The buffers stay
+                     * allocated for the whole boot; freeing them here was the
+                     * task-66 bug because the following RESET_HANDLE re-create
+                     * did not fit into the fragmented heap. */
+                    s_data_path_detached = true;
+                    if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+                        dap_reset_pending_frames();
+                    }
+                    printf("DAP: data path detached (rings kept: request %u B, "
+                           "response %u B)\r\n",
+                           (unsigned)DAP_REQUEST_RING_SIZE,
+                           (unsigned)DAP_RESPONSE_RING_SIZE);
                 }
 
                 kRestartDAPHandle = NO_SIGNAL;
@@ -649,6 +793,13 @@ void DAP_Thread(void *argument)
 
             if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL) {
                 continue; // may be use elaphureLink, wait...
+            }
+            /* Never consume ring items while another transport owns the DAP
+             * engine inline (DELETE_HANDLE): a racing request that reached the
+             * ring after the drain must not execute next to DAP_ExecuteCommand()
+             * in the WebSocket/elaphureLink/target-flash/curve caller. */
+            if (s_data_path_detached) {
+                continue;
             }
 
 
@@ -714,10 +865,11 @@ int fast_reply(uint8_t *buf, uint32_t length, int dap_req_num)
         void *item;
         size_t reply_len = 0;
 
-        /* No ring buffer means the DAP data path is currently owned by a
-         * WebSocket/elaphureLink session (see DAP_handle.h).  Answer with an
-         * empty RET_SUBMIT so the host URB is not left hanging forever. */
-        if (dap_dataOUT_handle == NULL) {
+        /* The data path is not available while a WebSocket/elaphureLink/
+         * target-flash/curve transport owns the DAP engine (DELETE_HANDLE) or
+         * when the rings have never been created.  Answer with an empty
+         * RET_SUBMIT so the host URB is not left hanging forever. */
+        if (dap_dataOUT_handle == NULL || s_data_path_detached) {
             printf("fast_reply: DAP OUT ring buffer not available\r\n");
             buf_header->base.command = PP_HTONL(USBIP_STAGE2_RSP_SUBMIT);
             buf_header->base.direction = PP_HTONL(USBIP_DIR_OUT);
@@ -776,7 +928,7 @@ void handle_dap_unlink()
     // which will lead to panic. This code is a compromise for eliminating the lagging response
     // caused by UNLINK. It will clean up the buffers that may have data for return to the host.
     // In general, we assume that there is at most one piece of data that has not yet been returned.
-    if (dap_respond > 0 && dap_dataOUT_handle != NULL)
+    if (dap_respond > 0 && dap_dataOUT_handle != NULL && !s_data_path_detached)
     {
         void *item;
         size_t item_size = 0;

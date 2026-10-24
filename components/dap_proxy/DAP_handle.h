@@ -13,21 +13,56 @@ enum reset_handle_t
     NO_SIGNAL = 0,
     RESET_HANDLE = 1,
     DELETE_HANDLE = 2,
+    /* OTA memory-pressure hand-off (task-66b): detach the USBIP data path, drop
+     * the pending payloads and FREE both ring buffers so a memory-heavy
+     * operation (POST /api/ota/upload needs a 5120-byte task stack and the
+     * 1.68 MB streaming path) has the ~41 KiB back.  No re-create happens on
+     * later RESET_HANDLE requests until RESTORE_HANDLE (or a reboot). */
+    RELEASE_HANDLE = 3,
+    /* Re-create the ring buffers after RELEASE_HANDLE (OTA upload aborted /
+     * failed without a reboot) and restore the USBIP data path. */
+    RESTORE_HANDLE = 4,
 };
 
 /*
- * Ring buffer ownership (WP-112)
- * ------------------------------
+ * DAP data path ownership (WP-112, extended by task-66)
+ * -----------------------------------------------------
  * The DAP task (DAP_Thread) is the single owner of the DAP ring buffers:
  * free_dap_ringbuf()/malloc_dap_ringbuf() are only executed from it.
  * Other tasks post a request through dap_handle_request_reset() instead of
  * touching the ring buffers:
  *
- *   RESET_HANDLE  - free and recreate both ring buffers (USBIP session end or
- *                   transition back from a WebSocket/elaphureLink session).
- *   DELETE_HANDLE - free only; the caller (WebSocket/elaphureLink) runs DAP
- *                   commands inline in the TCP task and must not race with the
- *                   USBIP data path.
+ *   RESET_HANDLE  - restore the USBIP data path (USBIP session end or end of a
+ *                   hand-off): drain both rings and clear the "detached" gate.
+ *                   The rings are created once when the DAP task starts; they
+ *                   are only re-created here when they were never created (very
+ *                   early request / boot-time allocation failure) and when the
+ *                   rings were not explicitly released (RELEASE_HANDLE).
+ *   DELETE_HANDLE - detach the USBIP data path for a transport that runs
+ *                   DAP_ExecuteCommand() inline in its own task (WebSocket-DAP,
+ *                   elaphureLink, target-flash probe/flash, curve_sampler):
+ *                   drain both rings, keep them allocated and gate the USBIP
+ *                   request path until the matching RESET_HANDLE.
+ *   RELEASE_HANDLE - explicitly free both ring buffers for a memory-heavy
+ *                   operation (see dap_handle_release_ringbuffers()).
+ *   RESTORE_HANDLE - re-create them after RELEASE_HANDLE (see
+ *                   dap_handle_restore_ringbuffers()).
+ *
+ * Note (task-66): DELETE_HANDLE used to FREE the rings and the following
+ * RESET_HANDLE re-created them.  On the Wi-Fi+NCM heap the 20,672-byte response
+ * ring does not fit into the largest contiguous block (~20,480 B), so the
+ * re-create failed and the next USBIP session died with "CMSIS-DAP command
+ * CMD_INFO failed" (e.g. HTTP /api/target/info probe -> host usbip attach).
+ * Keeping the buffers for the whole boot removes that allocation from the
+ * hand-off path.
+ *
+ * Note (task-66b): OTA upload regressed with the rings resident for the whole
+ * boot: the Wi-Fi+NCM image has `heap_largest` ~4.6 KiB with the rings
+ * allocated, which is below the 5120-byte OTA task stack, so POST
+ * /api/ota/upload answered 503 "ota service unavailable".  The OTA handler now
+ * calls dap_handle_release_ringbuffers() before creating its task and
+ * dap_handle_restore_ringbuffers() if the upload fails without a reboot
+ * (successful OTA reboots, which re-creates the rings at DAP task start).
  *
  * A caller that is about to use DAP_ExecuteCommand() itself must wait until the
  * request has been applied with dap_handle_wait_reset() (bounded timeout).
@@ -37,6 +72,37 @@ void dap_handle_request_reset(enum reset_handle_t mode);
 /* Returns 0 when the last posted reset request was applied (or the DAP task has
  * not been started yet), -1 on timeout. */
 int dap_handle_wait_reset(uint32_t timeout_ms);
+
+/**
+ * @brief Free both DAP ring buffers for a memory-heavy operation (OTA upload).
+ *
+ * Posts RELEASE_HANDLE and waits (bounded) for the DAP task to apply it: the
+ * USBIP data path is detached, pending payloads are dropped and both ~20 KiB
+ * ring buffers are freed, which restores the heap headroom the Wi-Fi+NCM image
+ * needs for the 5120-byte OTA task stack.  Further RESET_HANDLE requests do not
+ * re-create the rings until dap_handle_restore_ringbuffers() (a successful OTA
+ * reboots instead, and the next boot creates them in DAP_Thread).
+ *
+ * @return ESP_OK when applied, ESP_ERR_TIMEOUT when the DAP task did not ack in
+ *         time (bounded; caller may continue and report the operation failure).
+ */
+esp_err_t dap_handle_release_ringbuffers(uint32_t timeout_ms);
+
+/**
+ * @brief Re-create the ring buffers and restore the USBIP data path.
+ *
+ * Undoes dap_handle_release_ringbuffers() (best effort: the re-create can still
+ * fail on a fragmented heap, exactly like the old RESET_HANDLE path; the
+ * failure is logged and the DAP data path stays unavailable until reboot).
+ *
+ * @return ESP_OK when applied and the rings exist, ESP_ERR_TIMEOUT when the DAP
+ *         task did not ack, ESP_ERR_NO_MEM when the re-create failed.
+ */
+esp_err_t dap_handle_restore_ringbuffers(uint32_t timeout_ms);
+
+/** True when the ring buffers are currently freed by
+ *  dap_handle_release_ringbuffers() (read-only diagnostics). */
+bool dap_handle_ringbuffers_released(void);
 
 /* A 2025: CMSIS-DAP status LED initialization (board pins from the board
  * component, no-op on boards without status LEDs). */

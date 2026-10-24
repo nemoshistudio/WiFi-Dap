@@ -12,8 +12,9 @@
  *    by the BIRDIEBOT_DAP_WS_ENABLE Kconfig option (default y,
  *    analysis/INTEGRATION-PLAN.md P7.1); elaphureLink and USBIP stay
  *    unconditional.
- *  - Ring buffer lifecycle is owned by the DAP task.  This task only posts
- *    dap_handle_request_reset(RESET_HANDLE); it never frees DAP ring buffers.
+ *  - DAP data path lifecycle is owned by the DAP task (see DAP_handle.h).  This
+ *    task only posts dap_handle_request_reset(RESET_HANDLE); it never allocates
+ *    or frees DAP ring buffers (task-66: the rings live for the whole boot).
  *  - The listen socket is closed on every error path (fd leak, REPORT P3 #11)
  *    and kSock is reset to -1 after closing an accepted connection.
  *
@@ -258,18 +259,18 @@ cleanup:
                 // Restart DAP Handle
                 el_process_buffer_free();
 
-                /* The DAP task frees/recreates the ring buffers itself; this
-                 * task only posts the request (see DAP_handle.h). */
+                /* The DAP task owns the ring buffer lifecycle; this task only
+                 * posts the request (see DAP_handle.h). */
                 dap_handle_request_reset(RESET_HANDLE);
                 /*
                  * C1 hardening: normally the DAP task (prio 16 on the same
                  * core) preempts us inside dap_handle_request_reset()'s
-                 * xTaskNotifyGive(), so the reset -- now a cheap drain instead
-                 * of a 2 x 20 KiB free+re-create -- is applied before we return
-                 * to accept().  If the DAP task is still busy with a long DAP
+                 * xTaskNotifyGive(), so the reset -- a cheap drain, no
+                 * allocation since task-66 -- is applied before we return to
+                 * accept().  If the DAP task is still busy with a long DAP
                  * command, a new USBIP session could otherwise queue commands
-                 * that the pending IN-ring drain then discards, leaving the
-                 * new session's bulk-IN URB unanswered ("CMSIS-DAP command
+                 * that the pending drain then discards, leaving the new
+                 * session's bulk-IN URB unanswered ("CMSIS-DAP command
                  * CMD_INFO failed").  Wait (bounded) for the drain to be
                  * applied; continue regardless on timeout.
                  */

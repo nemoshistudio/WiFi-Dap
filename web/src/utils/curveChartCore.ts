@@ -17,6 +17,63 @@ export const CHART_DEFAULT_MAX_POINTS = 6000
 
 export type ChartYMode = 'auto' | 'normalized' | 'log'
 
+// ---- WebGL 渲染后备（task-67 / P1-15） --------------------------------------
+//
+// WebGL 是**可选**渲染后端：默认关闭，只有用户显式开启（URL/localStorage）才尝试；
+// 打开后也只对“大系列 + A 模式语义”生效（series >= CHART_WEBGL_MIN_SERIES），
+// 小系列仍走现有 Canvas/Worker 路径（小系列下 WebGL 没有收益且增加 context 成本）。
+// 本轮无真机 GPU 可测，默认保持 off；收益/边界见 docs/web-variable-curve.md §24。
+export type ChartWebglMode = 'off' | 'auto' | 'force'
+
+/** auto 模式启用 WebGL 的最小绘制系列数（A 模式大系列）。 */
+export const CHART_WEBGL_MIN_SERIES = 64
+
+/** 平滑窗口 > 1 时无法在 GPU 顶点着色器里等价实现 → 回退 Canvas（明确边界）。 */
+export function decideChartWebgl(
+    mode: ChartWebglMode,
+    seriesCount: number,
+    smoothingWindow: number,
+): {use: boolean; reason: 'off' | 'small-series' | 'smoothing' | null} {
+    if (mode === 'off') return {use: false, reason: 'off'}
+    if (smoothingWindow > 1) return {use: false, reason: 'smoothing'}
+    if (mode === 'force') return {use: true, reason: null}
+    if (seriesCount < CHART_WEBGL_MIN_SERIES) return {use: false, reason: 'small-series'}
+    return {use: true, reason: null}
+}
+
+function parseChartWebglToken(raw: string | null | undefined): ChartWebglMode | null {
+    if (raw === null || raw === undefined) return null
+    const value = raw.trim().toLowerCase()
+    if (value === '' || value === '0' || value === 'off' || value === 'false' || value === 'no') return 'off'
+    if (value === '1' || value === 'on' || value === 'true' || value === 'yes') return 'auto'
+    if (value === 'auto') return 'auto'
+    if (value === 'force' || value === 'webgl' || value === 'on-force') return 'force'
+    return null
+}
+
+/**
+ * 解析 WebGL feature flag（纯函数，Node 可测）：
+ *  1. URL query `?chartWebgl=1|auto|force|0`（会话级覆盖，便于真机 A/B 对比）；
+ *  2. localStorage `birdiebot.chart.webgl`（持久 opt-in）；
+ *  3. 默认 `off`。
+ * 非法值忽略并继续向下回退（不抛错）。
+ */
+export function resolveChartWebglMode(
+    search: string | null | undefined,
+    stored: string | null | undefined,
+): ChartWebglMode {
+    if (search) {
+        try {
+            const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+            const parsed = parseChartWebglToken(params.get('chartWebgl'))
+            if (parsed) return parsed
+        } catch {
+            /* 非法 query 忽略 */
+        }
+    }
+    return parseChartWebglToken(stored) ?? 'off'
+}
+
 /** 一帧采样消息：time=相对秒；ids/values 对应 pushSample 的 series 快照。 */
 export interface ChartSampleMessage {
     type: 'samples'
@@ -25,10 +82,11 @@ export interface ChartSampleMessage {
     values: number[]
 }
 
-/** 清空 ring（clearData/切换会话时）。 */
+/** 清空 ring（clearData/切换会话时）；webgl 为可选渲染后端开关（缺省 off）。 */
 export interface ChartResetMessage {
     type: 'reset'
     maxPoints: number
+    webgl?: ChartWebglMode
 }
 
 export interface ChartDrawSeriesSpec {
@@ -197,12 +255,17 @@ function transformValue(raw: number, yMode: ChartYMode): number | null {
  *  - log：log10(value)，<=0 视为无点；
  *  - normalized：固定 0..100，并返回各 series 原始 min/max 供 transform。
  * 只统计 startOrder 起、slotSeq >= startSeq 的点（等价主线程 ring 语义）。
+ *
+ * scanBudget（可选）：>0 时按步长抽样（最多约 scanBudget 个值，与主线程
+ * Y_SCAN_BUDGET 语义一致；WebGL 路径用它把每帧 CPU 从全量 1.5M 点扫描降到 ~2 万点）。
+ * 缺省/0 = 精确全量扫描（现有 2D Worker 路径行为不变）。
  */
 export function computeChartRange(
     store: ChartRingStore,
     series: readonly ChartDrawSeriesSpec[],
     startOrder: number,
     yMode: ChartYMode,
+    scanBudget?: number,
 ): ChartRangeResult | null {
     const ranges = new Map<number, {min: number; max: number}>()
     let minValue = Number.POSITIVE_INFINITY
@@ -212,6 +275,9 @@ export function computeChartRange(
     const slotSeq = store.slotSeq
     const from = Math.max(0, Math.min(count, Math.floor(startOrder)))
     if (from >= count || series.length === 0) return null
+    const scanStride = scanBudget && scanBudget > 0
+        ? Math.max(1, Math.ceil(((count - from) * series.length) / scanBudget))
+        : 1
     // 热循环：用游标顺序遍历 ring（每点 from*series 次，避免 slotOf 函数调用与取模）。
     let startSlot = store.slotOf(from)
     for (const spec of series) {
@@ -221,7 +287,7 @@ export function computeChartRange(
         if (yMode === 'normalized') {
             let min = Number.POSITIVE_INFINITY
             let max = Number.NEGATIVE_INFINITY
-            for (let order = from; order < count; order++) {
+            for (let order = from; order < count; order += scanStride) {
                 if (slotSeq[cursor] >= startSeq) {
                     const raw = values[cursor]
                     if (Number.isFinite(raw)) {
@@ -229,14 +295,14 @@ export function computeChartRange(
                         if (raw > max) max = raw
                     }
                 }
-                cursor += 1
-                if (cursor === capacity) cursor = 0
+                cursor += scanStride
+                if (cursor >= capacity) cursor %= capacity
             }
             if (!Number.isFinite(min) || !Number.isFinite(max)) continue
             if (max - min < 1e-12) max = min + 1
             ranges.set(spec.id, {min, max})
         } else {
-            for (let order = from; order < count; order++) {
+            for (let order = from; order < count; order += scanStride) {
                 if (slotSeq[cursor] >= startSeq) {
                     const raw = values[cursor]
                     if (Number.isFinite(raw)) {
@@ -247,8 +313,8 @@ export function computeChartRange(
                         }
                     }
                 }
-                cursor += 1
-                if (cursor === capacity) cursor = 0
+                cursor += scanStride
+                if (cursor >= capacity) cursor %= capacity
             }
         }
     }
