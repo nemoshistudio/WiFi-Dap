@@ -20,8 +20,9 @@ when a check fails.
 
 Extended (opt-in, OFF by default) modes under ``--usbip-smoke``,
 ``--reboot-recovery``, ``--flash-image ... --flash-allow``,
-``--ota-image ... --ota-allow`` / ``--ota-interrupt`` and
-``--soak-seconds N`` add host-side USBIP/OpenOCD sessions, a Web Flash write of
+``--ota-image ... --ota-allow`` / ``--ota-interrupt``,
+``--swd-clock-matrix`` and ``--soak-seconds N`` add host-side USBIP/OpenOCD
+sessions, an SWD clock ladder sweep, a Web Flash write of
 an explicitly named test image, OTA upload/interrupt tests and a stability soak.
 Those modes are documented in docs/hil-gate.md ("HIL 扩展模式"); every write
 mode needs a second safety switch plus a concrete image file, and environment
@@ -823,8 +824,15 @@ def phase_target_status_post(gate: Gate, http: HttpTransport,
         gate.metric("heap_delta_bytes", delta)
 
 
-def _cbs1_body(args: argparse.Namespace, count: int) -> bytes:
-    """Build a CBS1 streaming start body (no 16 KiB JSON body on unified builds)."""
+def _cbs1_body(args: argparse.Namespace, count: int,
+               interval_us: Optional[int] = None) -> bytes:
+    """Build a CBS1 streaming start body (no 16 KiB JSON body on unified builds).
+
+    ``interval_us`` overrides ``args.interval_us`` for callers (the soak uses
+    its own interval) without mutating the argparse namespace.
+    """
+    effective_interval = (args.interval_us if interval_us is None
+                          else int(interval_us))
     groups = []
     left = count
     while left > 0:
@@ -833,7 +841,7 @@ def _cbs1_body(args: argparse.Namespace, count: int) -> bytes:
         left -= take
     body = bytearray(b"CBS1")
     body += struct.pack("<BBBB", 1, 0x03, 0, 0)  # version, halt|want_pc, periodic, watch count
-    body += struct.pack("<IIII", args.interval_us, 0, 0, 0)
+    body += struct.pack("<IIII", effective_interval, 0, 0, 0)
     body += struct.pack("<BBBB", 0, 0, 0, 0)
     body += struct.pack("<BBH", 0, len(groups), 0)
     index = 0
@@ -1314,6 +1322,8 @@ def _report(gate: Gate, args: argparse.Namespace, started_at: str,
             "usbip_sessions": getattr(args, "usbip_sessions", 0),
             "openocd_timeout_s": getattr(args, "openocd_timeout", 0.0),
             "soak_seconds": getattr(args, "soak_seconds", 0),
+            "swd_clock_steps": getattr(args, "swd_clock_steps", ""),
+            "swd_clock_expect_ok": getattr(args, "swd_clock_expect_ok", ""),
         },
         "modes": {
             "extended": _extended_enabled(args),
@@ -1322,6 +1332,7 @@ def _report(gate: Gate, args: argparse.Namespace, started_at: str,
             "target_flash_write": bool(getattr(args, "flash_image", None)),
             "ota": bool(getattr(args, "ota_image", None)
                         or getattr(args, "ota_interrupt", False)),
+            "swd_clock_matrix": bool(getattr(args, "swd_clock_matrix", False)),
             "soak": bool(getattr(args, "soak_seconds", 0)),
         },
         "extended": {
@@ -1388,7 +1399,7 @@ def _human_report(report: Dict[str, Any], stream: Any = sys.stdout) -> None:
     extended = report.get("extended") or {}
     if (report.get("modes") or {}).get("extended"):
         for key in ("extended_usbip", "extended_recovery", "extended_flash",
-                    "extended_ota", "extended_soak"):
+                    "extended_ota", "extended_swd_matrix", "extended_soak"):
             section = extended.get(key)
             if not section:
                 continue
@@ -1410,6 +1421,14 @@ def _human_report(report: Dict[str, Any], stream: Any = sys.stdout) -> None:
             if key == "extended_ota" and section.get("upload"):
                 detail += " upload_http=%r" % (
                     section["upload"].get("status"),)
+            if key == "extended_swd_matrix" and section.get("steps"):
+                good = sum(1 for step in section["steps"]
+                           if step.get("ok"))
+                detail += (" steps=%d/%d expected_failures=%r auto=%r"
+                           % (good, len(section["steps"]),
+                              section.get("required_failures"),
+                              (section.get("final_restore") or {}).get(
+                                  "detected")))
             print("extended %-20s %s" % (key.replace("extended_", ""), detail),
                   file=stream)
     for warning in report["warnings"]:
@@ -1569,7 +1588,8 @@ class FakeDevice:
 
     def __init__(self, detected: bool = True, diagnostics: bool = True,
                  frame_format: str = "cvf2-pc", effective_fps: float = 50.0,
-                 port: int = 0) -> None:
+                 port: int = 0,
+                 swd_clock_fail_hz: Optional[Any] = None) -> None:
         self.detected = detected
         self.diagnostics = diagnostics
         self.frame_format = frame_format
@@ -1581,6 +1601,11 @@ class FakeDevice:
         self.heap_free = 120000
         self.heap_largest = 40000
         self.swd_clock_hz = 1000000
+        #: Manual clock steps where the fake target stops answering (the lab H7
+        #: answers up to 1 MHz, so 2/4/10 MHz fail by default).
+        self.swd_clock_fail_hz = (frozenset({2000000, 4000000, 10000000})
+                                  if swd_clock_fail_hz is None
+                                  else frozenset(swd_clock_fail_hz))
 
     # -- helpers -----------------------------------------------------------
     def _json(self, data: Dict[str, Any], status: int = 200) -> Response:
@@ -1684,10 +1709,27 @@ class FakeDevice:
                     or path.startswith(forbidden + "/"):
                 raise AssertionError("gate attempted forbidden write: %s %s"
                                      % (method, path))
+        if path == SWD_CLOCK_PATH and method == "POST":
+            hz = int((body or {}).get("hz", 0) or 0)
+            if hz != 0 and not 100000 <= hz <= 10000000:
+                return self._json({"module": 6, "cmd": 5, "ok": False,
+                                   "hz": hz, "mode": "manual"}, 400)
+            self.swd_clock_hz = 1000000 if hz == 0 else hz
+            return self._json({"module": 6, "cmd": 5, "ok": True, "hz": hz,
+                               "mode": "auto" if hz == 0 else "manual"})
+        if path == SWD_CLOCK_PATH and method == "GET":
+            return self._json({"module": 6, "cmd": 5, "ok": True,
+                               "hz": self.swd_clock_hz,
+                               "mode": "auto" if self.swd_clock_hz == 1000000
+                               else "manual"})
         if path == TARGET_INFO_PATH and method == "GET":
             if not self.detected:
                 return self._json({"module": 6, "cmd": 1, "ok": False,
                                    "err": "target not detected", "code": 5,
+                                   "detected": False})
+            if self.swd_clock_hz in self.swd_clock_fail_hz:
+                return self._json({"module": 6, "cmd": 1, "ok": False,
+                                   "err": "ESP_FAIL", "code": 5,
                                    "detected": False})
             return self._json({
                 "module": 6, "cmd": 1, "ok": True, "detected": True,
@@ -1890,7 +1932,82 @@ def _extended_enabled(args: argparse.Namespace) -> bool:
                 or getattr(args, "flash_image", None)
                 or getattr(args, "ota_image", None)
                 or getattr(args, "ota_interrupt", False)
+                or getattr(args, "swd_clock_matrix", False)
                 or (getattr(args, "soak_seconds", 0) or 0) > 0)
+
+
+#: Default SWD clock ladder for --swd-clock-matrix.  0 = the firmware's auto
+#: probe ladder (2 MHz -> 1 MHz -> 500 kHz); the rest are manual forced clocks.
+DEFAULT_SWD_CLOCK_STEPS = "auto,500k,1M,2M,4M,10M"
+
+
+def parse_swd_clock_steps(text: str) -> List[int]:
+    """Parse a comma/space separated SWD clock ladder into Hz values.
+
+    Accepted forms: ``auto``/``0`` (firmware auto ladder), suffix forms such as
+    ``500k``/``1M``/``1900k`` and plain integer Hz (decimal or ``0x`` hex).
+    Pure function: unit-tested offline, no I/O.
+    """
+    tokens = [token for token in
+              text.replace(",", " ").replace(";", " ").split() if token]
+    steps: List[int] = []
+    for token in tokens:
+        raw = token.strip()
+        lowered = raw.lower()
+        if lowered in ("auto", "default", "0"):
+            hz = 0
+        else:
+            multiplier = 1
+            number = lowered
+            for candidate, factor in (("khz", 1000), ("mhz", 1000000),
+                                      ("hz", 1), ("k", 1000), ("m", 1000000)):
+                if lowered.endswith(candidate) \
+                        and len(lowered) > len(candidate):
+                    number = lowered[: -len(candidate)]
+                    multiplier = factor
+                    break
+            try:
+                if number.startswith("0x"):
+                    hz = int(number, 0)
+                elif multiplier == 1:
+                    hz = int(number, 0)
+                else:
+                    hz = int(float(number) * multiplier)
+            except ValueError:
+                raise ValueError("invalid SWD clock step: %r" % (raw,))
+        if hz != 0 and not (100000 <= hz <= 10000000):
+            raise ValueError(
+                "SWD clock step %r out of range (auto/0 or 100000..10000000 Hz)"
+                % (raw,))
+        steps.append(hz)
+    if not steps:
+        raise ValueError("empty SWD clock step list")
+    if len(steps) > 16:
+        raise ValueError("too many SWD clock steps (%d > 16)" % len(steps))
+    return steps
+
+
+def swd_clock_label(hz: int) -> str:
+    """Stable check-id suffix for one SWD clock step (auto/500k/1m/...)."""
+    if hz == 0:
+        return "auto"
+    if hz % 1000000 == 0:
+        return "%dm" % (hz // 1000000)
+    if hz % 1000 == 0:
+        return "%dk" % (hz // 1000)
+    return "%dhz" % hz
+
+
+def swd_clock_result_ok(step_hz: int, set_http: int, set_ok: bool,
+                        detected: bool) -> bool:
+    """True when one matrix step reached and identified the target.
+
+    A manual step needs the POST to be accepted *and* the follow-up probe to
+    detect the target; the auto step (0) only needs the probe to recover.
+    """
+    if step_hz != 0 and not (set_http == 200 and set_ok):
+        return False
+    return bool(detected)
 
 
 def sha256_file(path: str) -> str:
@@ -2041,6 +2158,27 @@ def _openocd_argv(args: argparse.Namespace) -> List[str]:
     ]
 
 
+def _ensure_openocd_available(args: argparse.Namespace) -> None:
+    if getattr(args, "_offline", False):
+        raise ExtendedUnavailable("offline --dry-run self-test: no host USBIP")
+    if not os.path.isfile(args.openocd_path):
+        raise ExtendedUnavailable(
+            "OpenOCD binary not found: %s (build it with "
+            "scripts/build-openocd-master.sh)" % args.openocd_path)
+    if not os.path.isdir(args.openocd_scripts):
+        raise ExtendedUnavailable(
+            "OpenOCD scripts dir not found: %s" % args.openocd_scripts)
+
+
+def _ensure_root_helper(args: argparse.Namespace) -> List[str]:
+    helper = detect_root_helper(args.usbip_root_helper)
+    if helper is None:
+        raise ExtendedUnavailable(
+            "no root helper for 'usbip attach' (set HIL_ROOT_HELPER or use "
+            "--usbip-root-helper; sudo -n is not available)")
+    return helper
+
+
 def openocd_probe(args: argparse.Namespace, helper: Optional[List[str]]) -> Dict[str, Any]:
     """Run one short OpenOCD CMSIS-DAP session (init + reset halt + shutdown)."""
     if getattr(args, "_offline", False):
@@ -2091,11 +2229,32 @@ def _openocd_version(args: argparse.Namespace) -> str:
         return "unknown"
 
 
-def _usbip_attach(args: argparse.Namespace, helper: List[str]) -> Dict[str, Any]:
+def _usbip_port_has_dap(text: str) -> bool:
+    """True when `usbip port` lists the WiFi Dap CMSIS-DAP (c251:f00a)."""
+    lowered = (text or "").lower()
+    return "c251:f00a" in lowered or "keil software" in lowered
+
+
+def _usbip_attach(args: argparse.Namespace,
+                  helper: List[str]) -> Dict[str, Any]:
+    """Attach the remote DAP and verify it via the local vhci port list.
+
+    `usbip attach` prints NOTHING on success (rc=0); only failures print an
+    error.  Therefore success is confirmed with `usbip port`, which must list
+    the c251:f00a CMSIS-DAP.  This was a false-negative in the first smoke run.
+    """
     result = _run_subprocess(helper + ["usbip", "attach",
                                        "-r", args.usbip_host,
                                        "-b", args.usbip_busid], 30)
-    result["ok"] = result["rc"] == 0 and "usbip" in result["output"].lower()
+    if result["rc"] != 0:
+        result["ok"] = False
+        return result
+    port = _run_subprocess(helper + ["usbip", "port"], 20)
+    text = port.get("output", "")
+    result["port_output"] = text[-1200:]
+    result["ok"] = _usbip_port_has_dap(text)
+    if not result["ok"]:
+        result["error"] = "usbip attach rc=0 but 'usbip port' has no c251:f00a"
     return result
 
 
@@ -2108,18 +2267,19 @@ def phase_extended_usbip(gate: Gate, args: argparse.Namespace) -> None:
     """USBIP/OpenOCD session smoke: single session and two consecutive ones."""
     section: Dict[str, Any] = {"status": "skipped", "sessions": []}
     gate.metric("extended_usbip", section)
-    helper = detect_root_helper(args.usbip_root_helper)
     try:
-        result = openocd_probe(args, helper)
+        _ensure_openocd_available(args)
+        helper = _ensure_root_helper(args)
     except ExtendedUnavailable as exc:
         gate.skip("extended.usbip.environment", str(exc))
         section["reason"] = str(exc)
         return
+    version = _openocd_version(args)
     gate.check("extended.usbip.version",
-               bool(result.get("version")),
-               "OpenOCD: %s" % result.get("version"),
+               bool(version),
+               "OpenOCD: %s" % version,
                severity="info",
-               values={"openocd": result.get("version")})
+               values={"openocd": version})
     try:
         detach = _usbip_detach(args, helper)
         section["detach_before"] = detach
@@ -2573,7 +2733,16 @@ def _ota_upload(http_conn: HttpTransport, image: str, sha256: str,
     data = open(image, "rb").read()
     headers = {"Content-Type": "application/octet-stream",
                "X-SHA256": sha256}
-    body = data[:partial_bytes] if partial_bytes else data
+    if partial_bytes:
+        # True mid-stream interrupt: the declared Content-Length is the FULL
+        # image but only `partial_bytes` are sent before the TCP connection is
+        # dropped.  The device therefore waits for the rest, sees EOF and
+        # aborts the session ("client disconnected") - it must not switch the
+        # boot slot (docs/ota-local-upload.md §10 acceptance bullet).
+        headers["Content-Length"] = str(len(data))
+        body = data[:partial_bytes]
+    else:
+        body = data
     try:
         response = http_conn.request_bytes("POST", OTA_UPLOAD_PATH, data=body,
                                            headers=headers, timeout=timeout,
@@ -2584,7 +2753,7 @@ def _ota_upload(http_conn: HttpTransport, image: str, sha256: str,
         except ProtocolError:
             pass
         return {"status": response.status, "seconds": response.elapsed_ms,
-                "payload": payload, "aborted": False}
+                "payload": payload, "aborted": bool(partial_bytes)}
     except DeviceUnreachable as exc:
         if partial_bytes:
             return {"status": 0, "aborted": True,
@@ -2752,59 +2921,188 @@ def phase_extended_ota(gate: Gate, args: argparse.Namespace) -> None:
         section["status"] = "pass"
 
 
+def _soak_start_curve(http: HttpTransport, args: argparse.Namespace,
+                      count: int) -> Tuple[Dict[str, Any], Response, str]:
+    """Start one soak curve session using the same wire path as the gate.
+
+    The unified NCM+WiFi firmware cannot allocate the legacy 16 KiB JSON body
+    on a low-heap boot, so `POST /api/curve/start-bin` (CBS1) is tried first -
+    exactly like the read-only gate (`start_curve()`); the legacy JSON endpoint
+    is only used when start-bin is unavailable (old firmware).
+    """
+    binary = _cbs1_body(args, count, interval_us=args.soak_interval_us)
+    response = http.request_bytes(
+        "POST", CURVE_START_BIN_PATH, data=binary,
+        headers={"Content-Type": "application/octet-stream"},
+        timeout=args.timeout, retries=0)
+    method = "start-bin"
+    if response.status in (404, 405, 501):
+        response = http.request("POST", CURVE_START_PATH,
+                                body=_series_body(args, count),
+                                timeout=args.timeout, retries=0)
+        method = "json"
+    try:
+        data = response.json()
+    except ProtocolError:
+        data = {}
+    return data, response, method
+
+
 def phase_extended_soak(gate: Gate, args: argparse.Namespace,
                         http: HttpTransport) -> None:
-    """Opt-in stability soak: repeated curve sessions + heap/latency sampling."""
+    """Opt-in stability soak: repeated curve sessions + heap/latency sampling.
+
+    Each cycle starts a 1..4-series curve session via `curve/start-bin` (CBS1),
+    polls `curve/status` for `--soak-interval` seconds, stops it and samples
+    `target/status` heap.  Three consecutive start failures abort the soak
+    early (a broken start path must not spin for 10 minutes).
+
+    Diagnostics: firmware exposes the per-session cumulative `error` counter,
+    `consecutive_errors`, `last_err` and `message` (e.g. "stopped: N
+    consecutive SWD errors").  The soak records them per cycle as *deltas*
+    (a slow poll loop must not multiply a single error) plus explicit failure
+    reasons, so a long-run failure can be classified as start/stop/transport/
+    sampler-stop/target-miss instead of one opaque counter.  A cycle cut short
+    by the soak deadline is not started at all (no false "0 frames" cycle).
+    """
     section: Dict[str, Any] = {"status": "skipped", "seconds": args.soak_seconds}
     gate.metric("extended_soak", section)
     if not args.soak_seconds:
         return
     iterations = 0
     failures = 0
+    start_failures = 0
+    stop_failures = 0
+    transport_errors = 0
+    sampler_stops = 0
+    consecutive_start_failures = 0
+    aborted_early = False
     heaps: List[int] = []
     latencies: List[float] = []
-    curve_errors = 0
+    cycles: List[Dict[str, Any]] = []
+    start_methods = set()
+    start_error_samples: List[Dict[str, Any]] = []
+    tick_error_total = 0
+    consecutive_errors_max = 0
+    sample_messages: List[str] = []
     target_misses = 0
     started = time.monotonic()
     deadline = started + args.soak_seconds
     series = max(1, min(4, args.soak_series))
     gate.check("extended.soak.started", True,
-               "soak %.0f s, %.1f s per cycle, %d series"
+               "soak %.0f s, %.1f s per cycle, %d series, start-bin path"
                % (args.soak_seconds, args.soak_interval, series),
                severity="info")
     while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining < min(1.0, args.soak_interval * 0.5):
+            break  # do not start a cycle that cannot finish its sample window
         iterations += 1
+        idx = iterations - 1
+        cycle: Dict[str, Any] = {
+            "idx": idx,
+            "t_start": round(time.monotonic() - started, 2),
+            "frames": 0,
+            "error_delta": 0,
+            "consecutive_errors_max": 0,
+            "last_err": "",
+            "message": "",
+            "running_dropped": False,
+            "stop_http": None,
+            "stop_running": None,
+            "ok": True,
+            "fail_reason": "",
+        }
+        cycle_ok = True
         try:
-            start = http.request("POST", CURVE_START_PATH, body={
-                "interval_us": args.soak_interval_us,
-                "series": [{"id": index, "size": 4, "expr": {
-                    "kind": "addr",
-                    "address": args.address + index * 4}} for index in
-                    range(series)],
-                "trigger": "periodic",
-            }, timeout=args.timeout, retries=0)
-            latencies.append(start.elapsed_ms)
-            if start.status != 200:
-                failures += 1
+            data, response, method = _soak_start_curve(http, args, series)
+            start_methods.add(method)
+            latencies.append(response.elapsed_ms)
+            if response.status != 200 or data.get("ok") is not True:
+                start_failures += 1
+                consecutive_start_failures += 1
+                if len(start_error_samples) < 5:
+                    start_error_samples.append({
+                        "http": response.status,
+                        "err": data.get("err"),
+                        "method": method,
+                    })
+                section["last_error"] = (
+                    "curve start (%s): HTTP %d %r"
+                    % (method, response.status, data.get("err")))
+                if consecutive_start_failures >= 3:
+                    aborted_early = True
+                    break
+                time.sleep(min(1.0, max(0.0,
+                                        deadline - time.monotonic())))
                 continue
+            consecutive_start_failures = 0
+            # Sample window: keep polling until the cycle window elapses; a
+            # sampler that stops on its own is classified, not just counted.
             cycle_end = min(deadline, time.monotonic() + args.soak_interval)
             frames = 0
+            running_seen = False
+            last_error_value = 0
             while time.monotonic() < cycle_end:
                 status = http.request("GET", CURVE_STATUS_PATH,
                                       timeout=args.timeout, retries=0)
                 latencies.append(status.elapsed_ms)
                 status_data = status.json()
                 frames = int(status_data.get("frames") or 0)
-                curve_errors += int(status_data.get("error") or 0)
+                last_error_value = int(status_data.get("error") or 0)
+                consecutive_errors_max = max(
+                    consecutive_errors_max,
+                    int(status_data.get("consecutive_errors") or 0))
+                cycle["consecutive_errors_max"] = max(
+                    cycle["consecutive_errors_max"],
+                    int(status_data.get("consecutive_errors") or 0))
+                for field in ("last_err", "message"):
+                    value = str(status_data.get(field) or "").strip()
+                    if value:
+                        cycle[field] = value
+                        if field == "message" and value not in sample_messages:
+                            sample_messages.append(value)
                 if status_data.get("running") is not True:
-                    failures += 1
+                    cycle_ok = False
+                    cycle["running_dropped"] = True
+                    cycle["fail_reason"] = "sampler_stopped"
+                    sampler_stops += 1
                     break
+                running_seen = True
                 time.sleep(max(0.05, args.soak_poll))
-            stop = http.request("POST", CURVE_STOP_PATH, body={},
-                                timeout=args.timeout, retries=1)
-            latencies.append(stop.elapsed_ms)
-            if stop.status != 200:
-                failures += 1
+            cycle["frames"] = frames
+            cycle["error_delta"] = last_error_value
+            tick_error_total += last_error_value
+            if not running_seen and not cycle["running_dropped"]:
+                cycle_ok = False
+                cycle["fail_reason"] = "no_sample_poll"
+            # Stop the session and verify the sampler really stopped.
+            try:
+                stop = http.request("POST", CURVE_STOP_PATH, body={},
+                                    timeout=args.timeout, retries=1)
+                latencies.append(stop.elapsed_ms)
+                cycle["stop_http"] = stop.status
+                if stop.status != 200:
+                    cycle_ok = False
+                    stop_failures += 1
+                    cycle["fail_reason"] = cycle["fail_reason"] or "stop_http"
+                stop_status = http.request("GET", CURVE_STATUS_PATH,
+                                           timeout=args.timeout, retries=0)
+                stop_data = stop_status.json()
+                cycle["stop_running"] = stop_data.get("running")
+                if stop_data.get("running") is not False:
+                    cycle_ok = False
+                    stop_failures += 1
+                    cycle["fail_reason"] = (cycle["fail_reason"]
+                                            or "stop_not_stopped")
+                stop_err = int(stop_data.get("error") or 0)
+                tick_error_total += max(0, stop_err - last_error_value)
+            except (DeviceUnreachable, ProtocolError) as exc:
+                cycle_ok = False
+                transport_errors += 1
+                section["last_error"] = "curve stop: %s" % exc
+                cycle["fail_reason"] = cycle["fail_reason"] or "stop_transport"
+            # Heap snapshot after the session is released.
             status = http.request("GET", TARGET_STATUS_PATH,
                                   timeout=args.timeout, retries=0)
             latencies.append(status.elapsed_ms)
@@ -2812,29 +3110,59 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
             heap = integer(status_data.get("heap_free"))
             if heap is not None:
                 heaps.append(heap)
-            section.setdefault("frames_per_cycle", []).append(frames)
             if iterations % 3 == 0:
                 info = http.request("GET", TARGET_INFO_PATH,
                                     timeout=args.timeout, retries=0)
                 latencies.append(info.elapsed_ms)
                 if info.json().get("detected") is not True:
                     target_misses += 1
+                    cycle_ok = False
+                    cycle["fail_reason"] = cycle["fail_reason"] or "target_miss"
+            cycle["t_end"] = round(time.monotonic() - started, 2)
+            cycle["ok"] = cycle_ok
+            if not cycle_ok:
+                failures += 1
+            cycles.append(cycle)
         except (DeviceUnreachable, ProtocolError) as exc:
             failures += 1
+            transport_errors += 1
+            cycle["ok"] = False
+            cycle["fail_reason"] = cycle["fail_reason"] or "transport"
+            cycle["t_end"] = round(time.monotonic() - started, 2)
+            cycles.append(cycle)
             section["last_error"] = str(exc)
             time.sleep(1.0)
-        except GateAbort:
-            raise
     elapsed = time.monotonic() - started
     heap_start = heaps[0] if heaps else None
     heap_end = heaps[-1] if heaps else None
     heap_min = min(heaps) if heaps else None
+    frames_per_cycle = [cycle.get("frames", 0) for cycle in cycles]
+    failed_cycles = [cycle for cycle in cycles if not cycle.get("ok")]
     section.update({
         "iterations": iterations,
         "elapsed_s": round(elapsed, 1),
         "failures": failures,
-        "curve_errors": curve_errors,
+        "start_failures": start_failures,
+        "stop_failures": stop_failures,
+        "transport_errors": transport_errors,
+        "sampler_stops": sampler_stops,
+        "start_error_samples": start_error_samples,
+        "start_methods": sorted(start_methods),
+        "aborted_early": aborted_early,
+        "tick_errors_total": tick_error_total,
+        "consecutive_errors_max": consecutive_errors_max,
+        "sample_messages": sample_messages[:5],
         "target_misses": target_misses,
+        "frames_total": sum(frames_per_cycle),
+        "frames_per_cycle": frames_per_cycle,
+        "cycles": cycles,
+        "failed_cycles": [
+            {key: cycle.get(key) for key in
+             ("idx", "t_start", "t_end", "frames", "error_delta",
+              "consecutive_errors_max", "last_err", "message",
+              "running_dropped", "stop_http", "stop_running", "fail_reason")}
+            for cycle in failed_cycles
+        ],
         "heap_free_start": heap_start,
         "heap_free_end": heap_end,
         "heap_free_min": heap_min,
@@ -2844,35 +3172,196 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
         if latencies else None,
         "http_latency_max_ms": round(max(latencies), 1) if latencies else None,
     })
-    gate.require("extended.soak.iterations", iterations > 0,
-                 "soak performed no iterations")
-    gate.require("extended.soak.no_failures", failures == 0,
-                 "%d failed sample cycle(s) during soak" % failures)
-    gate.require("extended.soak.curve_errors", curve_errors == 0,
-                 "curve sampler reported %d error(s) during soak"
-                 % curve_errors)
-    gate.require("extended.soak.target_alive", target_misses == 0,
-                 "target was not detected %d time(s) during soak"
-                 % target_misses)
+    section["status"] = "pass" if (failures == 0 and tick_error_total == 0
+                                   and target_misses == 0
+                                   and not aborted_early) else "fail"
+    gate.check("extended.soak.iterations", iterations > 0,
+               "soak performed no iterations")
+    gate.check("extended.soak.no_failures", failures == 0,
+               "%d/%d failed cycle(s); reasons=%r sampler_stops=%d "
+               "transport=%d stop_failures=%d last=%r"
+               % (failures, iterations,
+                  [cycle.get("fail_reason") for cycle in failed_cycles],
+                  sampler_stops, transport_errors, stop_failures,
+                  section.get("last_error")),
+               values={"failed_cycles": section["failed_cycles"]})
+    gate.check("extended.soak.tick_errors", tick_error_total == 0,
+               "%d failed sample tick(s) total (%d cycles with engine "
+               "messages: %r)"
+               % (tick_error_total, len(sample_messages),
+                  sample_messages[:3]))
+    gate.check("extended.soak.target_alive", target_misses == 0,
+               "target was not detected %d time(s) during soak"
+               % target_misses)
     if heap_min is not None:
-        gate.require("extended.soak.heap_min", heap_min >= args.heap_min_free,
-                     "heap_free dropped to %d B (threshold %d B)"
-                     % (heap_min, args.heap_min_free),
-                     values={"heap_free_min": heap_min})
-        gate.require("extended.soak.heap_no_leak",
-                     section["heap_delta"] is not None
-                     and section["heap_delta"] >= -args.heap_leak_tolerance,
-                     "heap_free changed by %r B over the soak (tolerance -%d B)"
-                     % (section["heap_delta"], args.heap_leak_tolerance))
-    section["status"] = "pass" if not failures and curve_errors == 0 \
-        and target_misses == 0 else "fail"
+        gate.check("extended.soak.heap_min", heap_min >= args.heap_min_free,
+                   "heap_free dropped to %d B (threshold %d B)"
+                   % (heap_min, args.heap_min_free),
+                   values={"heap_free_min": heap_min})
+        gate.check("extended.soak.heap_no_leak",
+                   section["heap_delta"] is not None
+                   and section["heap_delta"] >= -args.heap_leak_tolerance,
+                   "heap_free changed by %r B over the soak (tolerance -%d B)"
+                   % (section["heap_delta"], args.heap_leak_tolerance))
     gate.info("extended.soak.summary",
-              "%d cycles in %.1f s, failures=%d, heap %r..%r B, "
-              "HTTP avg=%.1f ms max=%.1f ms"
-              % (iterations, elapsed, failures, heap_min, heap_end,
+              "%d cycles (%.2f s avg) in %.1f s, failures=%d, frames=%d, "
+              "tick_errors=%d, heap %r..%r B, HTTP avg=%.1f ms max=%.1f ms, "
+              "methods=%r"
+              % (iterations, elapsed / iterations if iterations else 0.0,
+                 elapsed, failures, sum(frames_per_cycle), tick_error_total,
+                 heap_min, heap_end,
                  section.get("http_latency_avg_ms") or 0.0,
-                 section.get("http_latency_max_ms") or 0.0),
-              values=section)
+                 section.get("http_latency_max_ms") or 0.0,
+                 section["start_methods"]),
+              values={"seconds": section["elapsed_s"],
+                      "failures": failures,
+                      "tick_errors_total": tick_error_total})
+
+
+def phase_extended_swd_clock(gate: Gate, args: argparse.Namespace,
+                             http: HttpTransport) -> None:
+    """Manual SWD clock matrix: POST /api/target/swd-clock + target probe.
+
+    For every ladder step: force the clock, probe `/api/target/info`, record the
+    actual `swd_clock_hz`/detect result, then restore `auto` (hz=0) and confirm
+    the target is still detectable.  The auto step (0) is the baseline of the
+    firmware's own 2 MHz -> 1 MHz -> 500 kHz fallback ladder.
+
+    Expectations are opt-in (`--swd-clock-expect-ok`): a step listed there must
+    detect the target or the gate FAILS; every other step is recorded as
+    information/warning only (the lab H7 only answers up to 1 MHz, so a
+    hard-coded "2 MHz must work" assertion would be wrong for the hardware).
+    The auto restore after *each* step is always required: the gate must never
+    leave the DAP clock in a state that makes the target undetectable.
+    """
+    section: Dict[str, Any] = {"status": "skipped", "steps": []}
+    gate.metric("extended_swd_matrix", section)
+    try:
+        steps = parse_swd_clock_steps(args.swd_clock_steps)
+        expect_ok = set(parse_swd_clock_steps(args.swd_clock_expect_ok)) \
+            if args.swd_clock_expect_ok else set()
+    except ValueError as exc:
+        gate.require("extended.swd_matrix.args", False, str(exc))
+        return
+    section["steps_requested_hz"] = steps
+    section["expect_ok_hz"] = sorted(expect_ok)
+    required_failures = 0
+    matrix_started = time.monotonic()
+
+    def _probe() -> Dict[str, Any]:
+        response = http.request("GET", TARGET_INFO_PATH, timeout=args.timeout,
+                                retries=1)
+        try:
+            return response.json()
+        except ProtocolError:
+            return {}
+
+    def _restore_auto() -> Dict[str, Any]:
+        result: Dict[str, Any] = {"http": 0, "ok": False, "detected": False}
+        try:
+            response = http.request("POST", SWD_CLOCK_PATH, body={"hz": 0},
+                                    timeout=args.timeout, retries=1)
+            result["http"] = response.status
+            try:
+                result["ok"] = response.json().get("ok") is True
+            except ProtocolError:
+                result["ok"] = False
+        except DeviceUnreachable as exc:
+            result["error"] = str(exc)
+            return result
+        info = _probe()
+        result["detected"] = info.get("detected") is True
+        result["actual_hz"] = integer(info.get("swd_clock_hz"))
+        return result
+
+    try:
+        for hz in steps:
+            label = swd_clock_label(hz)
+            try:
+                response = http.request("POST", SWD_CLOCK_PATH,
+                                        body={"hz": hz},
+                                        timeout=args.timeout, retries=1)
+                set_http = response.status
+                set_data = response.json()
+            except ProtocolError as exc:
+                gate.check("extended.swd_matrix.step.%s" % label, False,
+                           "invalid JSON from POST %s: %s"
+                           % (SWD_CLOCK_PATH, exc))
+                required_failures += 1
+                continue
+            set_ok = set_data.get("ok") is True
+            time.sleep(max(0.0, args.swd_clock_settle))
+            info = _probe()
+            detected = info.get("detected") is True
+            actual_hz = integer(info.get("swd_clock_hz"))
+            record = {
+                "requested_hz": hz,
+                "label": label,
+                "set_http": set_http,
+                "set_ok": set_ok,
+                "mode": set_data.get("mode"),
+                "reported_hz": integer(set_data.get("hz")),
+                "detected": detected,
+                "actual_hz": actual_hz,
+                "err": info.get("err"),
+                "message": info.get("message"),
+            }
+            step_ok = swd_clock_result_ok(hz, set_http, set_ok, detected)
+            required = hz in expect_ok
+            record["expected_ok"] = required
+            record["ok"] = step_ok
+            if not step_ok and required:
+                required_failures += 1
+            gate.check(
+                "extended.swd_matrix.step.%s" % label, step_ok,
+                "hz=%s set: HTTP %d ok=%r mode=%r -> detected=%r actual=%r "
+                "err=%r" % (label, set_http, set_ok, set_data.get("mode"),
+                            detected, actual_hz, info.get("err")),
+                severity="required" if required else "warn",
+                values=record,
+                ok_detail="hz=%s: detected=%r actual=%r (auto ladder %r)"
+                          % (label, detected, actual_hz,
+                             info.get("swd_clock_actual_hz")),
+            )
+            # Safety: always return to auto and confirm the target is visible.
+            restore = _restore_auto()
+            record["restore_auto"] = restore
+            restore_ok = bool(restore.get("ok")) and restore.get("detected") is True
+            if not restore_ok:
+                required_failures += 1
+            gate.check("extended.swd_matrix.restore.%s" % label, restore_ok,
+                       "restore auto after hz=%s: POST ok=%r detected=%r "
+                       "actual=%r" % (label, restore.get("ok"),
+                                      restore.get("detected"),
+                                      restore.get("actual_hz")),
+                       severity="required", values=restore,
+                       ok_detail="auto restored after hz=%s, target detected"
+                                 % label)
+            section["steps"].append(record)
+    except (DeviceUnreachable, ProtocolError) as exc:
+        gate.check("extended.swd_matrix.transport", False,
+                   "transport error during the matrix: %s" % exc)
+        required_failures += 1
+    finally:
+        # Unconditional best-effort restore, even after an aborted run.
+        final = _restore_auto()
+        section["final_restore"] = final
+        gate.require("extended.swd_matrix.final_auto",
+                     bool(final.get("ok")) and final.get("detected") is True,
+                     "final auto restore failed (detected=%r actual=%r)"
+                     % (final.get("detected"), final.get("actual_hz")),
+                     ok_detail="SWD clock restored to auto, target detected "
+                               "(actual=%r)" % (final.get("actual_hz"),))
+    section["seconds"] = round(time.monotonic() - matrix_started, 2)
+    section["required_failures"] = required_failures
+    section["status"] = "pass" if required_failures == 0 else "fail"
+    ok_steps = [step for step in section["steps"] if step.get("ok")]
+    gate.info("extended.swd_matrix.summary",
+              "%d/%d steps detected, expect-ok=%r, restored auto at the end"
+              % (len(ok_steps), len(section["steps"]),
+                 args.swd_clock_expect_ok or "(none)"),
+              values={"seconds": section["seconds"],
+                      "required_failures": required_failures})
 
 
 def phase_extended(gate: Gate, args: argparse.Namespace,
@@ -2887,6 +3376,7 @@ def phase_extended(gate: Gate, args: argparse.Namespace,
                        ("reboot-recovery", args.reboot_recovery),
                        ("flash", bool(args.flash_image)),
                        ("ota", bool(args.ota_image or args.ota_interrupt)),
+                       ("swd-clock-matrix", args.swd_clock_matrix),
                        ("soak", bool(args.soak_seconds)),
                    ) if on),
                severity="info")
@@ -2899,6 +3389,9 @@ def phase_extended(gate: Gate, args: argparse.Namespace,
         phases.append(("flash", phase_extended_flash, (gate, args)))
     if args.ota_image or args.ota_interrupt:
         phases.append(("ota", phase_extended_ota, (gate, args)))
+    if args.swd_clock_matrix:
+        phases.append(("swd-clock", phase_extended_swd_clock,
+                       (gate, args, http)))
     if args.soak_seconds:
         phases.append(("soak", phase_extended_soak, (gate, args, http)))
     for name, function, call_args in phases:
@@ -2936,6 +3429,9 @@ def extended_cleanup(gate: Gate, args: argparse.Namespace) -> None:
         except Exception as exc:  # noqa: BLE001
             gate.check("extended.cleanup.usbip", False,
                        "usbip detach failed: %s" % exc, severity="warn")
+        # The identify probe ends with `reset halt`; never leave the target
+        # halted after the extended modes.
+        _safe_target_reset(gate, args, run=True)
     try:
         status = HttpTransport(args.host, args.port, timeout=args.timeout) \
             .request("GET", CURVE_STATUS_PATH, retries=0)
@@ -3086,6 +3582,22 @@ def build_parser() -> argparse.ArgumentParser:
     extended.add_argument("--ota-settle", type=float, default=4.0,
                           help="wait after the interrupted upload before "
                                "checking OTA state")
+    extended.add_argument("--swd-clock-matrix", action="store_true",
+                          help="sweep POST /api/target/swd-clock over the clock "
+                               "ladder, probe /api/target/info per step and "
+                               "restore auto after each step (read-only w.r.t. "
+                               "target flash)")
+    extended.add_argument("--swd-clock-steps", default=DEFAULT_SWD_CLOCK_STEPS,
+                          help="comma-separated SWD clock ladder: auto/0, "
+                               "500k, 1M, ... or plain Hz "
+                               "(default: %(default)s)")
+    extended.add_argument("--swd-clock-expect-ok", default="",
+                          help="ladder steps that MUST detect the target "
+                               "(default: none - all steps informational; lab "
+                               "H7 expectation: auto,500k,1M)")
+    extended.add_argument("--swd-clock-settle", type=float, default=0.3,
+                          help="settle time in seconds between forcing a clock "
+                               "and the follow-up probe")
     extended.add_argument("--soak-seconds", type=int, default=0,
                           help="opt-in stability soak length in seconds "
                                "(0=off; 30..3600; task baseline 300)")
@@ -3148,6 +3660,17 @@ def validate_args(parser: argparse.ArgumentParser,
                      % args.soak_seconds)
     if 0 < args.soak_seconds < 30:
         parser.error("--soak-seconds must be 0 (off) or >= 30 s")
+    try:
+        parse_swd_clock_steps(args.swd_clock_steps)
+        if args.swd_clock_expect_ok:
+            expect = parse_swd_clock_steps(args.swd_clock_expect_ok)
+            if len(set(expect)) != len(expect):
+                parser.error("--swd-clock-expect-ok contains duplicates")
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not 0.0 <= args.swd_clock_settle <= 10.0:
+        parser.error("--swd-clock-settle out of range (0..10 s): %g"
+                     % args.swd_clock_settle)
     if not 1 <= args.usbip_sessions <= 5:
         parser.error("--usbip-sessions out of range (1..5): %d"
                      % args.usbip_sessions)
