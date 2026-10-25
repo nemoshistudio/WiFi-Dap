@@ -316,6 +316,51 @@ static bool ws_handle_subscription(httpd_req_t *req, const char *payload, size_t
     return true;
 }
 
+/**
+ * @brief Register the /ws/curve client (handshake context only).
+ *
+ * The Host/Origin guard needs the handshake request headers, so it must run
+ * before the socket is used for curve frames.  IDF <= 5.2 reached this through
+ * the URI handler; IDF >= 5.5 uses httpd_uri_t::ws_post_handshake_cb instead.
+ *
+ * @return client slot (>= 0) on success, -1 when the session was rejected.
+ */
+static int curve_ws_register_req(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    int slot;
+
+    curve_ws_init();
+    if (!s_ws_inited) {
+        return -1;
+    }
+    if (!web_host_guard_ws_ok(req)) {
+        ESP_LOGW(CURVE_WS_TAG, "handshake rejected (Host/Origin), fd %d", fd);
+        httpd_sess_trigger_close(req->handle, fd);
+        return -1;
+    }
+    (void)xSemaphoreTake(s_ws_lock, portMAX_DELAY);
+    slot = curve_ws_attach(&s_ws, fd);
+    if (slot >= 0) {
+        s_ws_hd[slot] = req->handle;
+    }
+    (void)xSemaphoreGive(s_ws_lock);
+    if (slot < 0) {
+        ESP_LOGW(CURVE_WS_TAG, "too many WS clients, closing fd %d", fd);
+        httpd_sess_trigger_close(req->handle, fd);
+        return -1;
+    }
+    ESP_LOGI(CURVE_WS_TAG, "fd %d attached (slot %d)", fd, slot);
+    return slot;
+}
+
+#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+static esp_err_t curve_ws_post_handshake_cb(httpd_req_t *req)
+{
+    return curve_ws_register_req(req) >= 0 ? ESP_OK : ESP_FAIL;
+}
+#endif
+
 static esp_err_t curve_ws_handler(httpd_req_t *req)
 {
     int fd = httpd_req_to_sockfd(req);
@@ -327,13 +372,19 @@ static esp_err_t curve_ws_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     if (req->method == HTTP_GET) {
-        int slot;
+        return curve_ws_register_req(req) >= 0 ? ESP_OK : ESP_FAIL;
+    }
 
-        if (!web_host_guard_ws_ok(req)) {
-            ESP_LOGW(CURVE_WS_TAG, "handshake rejected (Host/Origin), fd %d", fd);
-            httpd_sess_trigger_close(req->handle, fd);
-            return ESP_FAIL;
-        }
+    /* IDF >= 5.5 does not invoke the handler for the handshake request.  When
+     * the build has no post-handshake hook, register on the first client frame
+     * (the page sends {"cmd":"subscribe"} / "ping" right after open); without
+     * this the push task would never see a client.  Attach is idempotent, so
+     * the normal post-handshake path already did it in almost all cases. */
+    (void)xSemaphoreTake(s_ws_lock, portMAX_DELAY);
+    bool attached = curve_ws_find(&s_ws, fd) != NULL;
+    (void)xSemaphoreGive(s_ws_lock);
+    if (!attached) {
+        int slot;
         (void)xSemaphoreTake(s_ws_lock, portMAX_DELAY);
         slot = curve_ws_attach(&s_ws, fd);
         if (slot >= 0) {
@@ -345,8 +396,7 @@ static esp_err_t curve_ws_handler(httpd_req_t *req)
             httpd_sess_trigger_close(req->handle, fd);
             return ESP_FAIL;
         }
-        ESP_LOGI(CURVE_WS_TAG, "fd %d attached (slot %d)", fd, slot);
-        return ESP_OK;
+        ESP_LOGI(CURVE_WS_TAG, "fd %d attached lazily (slot %d)", fd, slot);
     }
 
     memset(&pkt, 0, sizeof(pkt));
@@ -379,8 +429,23 @@ static esp_err_t curve_ws_handler(httpd_req_t *req)
     case HTTPD_WS_TYPE_CLOSE: {
         uint8_t close_payload[126];
 
-        pkt.payload = close_payload;
-        (void)httpd_ws_recv_frame(req, &pkt, sizeof(close_payload));
+        /* Drain only a payload the CLOSE frame actually carries.  Calling
+         * httpd_ws_recv_frame() again for a zero-length frame re-reads the next
+         * frame header and blocks in recv for recv_wait_timeout (10 s), which
+         * stalls the single httpd task (and every HTTP/WS client behind it).
+         * Browsers send a zero-payload CLOSE frame on ws.close() without a
+         * code. */
+        if (pkt.len > 0U) {
+            if (pkt.len > sizeof(close_payload)) {
+                ESP_LOGW(CURVE_WS_TAG, "fd %d: oversized close payload", fd);
+                httpd_sess_trigger_close(req->handle, fd);
+                return ESP_FAIL;
+            }
+            pkt.payload = close_payload;
+            if (httpd_ws_recv_frame(req, &pkt, pkt.len) != ESP_OK) {
+                return ESP_FAIL;
+            }
+        }
         (void)xSemaphoreTake(s_ws_lock, portMAX_DELAY);
         for (int slot = 0; slot < (int)CURVE_WS_MAX_CLIENTS; slot++) {
             if (s_ws.clients[slot].fd == fd) {
@@ -397,9 +462,17 @@ static esp_err_t curve_ws_handler(httpd_req_t *req)
     case HTTPD_WS_TYPE_PING: {
         uint8_t ping_payload[126];
 
-        pkt.payload = ping_payload;
-        if (httpd_ws_recv_frame(req, &pkt, sizeof(ping_payload)) != ESP_OK) {
+        /* Same zero-length rule as CLOSE above. */
+        if (pkt.len > sizeof(ping_payload)) {
+            ESP_LOGW(CURVE_WS_TAG, "fd %d: oversized ping payload", fd);
+            httpd_sess_trigger_close(req->handle, fd);
             return ESP_FAIL;
+        }
+        if (pkt.len > 0U) {
+            pkt.payload = ping_payload;
+            if (httpd_ws_recv_frame(req, &pkt, pkt.len) != ESP_OK) {
+                return ESP_FAIL;
+            }
         }
         pkt.type = HTTPD_WS_TYPE_PONG;
         (void)xSemaphoreTake(s_ws_send_lock, portMAX_DELAY);
@@ -430,6 +503,11 @@ static const httpd_uri_t s_curve_ws_uri = {
     .is_websocket = true,
     .supported_subprotocol = NULL,
     .handle_ws_control_frames = true,
+#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+    /* IDF >= 5.5: handshake no longer invokes .handler; attach the push client
+     * (and enforce Host/Origin) from the post-handshake callback. */
+    .ws_post_handshake_cb = curve_ws_post_handshake_cb,
+#endif
 };
 
 static int CURVE_WS_URI_INIT(const httpd_uri_t **uri_conf)

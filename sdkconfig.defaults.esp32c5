@@ -144,6 +144,10 @@ CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NONE=y
 # Web UI: WebSocket support (same server/URI modules as the other targets)
 #
 CONFIG_HTTPD_WS_SUPPORT=y
+# IDF v5.5 no longer invokes the URI handler on the WS handshake; the server's
+# client-registration + Host/Origin guard now lives in ws_post_handshake_cb
+# (see project_components/web_server/uri_modules/uri_ws.c).
+CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
 #
 # Unused radios: this variant is Wi-Fi-only. ESP-IDF v5.5 enables the C5

@@ -104,6 +104,15 @@ static void ws_send_binary_error(httpd_req_t *req);
 static inline int8_t ws_add_fd(httpd_handle_t hd, int fd);
 static inline void ws_rm_fd(int fd);
 
+/* Client registration.  IDF <= 5.2 called the URI handler for the WS handshake
+ * (GET) while IDF >= 5.5 returns from the handshake before invoking it and
+ * offers httpd_uri_t::ws_post_handshake_cb instead; see ws_attach_client(). */
+static bool ws_fd_registered(int fd);
+static int ws_attach_client(httpd_req_t *req);
+#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+static esp_err_t ws_post_handshake_cb(httpd_req_t *req);
+#endif
+
 _Noreturn static void heartbeat_task(void *arg);
 
 
@@ -112,6 +121,15 @@ static esp_err_t ws_req_handler(httpd_req_t *req)
 {
 	if (unlikely(req->method == HTTP_GET)) {
 		return ws_on_socket_open(req);
+	}
+
+	/* IDF >= 5.5 does not invoke the handler for the handshake request.  Builds
+	 * without CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT get no handshake hook
+	 * at all, so register on the first client frame as a fallback (the browser
+	 * always sends its protocol handshake queries immediately after open).
+	 * ws_add_fd() is idempotent; the normal path is the post-handshake hook. */
+	if (unlikely(!ws_fd_registered(httpd_req_to_sockfd(req)))) {
+		(void)ws_add_fd(req->handle, httpd_req_to_sockfd(req));
 	}
 #ifdef WT_DEBUG_MODE
 	ESP_LOGI(TAG, "ws_handler: httpd_handle_t=%p, sockfd=%d, client_info:%d, client_count: %d", req->handle,
@@ -162,7 +180,8 @@ static esp_err_t ws_req_handler(httpd_req_t *req)
 		 * FIN=1 frames are routed. Drain the fragment payload so the WS
 		 * stream does not desync, then answer with the binary error frame. */
 		ESP_LOGE(TAG, "WS Continue not handled (len %u)", (unsigned)ws_pkt->len);
-		if (httpd_ws_recv_frame(req, ws_pkt, ws_pkt->len) != ESP_OK) {
+		if (ws_pkt->len > 0U &&
+		    httpd_ws_recv_frame(req, ws_pkt, ws_pkt->len) != ESP_OK) {
 			ESP_LOGE(TAG, "ws recv continue data error");
 			return ws_on_close(req, ws_pkt, ws_msg);
 		}
@@ -179,15 +198,27 @@ static esp_err_t ws_req_handler(httpd_req_t *req)
 	case HTTPD_WS_TYPE_BINARY:
 		return ws_on_binary_data(req, ws_msg);
 	case HTTPD_WS_TYPE_CLOSE:
-		if ((err = httpd_ws_recv_frame(req, ws_pkt, 126)) != ESP_OK) {
-			ESP_LOGE(TAG, "Cannot receive the full CLOSE frame");
+		/* Drain the close payload only when the frame carries one.  Calling
+		 * httpd_ws_recv_frame() again with len == 0 re-reads a *new* frame
+		 * header and blocks in recv for recv_wait_timeout (10 s), stalling the
+		 * whole single-task httpd.  Browsers send a zero-payload CLOSE frame
+		 * on ws.close() without a code, i.e. on every UI reconnect. */
+		if (ws_pkt->len > 0U) {
+			err = httpd_ws_recv_frame(req, ws_pkt, ws_pkt->len);
+			if (unlikely(err != ESP_OK)) {
+				ESP_LOGE(TAG, "Cannot receive the full CLOSE frame");
+			}
 		}
 		return ws_on_close(req, ws_pkt, ws_msg);
 	case HTTPD_WS_TYPE_PING:
-		/* Now turn the frame to PONG */
-		if ((err = httpd_ws_recv_frame(req, ws_pkt, 126)) != ESP_OK) {
-			ESP_LOGE(TAG, "Cannot receive the full PONG frame");
-			return ws_on_close(req, ws_pkt, ws_msg);
+		/* Same zero-length rule as CLOSE above: only drain a payload that the
+		 * PING frame actually carries, then echo it in the PONG. */
+		if (ws_pkt->len > 0U) {
+			err = httpd_ws_recv_frame(req, ws_pkt, ws_pkt->len);
+			if (unlikely(err != ESP_OK)) {
+				ESP_LOGE(TAG, "Cannot receive the full PING frame");
+				return ws_on_close(req, ws_pkt, ws_msg);
+			}
 		}
 		ws_pkt->type = HTTPD_WS_TYPE_PONG;
 		err = ws_send_frame_safe(req->handle, httpd_req_to_sockfd(req), ws_pkt);
@@ -446,22 +477,56 @@ static int ws_bin_tx_port(const uint8_t *frame, size_t len)
 	return 0;
 }
 
-int ws_on_socket_open(httpd_req_t *req)
+/**
+ * @brief Register the request socket in the WS heartbeat/broadcast client list.
+ *
+ * Runs once per connection at handshake time, where the request still carries
+ * the Host/Origin headers needed by the browser security guard (CSWSH / DNS
+ * rebinding - always active, not a login check).  The HTTP 101 handshake was
+ * already sent by the httpd, so close the session instead of serving on
+ * rejection.
+ *
+ * IDF <= 5.2 reached this through the URI handler (ws_on_socket_open); IDF
+ * >= 5.5 skips the handler for the handshake and calls
+ * httpd_uri_t::ws_post_handshake_cb instead (ws_post_handshake_cb).  Without
+ * this registration heartbeat_task() would broadcast to an empty client list
+ * and no browser would ever receive a heartbeat.
+ */
+static int ws_attach_client(httpd_req_t *req)
 {
 	int sock_fd = httpd_req_to_sockfd(req);
 	ESP_LOGI(TAG, "ws open: %d", sock_fd);
 
-	/* Host/Origin guard (CSWSH / DNS rebinding, browser security - always
-	 * active, not a login check). The HTTP 101 handshake was already sent by the
-	 * httpd, so close the session instead of serving on rejection. */
 	if (!web_host_guard_ws_ok(req)) {
 		ESP_LOGW(TAG, "ws handshake rejected (Host/Origin), fd %d", sock_fd);
 		httpd_sess_trigger_close(req->handle, sock_fd);
 		return 1;
 	}
-
-	return ws_add_fd(req->handle, sock_fd);
+	if (ws_add_fd(req->handle, sock_fd) != 0) {
+		ESP_LOGE(TAG, "ws client registration failed, fd %d", sock_fd);
+		httpd_sess_trigger_close(req->handle, sock_fd);
+		return 1;
+	}
+	return 0;
 }
+
+int ws_on_socket_open(httpd_req_t *req)
+{
+	return ws_attach_client(req);
+}
+
+#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+/**
+ * @brief IDF >= 5.5 handshake hook: register the client + enforce Host/Origin.
+ *
+ * IDF 5.5 introduced this callback because the URI handler is no longer invoked
+ * for the WebSocket handshake request.
+ */
+static esp_err_t ws_post_handshake_cb(httpd_req_t *req)
+{
+	return ws_attach_client(req) == 0 ? ESP_OK : ESP_FAIL;
+}
+#endif
 
 /**
  * @param msg must only used as generic ptr, truncated by ws_on_bin()
@@ -554,6 +619,27 @@ void json_to_text(ws_msg_t *ws_msg, int module, int cmd)
 
 /* Clients array manipulation function
  * */
+static bool ws_fd_registered(int fd)
+{
+	bool found = false;
+	int idx = GET_FD_IDX(fd);
+
+	if (idx < 0 || idx >= CONFIG_LWIP_MAX_SOCKETS || ws_ctx.list_lock.mutex == NULL) {
+		return false;
+	}
+	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
+	for (int i = 0; i < ws_ctx.client_count; ++i) {
+		if (ws_ctx.valid_fd[i] == (uint8_t) fd) {
+			found = true;
+			break;
+		}
+	}
+	xSemaphoreGive(ws_ctx.list_lock.mutex);
+	return found;
+}
+
+/* Idempotent: the post-handshake hook and the first-frame fallback may both
+ * reach this for the same fd (see ws_req_handler). */
 static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 {
 	int8_t ret = 0;
@@ -565,6 +651,11 @@ static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 	}
 
 	xSemaphoreTake(ws_ctx.list_lock.mutex, portMAX_DELAY);
+	for (int i = 0; i < ws_ctx.client_count; ++i) {
+		if (ws_ctx.valid_fd[i] == (uint8_t) fd) {
+			goto out; /* already registered (duplicate handshake/frame path) */
+		}
+	}
 	if (ws_ctx.client_count >= CONFIG_LWIP_MAX_SOCKETS) {
 		ret = 1;
 		goto out;
@@ -572,7 +663,7 @@ static inline int8_t ws_add_fd(httpd_handle_t hd, int fd)
 
 	ws_ctx.clients[idx].fd = fd;
 	ws_ctx.clients[idx].hd = hd;
-	ws_ctx.valid_fd[ws_ctx.client_count] = fd;
+	ws_ctx.valid_fd[ws_ctx.client_count] = (uint8_t) fd;
 	ws_ctx.client_count++;
 out:
 	xSemaphoreGive(ws_ctx.list_lock.mutex);
@@ -693,6 +784,11 @@ static const httpd_uri_t uri_api = {
 	.is_websocket = true,
 	.supported_subprotocol = NULL,
 	.handle_ws_control_frames = true,
+#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+	/* IDF >= 5.5: the handshake does not invoke .handler any more, so the
+	 * heartbeat/broadcast registration and the Host/Origin guard live here. */
+	.ws_post_handshake_cb = ws_post_handshake_cb,
+#endif
 };
 
 static int WS_REQ_INIT(const httpd_uri_t **uri_conf)
