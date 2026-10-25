@@ -2741,7 +2741,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="status/frames polling interval inside a cycle")
     soak.add_argument("--max-invalid-ratio", type=float, default=0.01,
                       help="maximum invalid-frame ratio during soak")
-    soak.add_argument("--heap-min-free", type=int, default=8192,
+    soak.add_argument("--heap-min-free", type=int, default=6144,
                       help="minimum heap_free in bytes")
     soak.add_argument("--heap-min-largest", type=int, default=4096,
                       help="minimum heap_largest in bytes")

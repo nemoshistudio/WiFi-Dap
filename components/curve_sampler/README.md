@@ -779,6 +779,9 @@ fully functional (it is not disabled by a WS subscription).
   the unified NCM+WiFi heap often cannot provide 16 KiB contiguous after
   fragmentation, so new clients use `POST /api/curve/start-bin`; a JSON body
   alloc failure is an explicit HTTP 503 with the measured largest block).
+* The worker stack is adaptive (8192→7168→6144→5120→4096 B); unified
+  NCM+WiFi firmware can lack one 8 KiB contiguous block after the DAP/HTTP
+  stacks are up, so init retries smaller stacks instead of failing the sampler.
 * The session bring-up reuses `tf_swd_link_init()`, which pulses nRESET before
   the SWD switch sequence (same as the target-flash probe).  **Starting a local
   sampling session therefore resets the target once**; the sampler then keeps
