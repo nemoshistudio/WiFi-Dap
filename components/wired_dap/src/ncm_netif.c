@@ -7,7 +7,7 @@
  *   192.168.7.1/24) <-> existing TCP 3240 DAP proxy (components/dap_proxy)
  *   -> USBIP/DAP -> SWD/JTAG.
  *
- * Design follows the IDF 5.2.1 reference implementation
+ * Design follows the IDF 5.5.6 reference implementation
  * examples/network/sta2eth/main/usb_ncm_iface.c (custom esp_netif driver over
  * TinyUSB NCM + lwIP ethernetif glue). Differences for this MVP:
  *   - device-local interface with a static IPv4 address (192.168.7.1/24);
@@ -126,9 +126,13 @@ static esp_err_t ncm_usb_init(void)
     /* USB-Serial-JTAG and USB-OTG share the S3 USB PHY.  The ROM/USJ
      * controller stays enabled after boot; release its pad and clock before
      * installing TinyUSB, otherwise tinyusb_driver_install() fails and the
-     * host keeps seeing 303a:1001 instead of the NCM device. */
+     * host keeps seeing 303a:1001 instead of the NCM device.
+     *
+     * IDF 5.5 renamed the pad helper to usb_serial_jtag_ll_phy_enable_pad();
+     * the clock/reset helpers keep their names but are now RCC-lock wrapped
+     * (see the __DECLARE_RCC_ATOMIC_ENV declaration below). */
     int __DECLARE_RCC_ATOMIC_ENV __attribute__((unused));
-    usb_serial_jtag_ll_enable_pad(false);
+    usb_serial_jtag_ll_phy_enable_pad(false);
     usb_serial_jtag_ll_enable_bus_clock(false);
     usb_serial_jtag_ll_reset_register();
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -190,7 +194,7 @@ static esp_err_t ncm_esp_netif_init(void)
     };
 
     /* USB-NCM presents an Ethernet L2 interface to lwIP; reuse the IDF
-     * ethernetif glue (IDF 5.2.1 esp_netif lwIP port). */
+     * ethernetif glue (IDF 5.5.6 esp_netif lwIP port). */
     struct esp_netif_netstack_config lwip_netif_config = {
         .lwip = {
             .init_fn = ethernetif_init,

@@ -293,12 +293,22 @@ void DAP_SPI_Init()
     gpio_ll_set_level(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, 0);
     gpio_ll_set_level(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, 0);
 
-    // We will use IO_MUX to get the maximum speed.
-    gpio_ll_iomux_in(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, FSPICLK_IN_IDX);
-    gpio_ll_iomux_out(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, FUNC_GPIO12_FSPICLK, 0);
+    /* We will use IO_MUX to get the maximum speed. IDF 5.5 replaced the
+     * gpio_ll_iomux_in/out helpers with the unified GPIO LL API:
+     *   in : gpio_ll_set_input_signal_from(hw, signal, from_gpio_matrix=false)
+     *        + gpio_ll_input_enable()
+     *   out: gpio_ll_set_output_enable_ctrl(hw, gpio, ctrl_by_periph=true)
+     *        + gpio_ll_func_sel()
+     * (behaviour identical to the old iomux helpers). */
+    gpio_ll_set_input_signal_from(GPIO_HAL_GET_HW(GPIO_PORT_0), FSPICLK_IN_IDX, false);
+    gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK);
+    gpio_ll_set_output_enable_ctrl(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, true, false);
+    gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, FUNC_GPIO12_FSPICLK);
 
-    gpio_ll_iomux_in(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, FSPID_IN_IDX);
-    gpio_ll_iomux_out(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, FUNC_GPIO11_FSPID, 0);
+    gpio_ll_set_input_signal_from(GPIO_HAL_GET_HW(GPIO_PORT_0), FSPID_IN_IDX, false);
+    gpio_ll_input_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI);
+    gpio_ll_set_output_enable_ctrl(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, true, false);
+    gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, FUNC_GPIO11_FSPID);
 
     // A 2025 fork: hand the pad output-enable back to the GPIO peripheral so
     // that DAP_SPI_Deinit() can drive the pads from the CPU dedicated GPIOs.
@@ -421,14 +431,17 @@ __FORCEINLINE void DAP_SPI_Deinit()
     PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[PIN_SWCLK], PIN_FUNC_GPIO);
     PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI], PIN_FUNC_GPIO); // MOSI
 
-    GPIO.func_out_sel_cfg[PIN_SWCLK].func_sel = CPU_GPIO_OUT1_IDX;
+    /* IDF 5.5 register headers renamed the GPIO matrix fields for C3:
+     * func_out_sel_cfg.func_sel -> out_sel,
+     * func_in_sel_cfg.func_sel  -> in_sel (same names as ESP32-C5). */
+    GPIO.func_out_sel_cfg[PIN_SWCLK].out_sel = CPU_GPIO_OUT1_IDX;
     GPIO.func_out_sel_cfg[PIN_SWCLK].oen_sel = 0;
 
-    GPIO.func_out_sel_cfg[PIN_SWDIO_MOSI].func_sel = CPU_GPIO_OUT0_IDX;
+    GPIO.func_out_sel_cfg[PIN_SWDIO_MOSI].out_sel = CPU_GPIO_OUT0_IDX;
     GPIO.func_out_sel_cfg[PIN_SWDIO_MOSI].oen_sel = 0;
 
     GPIO.func_in_sel_cfg[CPU_GPIO_IN0_IDX].sig_in_sel = 1;
-    GPIO.func_in_sel_cfg[CPU_GPIO_IN0_IDX].func_sel = PIN_SWDIO_MOSI;
+    GPIO.func_in_sel_cfg[CPU_GPIO_IN0_IDX].in_sel = PIN_SWDIO_MOSI;
 
     // enable SWCLK/MOSI output (CSR user GPIO OEN bits 0 and 1)
     RV_WRITE_CSR(CSR_GPIO_OEN_USER, 3);
@@ -472,8 +485,8 @@ __FORCEINLINE void DAP_SPI_Deinit()
  */
 __FORCEINLINE void DAP_SPI_Deinit()
 {
-    gpio_ll_iomux_func_sel(GPIO_PIN_MUX_REG[PIN_SWCLK], PIN_FUNC_GPIO);
-    gpio_ll_iomux_func_sel(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI], PIN_FUNC_GPIO); // MOSI
+    gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, PIN_FUNC_GPIO);
+    gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, PIN_FUNC_GPIO); // MOSI
 
     // SWCLK output
     GPIO.func_out_sel_cfg[PIN_SWCLK].func_sel = CORE1_GPIO_OUT1_IDX;
@@ -557,7 +570,7 @@ __FORCEINLINE void DAP_SPI_Release()
  */
 __FORCEINLINE void DAP_SPI_Acquire()
 {
-    gpio_ll_iomux_func_sel(GPIO_PIN_MUX_REG[PIN_SWCLK], FUNC_GPIO12_FSPICLK);
+    gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, FUNC_GPIO12_FSPICLK);
 }
 
 
@@ -567,6 +580,6 @@ __FORCEINLINE void DAP_SPI_Acquire()
  */
 __FORCEINLINE void DAP_SPI_Release()
 {
-    gpio_ll_iomux_func_sel(GPIO_PIN_MUX_REG[PIN_SWCLK], FUNC_GPIO12_GPIO12);
+    gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, FUNC_GPIO12_GPIO12);
 }
 #endif

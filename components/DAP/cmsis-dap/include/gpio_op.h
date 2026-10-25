@@ -51,7 +51,9 @@ __STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
 #elif defined CONFIG_IDF_TARGET_ESP32S3
 __STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
 {
-  gpio_ll_iomux_func_sel(GPIO_PIN_MUX_REG[io_num], PIN_FUNC_GPIO);
+  /* IDF 5.5 unified the GPIO LL API: gpio_ll_func_sel(hw, gpio_num, func)
+   * replaces the old gpio_ll_iomux_func_sel(pin_mux_reg, func). */
+  gpio_ll_func_sel(GPIO_HAL_GET_HW(GPIO_PORT_0), (uint8_t)io_num, PIN_FUNC_GPIO);
 }
 #elif defined CONFIG_IDF_TARGET_ESP32C5
 __STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
