@@ -6,7 +6,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 
 | 文件 | 作用 | WP |
 | --- | --- | --- |
-| `idf-docker.sh` | 在 `espressif/idf:v5.2.1` 容器里运行 `idf.py`；整 worktree git 目录只读挂载；`--git-probe` 自检 | WP-002 |
+| `idf-docker.sh` | 在 `espressif/idf:v5.5.6` 容器里运行 `idf.py`；整 worktree git 目录只读挂载；`--git-probe` 自检 | WP-002 |
 | `build-lock.sh` | `flock` 构建信号量，最多 3 个并发构建，超限自动排队 | WP-002 |
 | `build_all.sh` | 三目标（esp32s3/esp32c3/esp32）一键构建 + 版本/大小汇总 + 分区门禁 | WP-143 |
 | `check_partitions.py` | 分区表冻结校验（含 docker 内 `gen_esp32part.py`）+ app 大小/版本上限 | WP-142 |
@@ -26,10 +26,10 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 
 - Docker（当前用户可执行 `docker`，通常在 `docker` 组内）
 - `bash`、`flock`（util-linux）、`realpath`（coreutils）、`python3`、`gcc`
-- 首次使用会拉取 `espressif/idf:v5.2.1` 镜像（约数 GB，5–15 分钟）：
+- 首次使用会拉取 `espressif/idf:v5.5.6` 镜像（约数 GB，5–15 分钟）：
 
 ```bash
-docker pull espressif/idf:v5.2.1
+docker pull espressif/idf:v5.5.6
 ```
 
 ## 推荐入口：一键三目标构建
@@ -95,7 +95,7 @@ scripts/build_all.sh -t esp32c3
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `IDF_DOCKER_IMAGE` | `espressif/idf:v5.2.1` | 使用的镜像 |
+| `IDF_DOCKER_IMAGE` | `espressif/idf:v5.5.6` | 使用的镜像 |
 | `IDF_CCACHE_DIR` | `~/.cache/birdiebot-ccache` | 宿主机 ccache 目录，容器内挂载为 `/ccache` |
 | `IDF_DOCKER_EXTRA_ARGS` | 空 | 追加给 `docker run` 的参数，例如 `--device=/dev/ttyUSB0` |
 
@@ -137,7 +137,7 @@ python3 scripts/check_partitions.py --skip-layout     # 只查 app 大小/内嵌
 - 冻结的名字/类型/偏移/大小逐项比对；ota_0 与 ota_1 等大、otadata ≥ 2 sector、
   app 分区 64K 对齐、无重叠、不越过 flash 容量；
 - `sdkconfig.defaults.<target>` 的 flash 大小/分区文件名/`PARTITION_TABLE_OFFSET=0x8000` 接线；
-- 在 `espressif/idf:v5.2.1` 容器内跑 `gen_esp32part.py` 解析 + 校验（也可在 IDF 容器内
+- 在 `espressif/idf:v5.5.6` 容器内跑 `gen_esp32part.py` 解析 + 校验（也可在 IDF 容器内
   直接跑，脚本检测 `IDF_PATH` 后走 host python）；
 - app 镜像上限：app 分区大小 − 128KiB 余量；并解析 `esp_app_desc.version` 必须非空。
 
