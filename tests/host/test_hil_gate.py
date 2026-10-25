@@ -503,6 +503,20 @@ class ExtendedModeTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 hil.validate_args(parser, args)
 
+    def test_usbip_port_dap_detection(self) -> None:
+        # `usbip attach` prints nothing on success; success is confirmed by
+        # parsing `usbip port` for the WiFi Dap CMSIS-DAP (c251:f00a).
+        sample = (
+            "Imported USB devices\n"
+            "====================\n"
+            "Port 00: <Port in Use> at High Speed(480Mbps)\n"
+            "       Keil Software, Inc. : unknown product (c251:f00a)\n"
+            "       4-1 -> usbip://192.168.7.1:3240/1-1\n")
+        self.assertTrue(hil._usbip_port_has_dap(sample))
+        self.assertTrue(hil._usbip_port_has_dap("KEIL SOFTWARE, INC."))
+        self.assertFalse(hil._usbip_port_has_dap("Imported USB devices\n"))
+        self.assertFalse(hil._usbip_port_has_dap(""))
+
     def test_soak_offline_uses_start_bin(self) -> None:
         # Regression for the device-window failure: the soak must start curves
         # through /api/curve/start-bin (CBS1), never the legacy 16 KiB JSON

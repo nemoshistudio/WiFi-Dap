@@ -2158,6 +2158,27 @@ def _openocd_argv(args: argparse.Namespace) -> List[str]:
     ]
 
 
+def _ensure_openocd_available(args: argparse.Namespace) -> None:
+    if getattr(args, "_offline", False):
+        raise ExtendedUnavailable("offline --dry-run self-test: no host USBIP")
+    if not os.path.isfile(args.openocd_path):
+        raise ExtendedUnavailable(
+            "OpenOCD binary not found: %s (build it with "
+            "scripts/build-openocd-master.sh)" % args.openocd_path)
+    if not os.path.isdir(args.openocd_scripts):
+        raise ExtendedUnavailable(
+            "OpenOCD scripts dir not found: %s" % args.openocd_scripts)
+
+
+def _ensure_root_helper(args: argparse.Namespace) -> List[str]:
+    helper = detect_root_helper(args.usbip_root_helper)
+    if helper is None:
+        raise ExtendedUnavailable(
+            "no root helper for 'usbip attach' (set HIL_ROOT_HELPER or use "
+            "--usbip-root-helper; sudo -n is not available)")
+    return helper
+
+
 def openocd_probe(args: argparse.Namespace, helper: Optional[List[str]]) -> Dict[str, Any]:
     """Run one short OpenOCD CMSIS-DAP session (init + reset halt + shutdown)."""
     if getattr(args, "_offline", False):
@@ -2208,11 +2229,32 @@ def _openocd_version(args: argparse.Namespace) -> str:
         return "unknown"
 
 
-def _usbip_attach(args: argparse.Namespace, helper: List[str]) -> Dict[str, Any]:
+def _usbip_port_has_dap(text: str) -> bool:
+    """True when `usbip port` lists the WiFi Dap CMSIS-DAP (c251:f00a)."""
+    lowered = (text or "").lower()
+    return "c251:f00a" in lowered or "keil software" in lowered
+
+
+def _usbip_attach(args: argparse.Namespace,
+                  helper: List[str]) -> Dict[str, Any]:
+    """Attach the remote DAP and verify it via the local vhci port list.
+
+    `usbip attach` prints NOTHING on success (rc=0); only failures print an
+    error.  Therefore success is confirmed with `usbip port`, which must list
+    the c251:f00a CMSIS-DAP.  This was a false-negative in the first smoke run.
+    """
     result = _run_subprocess(helper + ["usbip", "attach",
                                        "-r", args.usbip_host,
                                        "-b", args.usbip_busid], 30)
-    result["ok"] = result["rc"] == 0 and "usbip" in result["output"].lower()
+    if result["rc"] != 0:
+        result["ok"] = False
+        return result
+    port = _run_subprocess(helper + ["usbip", "port"], 20)
+    text = port.get("output", "")
+    result["port_output"] = text[-1200:]
+    result["ok"] = _usbip_port_has_dap(text)
+    if not result["ok"]:
+        result["error"] = "usbip attach rc=0 but 'usbip port' has no c251:f00a"
     return result
 
 
@@ -2225,18 +2267,19 @@ def phase_extended_usbip(gate: Gate, args: argparse.Namespace) -> None:
     """USBIP/OpenOCD session smoke: single session and two consecutive ones."""
     section: Dict[str, Any] = {"status": "skipped", "sessions": []}
     gate.metric("extended_usbip", section)
-    helper = detect_root_helper(args.usbip_root_helper)
     try:
-        result = openocd_probe(args, helper)
+        _ensure_openocd_available(args)
+        helper = _ensure_root_helper(args)
     except ExtendedUnavailable as exc:
         gate.skip("extended.usbip.environment", str(exc))
         section["reason"] = str(exc)
         return
+    version = _openocd_version(args)
     gate.check("extended.usbip.version",
-               bool(result.get("version")),
-               "OpenOCD: %s" % result.get("version"),
+               bool(version),
+               "OpenOCD: %s" % version,
                severity="info",
-               values={"openocd": result.get("version")})
+               values={"openocd": version})
     try:
         detach = _usbip_detach(args, helper)
         section["detach_before"] = detach
