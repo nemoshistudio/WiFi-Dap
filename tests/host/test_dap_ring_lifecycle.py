@@ -43,8 +43,10 @@ This suite has two parts, both hardware-free:
    fix releases the rings at the start of a valid upload
    (``dap_handle_release_ringbuffers()``) and restores them when the upload
    fails without a reboot.  The guards here check the boot/OTA memory model and
-   the handler ordering (release before the async request + task creation) so
-   the OTA endpoint cannot silently regress again.
+   the handler ordering (release before the worker is created, body received
+   before the async request copy, worker reads ``async_req`` only after EOS --
+   IDF v5.5.6 zeroes ``remaining_len`` in ``httpd_req_async_handler_begin()``)
+   so the OTA endpoint cannot silently regress again.
 """
 
 from __future__ import annotations
@@ -317,13 +319,31 @@ class TestSourceGuards(unittest.TestCase):
         self.assertIn("dap_create_rings_retry()", body)
         self.assertIn("s_data_path_detached = false", body)
 
-    def test_free_dap_ringbuf_has_two_expected_call_sites(self) -> None:
-        # 1) lazy-create retry rollback, 2) the explicit RELEASE_HANDLE branch.
+    def test_free_dap_ringbuf_has_expected_call_sites(self) -> None:
+        # Expected sites:
+        # 1) lazy-create retry rollback (dap_create_rings_retry),
+        # 2) boot-time create retry rollback in DAP_Thread -- the unified
+        #    Wi-Fi+USB-NCM image can be out of contiguous heap while NCM/Wi-Fi
+        #    finish init, so the first allocation is retried for ~2 s before
+        #    the task gives up (boot-only, before kDAPTaskHandle is published),
+        # 3) the explicit RELEASE_HANDLE branch (OTA memory pressure).
         # Any other call site would free the rings on a hot/hand-off path again.
         calls = re.findall(r"\bfree_dap_ringbuf\s*\(\s*\)", self.c)
-        self.assertEqual(len(calls), 2,
-                         "free_dap_ringbuf() must only be called from the "
-                         "lazy-create retry loop and the RELEASE_HANDLE branch")
+        self.assertEqual(len(calls), 3,
+                         "free_dap_ringbuf() must only be called from the two "
+                         "create-retry rollbacks and the RELEASE_HANDLE branch")
+        # Pin site 2 to the boot retry loop: the first rollback comes after the
+        # first malloc attempt and before the task handle is published, so it
+        # can never run on a hot (request/hand-off/reset) path.  (The second
+        # free inside DAP_Thread is the RELEASE_HANDLE branch, guarded above.)
+        match = re.search(r"void\s+DAP_Thread\s*\([^)]*\)\s*\{(?P<body>.*?)\n\}",
+                          self.c, flags=re.S)
+        self.assertIsNotNone(match, "DAP_Thread not found")
+        boot = match.group("body")
+        self.assertLess(boot.index("malloc_dap_ringbuf()"),
+                        boot.index("free_dap_ringbuf()"))
+        self.assertLess(boot.index("free_dap_ringbuf()"),
+                        boot.index("kDAPTaskHandle = xTaskGetCurrentTaskHandle()"))
 
     def test_request_path_is_gated_by_detached_flag(self) -> None:
         match = re.search(r"void\s+handle_dap_data_request\s*\([^)]*\)\s*\{"
@@ -451,6 +471,28 @@ class TestOtaRingRelease(unittest.TestCase):
         # single-session claim (s_upload_active = true), not in the error paths.
         claim = self.ota_c.index("s_upload_active = true;")
         self.assertLess(claim, release)
+
+    def test_ota_handler_receives_body_before_async_begin(self) -> None:
+        # IDF v5.5.6 regression (real device, 2026-10-25): httpd's
+        # httpd_req_async_handler_begin() zeroes the original request's
+        # remaining_len, so the body MUST be received first; the async copy
+        # only defers the response and the worker must fetch it after EOS.
+        task_create = self.ota_c.index("xTaskCreate(ota_upload_task")
+        recv = self.ota_c.index("httpd_req_recv(req")
+        async_begin = self.ota_c.index("httpd_req_async_handler_begin(req")
+        self.assertLess(task_create, recv)
+        self.assertLess(recv, async_begin)
+        eos = self.ota_c.index("xQueueSend(s_work_queue, &eos")
+        self.assertLess(async_begin, eos)
+        match = re.search(r"static void ota_upload_task\(void \*arg\)\s*\{"
+                          r"(?P<body>.*?)\n\}", self.ota_c, flags=re.S)
+        self.assertIsNotNone(match, "ota_upload_task not found")
+        worker = match.group("body")
+        self.assertLess(worker.index("xQueueReceive(s_work_queue, &item"),
+                        worker.index("async_req = s_ctx.async_req"),
+                        "worker must read async_req only after the EOS marker")
+        self.assertLess(worker.index("async_req = s_ctx.async_req"),
+                        worker.index("ota_complete_request(async_req"))
 
     def test_ota_handler_restores_rings_on_failure_paths(self) -> None:
         # async-begin failure + task-create failure + aborted body + OTA error +
