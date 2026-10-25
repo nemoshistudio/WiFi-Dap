@@ -4,10 +4,13 @@
 #include <lwip/ip4_addr.h>
 #include <esp_wifi.h>
 #include <esp_log.h>
+#include <sdkconfig.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
 #include "ssdp.h"
+#endif
 #include "wifi_configuration.h"
 #include "wifi_manager.h"
 
@@ -26,16 +29,21 @@ void ip_event_handler(void *handler_arg __attribute__((unused)),
 		printf("STA GOT IP : %s\n",
 		       ip4addr_ntoa((const ip4_addr_t *) &event->ip_info.ip));
 		event_on_connected(event);
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
+		/* Slim build (H1): SSDP advertising is disabled by default. */
 		ssdp_set_ip_gw(&event->ip_info.ip.addr, &event->ip_info.gw.addr);
+#endif
 		break;
 	}
 	case IP_EVENT_STA_LOST_IP: {
 		printf("sta lost ip\n");
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
 		ip4_addr_t ip;
 		ip4_addr_t gw;
 		IP4_ADDR_EXPAND(&ip, WIFI_DEFAULT_AP_IP);
 		IP4_ADDR_EXPAND(&gw, WIFI_DEFAULT_AP_GATEWAY);
 		ssdp_set_ip_gw(&ip.addr, &gw.addr);
+#endif
 		break;
 	}
 	case IP_EVENT_AP_STAIPASSIGNED:

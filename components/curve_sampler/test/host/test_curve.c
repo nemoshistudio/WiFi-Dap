@@ -743,7 +743,7 @@ static void test_status_json(void)
     st.served_seq = 4294967295U;
     st.last_tick_us = 4294967295U;
     st.max_groups = 8U;
-    st.max_series = 256U;
+    st.max_series = 64U;
     st.max_series_per_group = 64U;
     st.expr_pool_max = 2048U;
     st.expr_pool_used = 2047U;
@@ -757,7 +757,7 @@ static void test_status_json(void)
     CHECK(len < (int)sizeof(buf));
     CHECK(strstr(buf, "\"trigger\":\"periodic\"") != NULL);
     CHECK(strstr(buf, "\"max_groups\":8") != NULL);
-    CHECK(strstr(buf, "\"max_series\":256") != NULL);
+    CHECK(strstr(buf, "\"max_series\":64") != NULL);
     CHECK(strstr(buf, "\"max_series_per_group\":64") != NULL);
     CHECK(strstr(buf, "\"expr_pool_max\":2048") != NULL);
     CHECK(strstr(buf, "\"expr_pool_used\":2047") != NULL);
@@ -1822,26 +1822,46 @@ static void test_groups_boundaries(void)
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
           ESP_ERR_INVALID_ARG);
 
-    /* Contract maximum: 4 groups x 64 series = 256 total series. */
+    /* Contract maximum (slim build C4): 2 groups x 32 series = 64 total series. */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
                                               "\"halt\":true,\"groups\":[");
-    for (int g = 0; g < 4; g++) {
+    for (int g = 0; g < 2; g++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "%s{\"series\":[",
                                 (g == 0) ? "" : ",");
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < 32; i++) {
+            build_addr_series(json, sizeof(json), &pos, i, 1U,
+                              536870912U + (uint32_t)(g * 32 + i));
+        }
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
+    }
+    (void)snprintf(json + pos, sizeof(json) - pos, "]}");
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
+    CHECK(cfg.group_count == 2U);
+    CHECK(cfg.series_count == 64U);
+    CHECK(cfg.sample_bytes == 32U);
+    CHECK(cfg.groups[1].series_first == 32U);
+    CHECK(cfg.groups[1].series_count == 32U);
+    CHECK(cfg.pool_used == 64U);
+
+    /* 65 series total across groups rejected (slim total cap = 64): 33 + 32
+     * stays under the per-group cap (64) but exceeds CURVE_MAX_SERIES. */
+    pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
+                                              "\"halt\":true,\"groups\":[");
+    for (int g = 0; g < 2; g++) {
+        int count = (g == 0) ? 33 : 32;
+
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "%s{\"series\":[",
+                                (g == 0) ? "" : ",");
+        for (int i = 0; i < count; i++) {
             build_addr_series(json, sizeof(json), &pos, i, 1U,
                               536870912U + (uint32_t)(g * 64 + i));
         }
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
     }
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
-    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.group_count == 4U);
-    CHECK(cfg.series_count == 256U);
-    CHECK(cfg.sample_bytes == 64U);
-    CHECK(cfg.groups[3].series_first == 192U);
-    CHECK(cfg.groups[3].series_count == 64U);
-    CHECK(cfg.pool_used == 256U);
+    CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(strstr(err, "series") != NULL);
 
     /* One group with 32 x size 8 = the 256 B payload cap. */
     pos = (size_t)snprintf(json, sizeof(json), "{\"interval_us\":20000,"
@@ -2024,20 +2044,27 @@ static void test_expr_pool_limit(void)
     char err[96];
     size_t pos = (size_t)snprintf(json, sizeof(json),
                                   "{\"interval_us\":20000,\"halt\":true,"
-                                  "\"groups\":[");
-    /* 5 groups x 64 series x depth-8 compact expression (8 nodes each) =
-     * 2560 unique nodes > CURVE_EXPR_POOL_MAX (2048).  The base address is
-     * unique per series so DAG dedup cannot collapse the chains. */
-    for (int g = 0; g < 5; g++) {
+                                  "\"series\":[");
+    /* Slim series cap is 64 (C4), so reach the expression pool limit through
+     * loclist variants: 64 series x 2 variants x depth-8 compact expression
+     * (8 nodes each) = 1024 unique nodes > CURVE_EXPR_POOL_MAX.  The base
+     * address is unique per expression so DAG dedup cannot collapse chains. */
+    for (int s = 0; s < (int)CURVE_MAX_SERIES; s++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
-                                "%s{\"series\":[", (g == 0) ? "" : ",");
-        for (int i = 0; i < 64; i++) {
-            unsigned base = 0x20000000U + (unsigned)(g * 64 + i) * 4U;
+                                "%s{\"size\":1,\"variants\":[",
+                                (s == 0) ? "" : ",");
+        for (int v = 0; v < 2; v++) {
+            unsigned base = 0x20000000U + (unsigned)(s * 2 + v) * 0x100U;
+
             pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
-                                    "%s{\"expr_s\":\"A%08X+00000001+00000001"
+                                    "%s{\"pc_low\":%u,\"pc_high\":%u,"
+                                    "\"expr_s\":\"A%08X+00000001+00000001"
                                     "+00000001+00000001+00000001+00000001"
-                                    "+00000001\",\"size\":1}",
-                                    (i == 0) ? "" : ",", base);
+                                    "+00000001\"}",
+                                    (v == 0) ? "" : ",",
+                                    134348800U + (unsigned)(s * 2 + v) * 16U,
+                                    134348816U + (unsigned)(s * 2 + v) * 16U,
+                                    base);
         }
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos, "]}");
     }
@@ -2054,17 +2081,18 @@ static void test_expr_dag_dedup(void)
     char err[128];
     size_t pos;
 
-    /* Object watch: 256 fields sharing one root pointer chain, split into
-     * groups of 64 members (Web/object-watch layout).  Without DAG dedup this
-     * needs 1 + 256*2 nodes; dedup keeps the shared prefix. */
+    /* Object watch: 64 fields (slim C4 series cap) sharing one root pointer
+     * chain, split into 2 groups of 32 members (Web/object-watch layout).
+     * Without DAG dedup this needs 1 + 64*2 nodes; dedup keeps the shared
+     * prefix. */
     pos = (size_t)snprintf(json, sizeof(json),
                            "{\"interval_us\":20000,\"halt\":true,\"groups\":[");
-    for (int g = 0; g < 4; g++) {
-        int count = 64;
+    for (int g = 0; g < 2; g++) {
+        int count = 32;
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                 "%s{\"series\":[", (g == 0) ? "" : ",");
         for (int i = 0; i < count; i++) {
-            unsigned field_off = (unsigned)(g * 64 + i) * 4U;
+            unsigned field_off = (unsigned)(g * 32 + i) * 4U;
 
             pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                     "%s{\"expr_s\":\"D%08XD00000000A20000000\","
@@ -2075,10 +2103,10 @@ static void test_expr_dag_dedup(void)
     }
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.series_count == 256U);
+    CHECK(cfg.series_count == 64U);
     /* A(addr) + D(offset 0) shared once, one D per field. */
-    CHECK(cfg.pool_used <= 2U + 256U);
-    CHECK(cfg.pool_used >= 256U);
+    CHECK(cfg.pool_used <= 2U + 64U);
+    CHECK(cfg.pool_used >= 64U);
 
     /* Identical sub-trees fully collapse: 64 identical reg expressions. */
     {
@@ -2450,8 +2478,8 @@ static void binw_expr(binw_t *w, const char *text)
     binw_bytes(w, text, len);
 }
 
-/** Build a 4-group x 64-series CBS1 body (256 series, 4 B each). */
-static size_t build_cbs1_256(uint8_t *buf, size_t cap)
+/** Build a slim maximum CBS1 body: 2 groups x 32 series (64 series, 4 B each). */
+static size_t build_cbs1_max(uint8_t *buf, size_t cap)
 {
     binw_t w = {.buf = buf, .len = 0U, .cap = cap};
 
@@ -2469,14 +2497,14 @@ static size_t build_cbs1_256(uint8_t *buf, size_t cap)
     binw_u8(&w, 0U);  /* cond_mode */
     binw_u8(&w, 0U);  /* cond_flags */
     binw_u8(&w, 0U);  /* snapshot_after */
-    binw_u8(&w, 4U);  /* group_count */
+    binw_u8(&w, 2U);  /* group_count */
     binw_u16(&w, 0U); /* reserved */
-    for (int g = 0; g < 4; g++) {
+    for (int g = 0; g < 2; g++) {
         binw_u8(&w, 1U);  /* weight */
-        binw_u8(&w, 64U); /* series_count */
+        binw_u8(&w, 32U); /* series_count */
         binw_u16(&w, 0U); /* reserved */
-        for (int i = 0; i < 64; i++) {
-            unsigned index = (unsigned)(g * 64 + i);
+        for (int i = 0; i < 32; i++) {
+            unsigned index = (unsigned)(g * 32 + i);
             char expr[12];
             uint8_t every = ((index % 2U) == 0U) ? 1U : 2U;
 
@@ -2494,30 +2522,30 @@ static size_t build_cbs1_256(uint8_t *buf, size_t cap)
     return w.len;
 }
 
-static void test_bin_parse_256(void)
+static void test_bin_parse_max(void)
 {
     static uint8_t body[CURVE_BIN_BODY_MAX];
     static curve_config_t cfg;
     char err[128];
-    size_t len = build_cbs1_256(body, sizeof(body));
+    size_t len = build_cbs1_max(body, sizeof(body));
 
     CHECK(len > 0U);
     CHECK(len < (size_t)CURVE_BIN_BODY_MAX);
     CHECK(curve_bin_parse_mem(body, len, &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.group_count == 4U);
-    CHECK(cfg.series_count == 256U);
-    CHECK(cfg.sample_bytes == 256U);
-    CHECK(cfg.pool_used == 256U); /* one unique address node per series */
+    CHECK(cfg.group_count == 2U);
+    CHECK(cfg.series_count == 64U);
+    CHECK(cfg.sample_bytes == 128U); /* 2 groups x 32 series x 4 B */
+    CHECK(cfg.pool_used == 64U); /* one unique address node per series */
     CHECK(cfg.series[0].sample_every == 1U);
     CHECK(cfg.series[1].sample_every == 2U);
-    CHECK(cfg.series[255].sample_every == 2U);
+    CHECK(cfg.series[63].sample_every == 2U);
     CHECK(cfg.interval_us == 20000U);
     CHECK(cfg.halt);
     CHECK(cfg.want_pc);
     CHECK(cfg.needs_regs == false);
-    CHECK(cfg.groups[1].series_first == 64U);
-    CHECK(cfg.groups[1].series_count == 64U);
-    CHECK(cfg.schedule_len == 4U);
+    CHECK(cfg.groups[1].series_first == 32U);
+    CHECK(cfg.groups[1].series_count == 32U);
+    CHECK(cfg.schedule_len == 2U);
 }
 
 static void test_bin_parse_errors(void)
@@ -2525,7 +2553,7 @@ static void test_bin_parse_errors(void)
     static uint8_t body[CURVE_BIN_BODY_MAX];
     static curve_config_t cfg;
     char err[128];
-    size_t len = build_cbs1_256(body, sizeof(body));
+    size_t len = build_cbs1_max(body, sizeof(body));
 
     /* Bad magic. */
     {
@@ -2552,8 +2580,9 @@ static void test_bin_parse_errors(void)
     }
     /* group_count = 0. */
     {
-        /* group_count is the byte right before the trailing reserved u16. */
-        uint8_t *group_count = body + len - (4U * (4U + 64U * 23U)) - 3U;
+        /* group_count is the byte right before the trailing reserved u16.
+         * Slim body layout: 2 groups x (4 B group header + 32 series x 23 B). */
+        uint8_t *group_count = body + len - (2U * (4U + 32U * 23U)) - 3U;
         uint8_t saved;
 
         /* Rebuild to locate it robustly instead of relying on layout math. */
@@ -2628,15 +2657,16 @@ static void test_bin_parse_watchpoints(void)
 
 static void test_config_static_budget(void)
 {
-    /* Static single instance owned by the HTTP layer (8 groups, 256 series,
-     * 768 expr nodes, 256 variants) + 16 KiB static request body. */
-    CHECK(sizeof(curve_config_t) > 12U * 1024U);
+    /* Static single instance owned by the HTTP layer (8 groups, 64 series -
+     * slim build C4: 256 -> 64, saving 3 KiB BSS, 768 expr nodes, 256
+     * variants) + 16 KiB static request body. */
+    CHECK(sizeof(curve_config_t) > 10U * 1024U);
     CHECK(sizeof(curve_config_t) < 24U * 1024U);
     CHECK(sizeof(curve_series_t) <= 16U);
     CHECK(sizeof(curve_variant_t) <= 12U);
     CHECK(sizeof(curve_expr_t) <= 12U);
     CHECK(CURVE_JSON_BODY_MAX >= 16384U);
-    CHECK(CURVE_MAX_SERIES == 256U);
+    CHECK(CURVE_MAX_SERIES == 64U);
     CHECK(CURVE_MAX_SERIES_PER_GROUP == 64U);
     CHECK(CURVE_EXPR_POOL_MAX >= 768U);
 }
@@ -3070,8 +3100,8 @@ static void test_expr_read_cache(void)
     CHECK(g_read_count == 2);
 }
 
-/* A realistic 256-series compact v3 request must fit the HTTP body budget. */
-static void test_compact_256_series_body(void)
+/* A realistic maximum-series compact v3 request must fit the HTTP body budget. */
+static void test_compact_max_series_body(void)
 {
     static curve_config_t cfg;
     static char json[CURVE_JSON_BODY_MAX + 1U];
@@ -3080,11 +3110,11 @@ static void test_compact_256_series_body(void)
 
     pos = (size_t)snprintf(json, sizeof(json),
                            "{\"interval_us\":20000,\"halt\":true,\"groups\":[");
-    for (int g = 0; g < 4; g++) {
+    for (int g = 0; g < 2; g++) {
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                 "%s{\"series\":[", (g == 0) ? "" : ",");
-        for (int i = 0; i < 64; i++) {
-            unsigned index = (unsigned)(g * 64 + i);
+        for (int i = 0; i < 32; i++) {
+            unsigned index = (unsigned)(g * 32 + i);
 
             pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                     "%s{\"expr_s\":\"A%08X\",\"size\":4}",
@@ -3095,10 +3125,10 @@ static void test_compact_256_series_body(void)
     (void)snprintf(json + pos, sizeof(json) - pos, "]}");
     CHECK(strlen(json) < CURVE_JSON_BODY_MAX);
     CHECK(curve_config_parse(json, strlen(json), &cfg, err, sizeof(err)) == ESP_OK);
-    CHECK(cfg.group_count == 4U);
-    CHECK(cfg.series_count == 256U);
-    CHECK(cfg.sample_bytes == 256U);
-    CHECK(cfg.pool_used == 256U); /* one unique addr node per series (no dedup) */
+    CHECK(cfg.group_count == 2U);
+    CHECK(cfg.series_count == 64U);
+    CHECK(cfg.sample_bytes == 128U); /* 2 groups x 32 series x 4 B */
+    CHECK(cfg.pool_used == 64U); /* one unique addr node per series (no dedup) */
 }
 
 int main(void)
@@ -3143,11 +3173,11 @@ int main(void)
     test_ws_core_plan_push();
     test_ws_core_ack();
     test_expr_read_cache();
-    test_compact_256_series_body();
+    test_compact_max_series_body();
     test_sample_due();
     test_parse_sample_every();
     test_cvf2_series_mask();
-    test_bin_parse_256();
+    test_bin_parse_max();
     test_bin_parse_errors();
     test_bin_parse_watchpoints();
     test_condition_match();

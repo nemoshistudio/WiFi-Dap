@@ -1,3 +1,14 @@
+/*
+ * Slim build (H1, 2026-10-26): the SSDP responder is disabled by default
+ * (CONFIG_BIRDIEBOT_SSDP_ENABLE=n).  The whole implementation is kept for a
+ * full-feature restore; when the option is off this file is an empty
+ * translation unit, so wifi_manager / uri_html_base compile their SSDP call
+ * sites out as well.  See docs/feature-flags.md H1.
+ */
+#include <sdkconfig.h>
+
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
+
 #include "ssdp.h"
 
 #include <stdio.h>
@@ -370,3 +381,4 @@ int ssdp_get_schema_str(char *buf, uint32_t buf_len)
 	buf[write_size] = '\0';
 	return write_size < buf_len - 1;
 }
+#endif /* CONFIG_BIRDIEBOT_SSDP_ENABLE */

@@ -5,6 +5,12 @@ UART trace/backtrace 原型、每变量刷新率评估）见 §10–§14（2026-
 `Web --WiFi--> ESP32 --SWD--> STM32` 改为 `ESP32 --SWD--> STM32`，Web 只下发
 配置并批量接收样本，把每拍 4 次 WiFi 往返从关键路径移除。
 
+> **精简构建（slim/fw，2026-10-26，C4）**：总系列上限 `CURVE_MAX_SERIES` 由 256 降为
+> **64**（每组仍 ≤64、组数仍 ≤8、每组 payload ≤256 B 不变）；`curve_http.c` 里静态
+> `curve_config_t` 的内部 BSS 因此减少 3 KiB（引擎 per-series tick 数组再减 192 B）。
+> Web 前端同步把可选变量上限收到 64。本文 §1.1/§9/§13 中出现的 256/512 是完整功能
+> 构建的历史数值；恢复方式见 [feature-flags.md](feature-flags.md) C4。
+
 ## 1. 固件侧
 
 新增组件 `components/curve_sampler`（或等价），复用 `components/target_flash` 的

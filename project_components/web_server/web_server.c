@@ -1,6 +1,5 @@
 #include "web_server.h"
 #include "web_uri_module.h"
-#include "ssdp.h"
 
 #include <sdkconfig.h>
 
@@ -117,16 +116,22 @@ void start_webserver(void)
 	config.close_fn = web_server_on_close;
 	config.keep_alive_enable = 1;
 	config.keep_alive_count = 1;
-	/* docs/ota-local-upload.md §3.2: must be >= the 10 s OTA upload idle
-	 * timeout so a slow/silent upload is detected as a timeout (HTTP 408) and
-	 * not as a generic socket error. Also used as the per-request recv timeout
-	 * by esp_http_server. */
+	/* docs/ota-local-upload.md §3.2 (full-feature build): must be >= the 10 s
+	 * OTA upload idle timeout so a slow/silent upload is detected as a
+	 * timeout (HTTP 408) and not as a generic socket error. Also used as the
+	 * per-request recv timeout by esp_http_server for the target-flash
+	 * streaming upload, which is kept in the slim build. */
 	config.recv_wait_timeout = 10;
-	/* URI handlers: /api/target/{info,flash,status,reset,swd-clock}x2,
-	 * /api/dap/kick, /api/discover (uri_target.c) = 8 + the WEB_URI_MODULE
-	 * modules (/api, /api/ota/upload, 3x curve, /ws, "/" SPA fallback) = 7
-	 * => 15 in the default build.  The old limit of 14 would reject the last
-	 * registration (WS/SPA) now that /api/discover exists. */
+	/* URI handlers in the slim default build (docs/feature-flags.md):
+	 *   target flash (uri_target.c, CONFIG_BIRDIEBOT_TARGET_FLASH_ENABLE=y):
+	 *     /api/target/{info,flash,status,reset,swd-clock}x2 + /api/dap/kick = 7
+	 *     (/api/discover is compiled out: CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE=n)
+	 *   WEB_URI_MODULE modules: /api, 3x curve, /ws, "/" SPA fallback = 6
+	 *     (/api/ota/upload is compiled out:
+	 *      CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE=n)
+	 *   => 13.  The full-feature build adds /api/discover + /api/ota/upload
+	 *   = 15.  Keep headroom (20) so re-enabling a switched-off endpoint does
+	 *   not silently drop the last registration (WS/SPA). */
 	config.max_uri_handlers = 20;
 
 	WEB_SERVER_LOG_INTERNAL_HEAP("pre-httpd_start");

@@ -1,12 +1,15 @@
 #include "web_uri_module.h"
-#include "ssdp.h"
 
 #include <esp_http_server.h>
 #include <esp_compiler.h>
 #include <esp_log.h>
+#include <sdkconfig.h>
 #include <string.h>
 
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
+#include "ssdp.h"
 #include "memory_pool.h"
+#endif
 
 #define TAG __FILE_NAME__
 
@@ -61,6 +64,9 @@ static esp_err_t send_gzip_asset(httpd_req_t *req, const char *content_type,
 	return httpd_resp_send(req, (const char *) start, file_size);
 }
 
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
+/* Slim build (H1): SSDP/UPnP is off by default, so /SSDP.xml is not served
+ * (the request falls through to the SPA entry like any unknown path). */
 static esp_err_t ssdp_xml_handler(httpd_req_t *req)
 {
 	char *buf = memory_pool_get(portMAX_DELAY);
@@ -82,13 +88,15 @@ static esp_err_t ssdp_xml_handler(httpd_req_t *req)
 	memory_pool_put(buf);
 	return err;
 }
+#endif /* CONFIG_BIRDIEBOT_SSDP_ENABLE */
 
 /**
  * @brief GET "/" handler: serves the embedded Web UI + a couple of static
  *        companion resources (docs/protocol.md §1):
  *          /            -> index.html.gz (gzip)
  *          /ws.*        -> ws.sharedworker.js.gz (gzip)
- *          /SSDP.xml    -> SSDP device description XML
+ *          /SSDP.xml    -> SSDP device description XML (full-feature build only;
+ *                          CONFIG_BIRDIEBOT_SSDP_ENABLE, off in the slim build)
  *
  * The cheap first-word "hash" keeps /ws.* and /SSDP.xml dispatch constant time
  * on the single httpd task (same trick as the upstream C tree).
@@ -103,9 +111,11 @@ static esp_err_t html_base_get_handler(httpd_req_t *req)
 		return send_gzip_asset(req, "text/javascript",
 		                       ws_sharedworker_js_gz_start, ws_sharedworker_js_gz_end);
 	}
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
 	if (strncmp(req->uri, "/SSDP.xml", 9) == 0) {
 		return ssdp_xml_handler(req);
 	}
+#endif
 
 	/* Everything else falls back to the SPA entry page (the client-side
 	 * router handles unknown paths). */

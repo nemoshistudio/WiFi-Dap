@@ -6,6 +6,15 @@
 
 项目由 [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap)（MIT）与 [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools)（Apache-2.0 平台层）合并重构而来，升级到 **ESP-IDF 5.5.6**，并加入 Web UI 与 JSON/WebSocket 协议。完整文档见 **[docs/README.md](docs/README.md)**。
 
+> 🧪 **精简构建说明（分支 `slim/fw`，2026-10-26）**：本分支是**功能精简固件**。相对
+> 完整功能固件（tag `backup/full-features-2026-10-26`）默认关闭：浏览器本地 OTA 上传
+> 与 OTA JSON module 5（A1/A2，OTA 分区+回滚确认保留）、SSDP/UPnP（H1）、
+> `GET /api/discover`（H3）、Ozone 兼容工具（J1）；浏览器 Host/Origin 校验默认关闭
+> （M1，**安全风险**，见 [docs/security.md](docs/security.md)）；曲线系列上限
+> **256 → 64**（C4）。USBIP/DAP、Web UI 基础、Web 目标烧录、曲线、UART、WiFi、mDNS
+> 均保留。逐项开关/恢复方式/资源收益见 **[docs/feature-flags.md](docs/feature-flags.md)**。
+> 下文功能描述对应完整功能固件；精简构建可在同一代码树上按项恢复。
+
 > ⚠️ **安全默认**：Web/JSON API、WebSocket-DAP、UART TCP 桥、OTA 上传默认**均无鉴权**，且 HTTP 为明文。请仅部署在**可信局域网**，并阅读 [§9 安全默认与加固](#9-安全默认与加固)。
 
 ---

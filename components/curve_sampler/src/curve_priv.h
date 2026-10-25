@@ -24,22 +24,25 @@ extern "C" {
 #define CURVE_TAG "curve_sampler"
 
 /* ---- contract limits (docs/curve-local-sampler.md §1.1 + §9 protocol v2) - */
-/* Multi-group sampling (protocol v2): up to 8 groups, 32 series per group and
- * 256 series total, each group payload <= 256 B.  Everything is static memory
+/* Multi-group sampling (protocol v2): up to 8 groups, 64 series per group and
+ * 64 series total (slim build 2026-10-26, C4: was 256 total; Web must clamp to
+ * the same number), each group payload <= 256 B.  Everything is static memory
  * (not on a task stack): the HTTP parser owns one static curve_config_t and the
  * engine only keeps a pointer to it while a session runs.
  *
  * Actual static-memory caps (reported to the Lead, not all in the Web API):
  *   CURVE_MAX_GROUPS              8
  *   CURVE_MAX_SERIES_PER_GROUP   64 (object watch: up to 64 members/group)
- *   CURVE_MAX_SERIES            256 (total across groups; typical use is tens)
+ *   CURVE_MAX_SERIES             64 (total across groups; was 256 before the
+ *                                    slim build - cuts the static config BSS by
+ *                                    3 KiB, see docs/feature-flags.md C4)
  *   CURVE_MAX_VARIANTS_PER_SERIES 16
  *   CURVE_MAX_VARIANTS          256 (total loclist variant pool)
  *   CURVE_EXPR_POOL_MAX        2048 expression nodes (12 B each, 24 KiB).
  *     Object member paths share their prefix: the parser deduplicates identical
  *     (kind, inner, offset/reg/address) nodes, so 324 object fields typically
  *     need only a few hundred nodes instead of ~1600; 2048 still leaves headroom
- *     for 512 independent series with 3-4 node chains.
+ *     for 64 independent series with 3-4 node chains.
  *   CURVE_JSON_BODY_MAX        16384 JSON request bytes (restored target).
  *     The JSON path is a compatibility path: the body is a single heap block,
  *     which the unified NCM+WiFi image cannot always provide once the heap is
@@ -50,7 +53,11 @@ extern "C" {
  * error (groups/series limits themselves follow the contract exactly). */
 #define CURVE_MAX_GROUPS            8U
 #define CURVE_MAX_SERIES_PER_GROUP  64U
-#define CURVE_MAX_SERIES            256U
+/* Slim build (C4, 2026-10-26): 256 -> 64.  The static curve_config_t (owned by
+ * curve_http.c) shrinks by 192 * sizeof(curve_series_t) = 3 KiB of internal
+ * BSS; the engine's per-series tick counter shrinks by 192 B.  Restore together
+ * with the Web series cap (docs/feature-flags.md C4). */
+#define CURVE_MAX_SERIES            64U
 #define CURVE_MAX_VARIANTS_PER_SERIES 16U
 #define CURVE_MAX_VARIANTS          256U
 #define CURVE_EXPR_POOL_MAX         768U
@@ -589,7 +596,7 @@ typedef struct {
     uint8_t sample_every;     /* 1..CURVE_SAMPLE_EVERY_MAX ticks per sample
                                * (0 is normalized to 1 by the parsers).  Uses
                                * the former `reserved` byte, so sizeof stays 16
-                               * and the 256-series pool is still 4 KiB. */
+                               * and the slim 64-series pool is 1 KiB. */
 } curve_series_t;
 
 /* P2: optional per-group scheduling weight (weighted round-robin).  Web does

@@ -1244,3 +1244,17 @@ CONFIG_TINYUSB_TASK_STACK_SIZE=4096
 CONFIG_TINYUSB_NCM_OUT_NTB_BUFFS_COUNT=1
 CONFIG_TINYUSB_NCM_IN_NTB_BUFFS_COUNT=1
 CONFIG_TINYUSB_MODE_DMA=y
+
+#
+# Slim build feature switches (2026-10-26; see docs/feature-flags.md)
+#
+# The Kconfig defaults for these options are already n on this branch; the
+# explicit lines below pin the slim value even if a component Kconfig default
+# is ever flipped back.  Each removal is recoverable: set the option to y here
+# (and keep the component Kconfig default y) - the code is kept in the tree,
+# and tag backup/full-features-2026-10-26 is the pristine full-feature tree.
+# CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE is not set
+# CONFIG_BIRDIEBOT_OTA_ENABLE is not set
+# CONFIG_BIRDIEBOT_SSDP_ENABLE is not set
+# CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE is not set
+# CONFIG_BIRDIEBOT_WEB_HOST_GUARD is not set

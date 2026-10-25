@@ -23,6 +23,10 @@
  *                                URI modules so the "/" SPA fallback cannot
  *                                swallow it).  Read-only, blocking <= 2 s,
  *                                one query at a time (429 when busy).
+ *                                Slim build (H3, 2026-10-26): compiled out by
+ *                                default (CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE=n)
+ *                                - the Web treats it as "no discovery"; see
+ *                                docs/feature-flags.md H3.
  *
  * GET /api/target/status contract (additive diagnostics; existing fields keep
  * their meaning, HTTP stays 200):
@@ -80,10 +84,11 @@
  * bar from the XHR upload events.
  *
  * Security: internal/lab network use only.  The web login/token feature was
- * removed by project decision; the browser Host/Origin guard stays enabled.
- * During flashing the DAP engine is owned exclusively by the flash engine, so
- * USBIP / WS-DAP / elaphureLink sessions are paused (the component restores
- * them afterwards).
+ * removed by project decision; the browser Host/Origin guard is switchable
+ * (CONFIG_BIRDIEBOT_WEB_HOST_GUARD, slim build default n - see
+ * docs/security.md / docs/feature-flags.md M1).  During flashing the DAP
+ * engine is owned exclusively by the flash engine, so USBIP / WS-DAP /
+ * elaphureLink sessions are paused (the component restores them afterwards).
  */
 #include "web_host_guard.h"
 #include "web_error_json.h"
@@ -128,14 +133,18 @@
 #define TARGET_CMD_STATUS 3
 #define TARGET_CMD_RESET  4
 #define TARGET_CMD_SWD_CLOCK 5
+#if defined(CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE)
 #define TARGET_CMD_DISCOVER 6
+#endif
 
 #define TARGET_URI_INFO   "/api/target/info"
 #define TARGET_URI_FLASH  "/api/target/flash"
 #define TARGET_URI_STATUS "/api/target/status"
 #define TARGET_URI_RESET  "/api/target/reset"
 #define TARGET_URI_SWD_CLOCK "/api/target/swd-clock"
+#if defined(CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE)
 #define TARGET_URI_DISCOVER "/api/discover"
+#endif
 #define DAP_URI_KICK      "/api/dap/kick"
 
 #define TARGET_CHUNK_SIZE      4096
@@ -147,11 +156,13 @@
  * 503 instead of letting /api/target/info end in a silent SWD timeout. */
 #define TARGET_HEAP_GUARD_BYTES 4096U
 #define TARGET_UID_HEX_LEN     (2 * 12 + 1)
+#if defined(CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE)
 /* P1-19 discovery response: 8 max-length device rows (name/hostname/ip/port +
  * optional target/version, JSON-escaped) plus the envelope.  Worst case is
  * ~3.8 KiB when every string needs escaping; the formatter returns -1 and the
  * handler falls back to {"ok":true,"devices":[]} rather than truncating. */
 #define TARGET_DISCOVER_JSON_MAX 4096
+#endif
 
 /* JSON error codes (docs/protocol.md §1.1); 7 (auth) is not used any more. */
 #define TARGET_CODE_BAD_REQUEST 2
@@ -915,7 +926,10 @@ static esp_err_t dap_kick_handler(httpd_req_t *req)
 
 /* ------------------------------------------------------------------------- */
 /* GET /api/discover (P1-19 nearby devices via mDNS)                         */
+/* Slim build (H3): compiled out by default; sources kept for restore.       */
 /* ------------------------------------------------------------------------- */
+
+#if defined(CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE)
 
 /* Discovery row buffer (target_flash wt_tf_discover_json formats into it).
  * Static: the httpd task has a 4 KiB stack and mDNS results can be up to
@@ -954,6 +968,8 @@ static esp_err_t target_discover_handler(httpd_req_t *req)
 	httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 	return httpd_resp_send(req, s_discover_json, (ssize_t)len);
 }
+
+#endif /* CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE */
 
 /* ------------------------------------------------------------------------- */
 /* Registration                                                              */
@@ -1001,11 +1017,13 @@ static const httpd_uri_t dap_kick = {
 	.handler = dap_kick_handler,
 };
 
+#if defined(CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE)
 static const httpd_uri_t uri_target_discover = {
 	.uri = TARGET_URI_DISCOVER,
 	.method = HTTP_GET,
 	.handler = target_discover_handler,
 };
+#endif
 
 void uri_target_register(httpd_handle_t server)
 {
@@ -1025,7 +1043,9 @@ void uri_target_register(httpd_handle_t server)
 		{TARGET_URI_SWD_CLOCK, &uri_target_swd_clock_get},
 		{TARGET_URI_SWD_CLOCK, &uri_target_swd_clock_set},
 		{DAP_URI_KICK, &dap_kick},
+#if defined(CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE)
 		{TARGET_URI_DISCOVER, &uri_target_discover},
+#endif
 	};
 
 	for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); ++i) {
