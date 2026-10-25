@@ -473,10 +473,18 @@ void wifi_manager_init(void)
 		do_connect = 1;
 	}
 
-	wifi_api_sta_ap_static_info_t static_info;
-	err = wifi_data_get_static(&static_info);
-	if (err == ESP_OK) {
-		wifi_manager_sta_set_static_conf(&static_info);
+	/* Persisted STA static IP/DNS may only be applied when the station
+	 * interface is enabled.  Real hardware 2026-10-26: NVS wifi mode=6
+	 * (AP-only) together with a saved static-IP config made the boot hang in
+	 * esp_netif_dhcpc_stop()/set_ip_info() on the stopped STA interface and
+	 * reset in a TG0_WDT loop; NVS erase was needed to recover.  Skip the
+	 * apply in AP-only boots (and any mode without the STA bit). */
+	if ((ctx.mode & WIFI_MODE_STA) != 0) {
+		wifi_api_sta_ap_static_info_t static_info;
+		err = wifi_data_get_static(&static_info);
+		if (err == ESP_OK) {
+			wifi_manager_sta_set_static_conf(&static_info);
+		}
 	}
 
 	esp_netif_ip_info_t ip_info;
