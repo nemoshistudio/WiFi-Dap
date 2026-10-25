@@ -55,9 +55,26 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
 #
-# Board: ESP32-C5 compile-only reference wiring (components/board/Kconfig)
+# Board: ESP32-C5 reference wiring (components/board/Kconfig)
 #
 CONFIG_BIRDIEBOT_BOARD_GENERIC_C5=y
+
+#
+# Wi-Fi band mode (C5 only): 2.4 GHz + 5 GHz auto selection by the driver.
+# AUTO is NOT simultaneous dual-band; AP and STA stay on the same band. See
+# docs/esp32-c5-port.md §11 (5 GHz bring-up). The legacy 2.4 GHz-only mode is
+# selectable via CONFIG_BIRDIEBOT_WIFI_BAND_MODE_2G_ONLY.
+#
+CONFIG_BIRDIEBOT_WIFI_BAND_MODE_AUTO=y
+
+#
+# First-boot STA provisioning: empty in the committed defaults. For local
+# real-device bring-up use an *untracked* sdkconfig overlay (never commit real
+# credentials), see project_components/wifi_manager/Kconfig:
+#   CONFIG_BIRDIEBOT_WIFI_STA_PROV_SSID="..." / ..._PASSWORD="..."
+#
+CONFIG_BIRDIEBOT_WIFI_STA_PROV_SSID=""
+CONFIG_BIRDIEBOT_WIFI_STA_PROV_PASSWORD=""
 
 #
 # Single-core target: never pin the USBIP tcp_server task to core 1

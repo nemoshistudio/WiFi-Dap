@@ -214,6 +214,56 @@ static void rotation_prepare_pending(const char *ssid, const char *password, int
 /* init                                                                      */
 /* ------------------------------------------------------------------------- */
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/*
+ * ESP32-C5 has one dual-band Wi-Fi 6 radio. WIFI_BAND_MODE_AUTO means "let the
+ * driver pick 2.4 GHz or 5 GHz from the AP/SoftAP configuration" -- it is NOT
+ * simultaneous dual-band operation (AP and STA stay on the same band, see the
+ * ESP-IDF v5.5 Wi-Fi guide). The default is AUTO so a C5 station can join an
+ * existing 5 GHz network; the legacy 2.4 GHz-only mode stays selectable via
+ * Kconfig for interoperability debugging.
+ *
+ * The driver rejects esp_wifi_set_band_mode() before esp_wifi_start()
+ * (ESP_ERR_WIFI_NOT_STARTED), so this must run AFTER start -- the earlier
+ * compile-only code called it before start and silently kept the default.
+ */
+static const char *wifi_band_mode_name(wifi_band_mode_t mode)
+{
+	switch (mode) {
+	case WIFI_BAND_MODE_2G_ONLY:
+		return "2.4 GHz only";
+	case WIFI_BAND_MODE_5G_ONLY:
+		return "5 GHz only";
+	case WIFI_BAND_MODE_AUTO:
+		return "2.4 GHz + 5 GHz (auto)";
+	default:
+		return "unknown";
+	}
+}
+
+static void wifi_manager_apply_band_mode(const char *where)
+{
+#if defined(CONFIG_BIRDIEBOT_WIFI_BAND_MODE_2G_ONLY)
+	const wifi_band_mode_t want = WIFI_BAND_MODE_2G_ONLY;
+#else
+	const wifi_band_mode_t want = WIFI_BAND_MODE_AUTO;
+#endif
+	wifi_band_mode_t got = WIFI_BAND_MODE_AUTO;
+	esp_err_t band_err = esp_wifi_set_band_mode(want);
+
+	if (band_err != ESP_OK) {
+		ESP_LOGW(TAG, "Wi-Fi band mode apply failed at %s: %s", where,
+		         esp_err_to_name(band_err));
+		return;
+	}
+	if (esp_wifi_get_band_mode(&got) == ESP_OK) {
+		ESP_LOGI(TAG, "Wi-Fi band mode: %s at %s", wifi_band_mode_name(got), where);
+	} else {
+		ESP_LOGI(TAG, "Wi-Fi band mode set to %s at %s", wifi_band_mode_name(want), where);
+	}
+}
+#endif /* CONFIG_IDF_TARGET_ESP32C5 */
+
 void wifi_manager_init(void)
 {
 	esp_err_t err;
@@ -266,20 +316,6 @@ void wifi_manager_init(void)
 	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler, NULL, NULL));
-
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
-	/* ESP32-C5 is 2.4/5 GHz dual-band. This Wi-Fi-only DAP variant is
-	 * 2.4 GHz-only for now (5 GHz is a follow-up, docs/esp32-c5-port.md):
-	 * keep the existing AP/STA/credential behaviour identical to S3. */
-	{
-		esp_err_t band_err = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
-		if (band_err != ESP_OK) {
-			ESP_LOGW(TAG, "2.4GHz-only band mode not applied: %s", esp_err_to_name(band_err));
-		} else {
-			ESP_LOGI(TAG, "Wi-Fi band mode: 2.4 GHz only (ESP32-C5)");
-		}
-	}
-#endif
 
 	ctx.permanent_mode = WIFI_AP_AUTO_STA_ON;
 	err = wifi_data_get_wifi_mode(&ctx.permanent_mode);
@@ -336,6 +372,10 @@ void wifi_manager_init(void)
 	}
 
 	ESP_ERROR_CHECK(esp_wifi_start());
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* The band-mode API is only accepted once the driver is started. */
+	wifi_manager_apply_band_mode("esp_wifi_start");
+#endif
 	/* The pre-start power mode can be overridden by start/mode changes; force
 	 * no power save again now that the driver is running (debug throughput). */
 	wifi_manager_apply_no_power_save("esp_wifi_start");
@@ -1177,6 +1217,10 @@ static int set_wifi_mode(wifi_apsta_mode_e mode)
 	/* esp_wifi_set_mode() can reset the station power mode; re-apply while the
 	 * lock is still held (the helper only calls the Wi-Fi driver). */
 	wifi_manager_apply_no_power_save("esp_wifi_set_mode");
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* Keep the C5 band mode across AP/STA mode transitions as well. */
+	wifi_manager_apply_band_mode("esp_wifi_set_mode");
+#endif
 	return err;
 }
 
