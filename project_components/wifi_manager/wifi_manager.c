@@ -32,7 +32,14 @@
 
 /* contract wifi-credential-memory.md §5: 20 s per candidate, 5/10/20/30 s backoff */
 #define WIFI_CONNECT_ATTEMPT_TIMEOUT_MS 20000
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/* Band switch (2.4 GHz <-> 5 GHz) needs a full both-band scan; 10 s was too
+ * short on real hardware (the association completed right at the timeout, the
+ * failure path then raced the fresh connection with rotation/AP fallback). */
+#define WIFI_MANUAL_CONNECT_TIMEOUT_MS 20000
+#else
 #define WIFI_MANUAL_CONNECT_TIMEOUT_MS 10000
+#endif
 #define WIFI_ROTATION_SCAN_MAX_AP 24
 #define WIFI_ROTATION_CANDIDATE_MAX (BIRDIEBOT_WIFI_CRED_MAX * 2)
 
@@ -69,6 +76,13 @@ typedef struct wifi_ctx_t {
 	volatile uint8_t rotation_cancel;
 	volatile uint8_t rotation_suppressed;
 	volatile uint8_t rotation_pending; /* disconnect seen while rotation was suppressed */
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* C5 single dual-band radio: set while the 5G fallback SoftAP is running
+	 * with no STA connection.  A STA connect (manual or rotation) must suspend
+	 * the AP first; while this flag is set the rotation loop stays paused
+	 * instead of starving the AP (real-hardware AP-only deadlock, 2026-10-26). */
+	volatile uint8_t ap_fallback_active;
+#endif
 
 	TaskHandle_t delayed_stopAP_task;
 	TaskHandle_t delayed_startAP_task;
@@ -110,6 +124,12 @@ static void delayed_set_ap_start(void *arg);
 static void wifi_led_init(void);
 static void wifi_led_set_off(void);
 static void wifi_led_set_on(void);
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/* C5 single-radio AP/STA coordination (docs/esp32-c5-port.md §11.9). */
+static bool c5_ap_suspend_for_sta(const char *where);
+static void c5_ap_restore_fallback(void);
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* DAP latency: keep the Wi-Fi modem awake (docs/wifi-no-power-save.md)       */
@@ -264,6 +284,53 @@ static void wifi_manager_apply_band_mode(const char *where)
 }
 #endif /* CONFIG_IDF_TARGET_ESP32C5 */
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/* ------------------------------------------------------------------------- */
+/* C5 single-radio AP <-> STA coordination                                   */
+/*                                                                           */
+/* The ESP32-C5 has one dual-band radio.  While the 5 GHz fallback SoftAP is  */
+/* beaconing, a STA association attempt on 2.4 GHz (or a different 5 GHz      */
+/* channel) cannot complete: the driver keeps the radio on the AP channel and  */
+/* the connect times out.  Real-hardware symptom (2026-10-26): the device was */
+/* stuck AP-only, a Web/WS CONNECT to <test-ssid> failed and the rotation   */
+/* retried it endlessly against the running AP.                              */
+/*                                                                           */
+/* Policy: any STA connection attempt (manual CONNECT or the rotation task)   */
+/* suspends the SoftAP first; on success the AP stays off (smart-APSTA        */
+/* design), on failure the 5 GHz AP is restored and the rotation loop is      */
+/* paused so it cannot fight the AP for the radio again.                     */
+/* Both helpers require ctx.lock to be held.                                 */
+/* ------------------------------------------------------------------------- */
+
+/** Suspend the running SoftAP before a STA connect attempt.  @return true if
+ *  the AP was running and has been stopped. */
+static bool c5_ap_suspend_for_sta(const char *where)
+{
+	if ((ctx.mode & WIFI_MODE_AP) == 0) {
+		return false;
+	}
+	ESP_LOGI(TAG, "C5 single radio: suspending SoftAP before STA connect (%s)",
+	         where != NULL ? where : "?");
+	set_wifi_mode(WIFI_AP_STOP);
+	ctx.ap_fallback_active = 0;
+	/* Let the driver settle on the new mode before the connect/scan starts. */
+	vTaskDelay(pdMS_TO_TICKS(150));
+	return true;
+}
+
+/** Restore the 5G fallback SoftAP after a failed STA attempt and pause the
+ *  rotation loop (a manual CONNECT / Web UI attempt resumes it by suspending
+ *  the AP again). */
+static void c5_ap_restore_fallback(void)
+{
+	ESP_LOGI(TAG, "C5 single radio: restoring 5G SoftAP fallback, rotation paused");
+	set_wifi_mode(WIFI_AP_START);
+	ctx.ap_fallback_active = 1;
+	ctx.rotation_cancel = 1;
+	xEventGroupSetBits(ctx.events, WIFI_EVT_CANCEL);
+}
+#endif /* CONFIG_IDF_TARGET_ESP32C5 */
+
 void wifi_manager_init(void)
 {
 	esp_err_t err;
@@ -287,6 +354,9 @@ void wifi_manager_init(void)
 	ctx.rotation_cancel = 0;
 	ctx.rotation_suppressed = 0;
 	ctx.rotation_pending = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	ctx.ap_fallback_active = 0;
+#endif
 	ctx.delayed_stopAP_task = NULL;
 	ctx.delayed_startAP_task = NULL;
 	ctx.try_connect_count = 0;
@@ -361,6 +431,30 @@ void wifi_manager_init(void)
 			ctx.mode = WIFI_MODE_APSTA;
 		}
 	}
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* Real-hardware AP-only deadlock fix (2026-10-26): the single dual-band
+	 * radio cannot scan/associate a 2.4 GHz STA while the 5 GHz fallback AP is
+	 * beaconing.  With a saved STA credential, boot STA-only and let the AP
+	 * start later via delayed_startAP() only if the connection fails.
+	 * The table is only *peeked* here; the STA config is still applied after
+	 * esp_wifi_set_mode() below, as before.  Permanent modes that explicitly
+	 * disable the STA are respected. */
+	{
+		char initial_ssid[BIRDIEBOT_WIFI_SSID_MAX + 1];
+		char initial_password[BIRDIEBOT_WIFI_PASS_MAX + 1];
+		bool have_initial_cred =
+			(wifi_cred_mem_initial_cred(initial_ssid, initial_password) == ESP_OK);
+		if (have_initial_cred &&
+		    (ctx.permanent_mode == WIFI_AP_AUTO_STA_ON ||
+		     ctx.permanent_mode == WIFI_AP_OFF_STA_ON ||
+		     ctx.permanent_mode == WIFI_AP_STA_ON)) {
+			ctx.mode = WIFI_MODE_STA;
+			ESP_LOGI(TAG, "C5: STA-first boot (saved credential \"%s\"), 5G AP deferred",
+			         initial_ssid);
+		}
+	}
+#endif
 
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	ESP_ERROR_CHECK(esp_wifi_set_mode(ctx.mode));
@@ -725,6 +819,11 @@ static int set_sta_cred(const char *ssid, const char *password)
 static void handle_wifi_connected(void)
 {
 	ctx.is_sta_connected = 1;
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* A STA connection always wins the single radio; the fallback AP will be
+	 * stopped by delayed_set_ap_stop() ~2 s later. */
+	ctx.ap_fallback_active = 0;
+#endif
 	/* A (re)association may reset the station power mode to the IDF default;
 	 * restore WIFI_PS_NONE before any DAP traffic can use the link. */
 	wifi_manager_apply_no_power_save("STA connected");
@@ -858,6 +957,14 @@ static int rotation_execute_candidate(const wifi_cred_candidate_t *candidate)
 		return -1;
 	}
 	ctx.task = xTaskGetCurrentTaskHandle();
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* Safety net: never attempt a STA association while the fallback AP holds
+	 * the single radio.  It should have been suspended by the caller, but a
+	 * rotation attempt racing with delayed_set_ap_start() must not deadlock. */
+	if ((ctx.mode & WIFI_MODE_AP) != 0) {
+		(void)c5_ap_suspend_for_sta("rotation");
+	}
+#endif
 	/* esp_wifi_set_config is only meaningful for a disconnected station; the
 	 * previous candidate may still be connecting (20 s timeout case). */
 	esp_wifi_disconnect();
@@ -961,6 +1068,15 @@ static void rotation_task(void *arg)
 	xSemaphoreGive(ctx.lock);
 
 	while (ctx.rotation_cancel == 0 && ctx.auto_reconnect) {
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+		/* The fallback 5G AP owns the single radio: retrying the STA here
+		 * would only starve the AP (real-hardware AP-only deadlock).  A
+		 * manual CONNECT (Web UI) suspends the AP and re-arms the rotation. */
+		if (ctx.ap_fallback_active) {
+			ESP_LOGI(TAG, "C5: rotation paused while 5G AP fallback is active");
+			break;
+		}
+#endif
 		int ret = rotation_run_candidates(NULL, 0);
 
 		if (ret == 1) {
@@ -1063,6 +1179,15 @@ static void disconn_handler(void)
 	 * */
 	wifi_led_set_off();
 	handle_wifi_disconnected();
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* While the 5G AP fallback is up, rotation retries cannot reach any STA
+	 * (single radio): keep it paused.  A manual CONNECT from the AP Web UI
+	 * suspends the AP and restarts the attempt. */
+	if (ctx.ap_fallback_active) {
+		ESP_LOGI(TAG, "C5: disconnect while 5G AP fallback active, rotation stays paused");
+		return;
+	}
+#endif
 	if (ctx.auto_reconnect == 0) {
 		return;
 	}
@@ -1121,6 +1246,17 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 		return 1;
 	}
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* Real-hardware AP-only deadlock fix (2026-10-26): the single dual-band
+	 * radio cannot scan/associate the STA band while the 5G fallback AP is
+	 * beaconing.  Suspend the AP first; on failure restore it and keep the
+	 * rotation paused instead of retrying against the AP forever. */
+	bool ap_was_running = c5_ap_suspend_for_sta("manual CONNECT");
+	if (!(ctx.mode & WIFI_MODE_STA)) {
+		set_wifi_mode(WIFI_STA_START);
+	}
+#endif
+
 	ctx.auto_reconnect = 1;
 	wifi_cred_mem_clear_failures();
 	esp_wifi_disconnect();
@@ -1131,7 +1267,14 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 		ctx.task = xTaskGetCurrentTaskHandle();
 		ctx.conn_event = NULL;
 		xEventGroupClearBits(ctx.events, WIFI_EVT_CONNECT_DONE);
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+		/* No hidden retries on the C5: retries after a failed connect race
+		 * with the AP fallback restore and move the AP to a random scan
+		 * channel (observed on real hardware, 2026-10-26). */
+		err = wifi_event_trigger_connect(0, try_connect_done, NULL);
+#else
 		err = wifi_event_trigger_connect(2, try_connect_done, NULL);
+#endif
 		if (err == 0) {
 			bits = xEventGroupWaitBits(ctx.events, WIFI_EVT_CONNECT_DONE,
 			                           pdTRUE, pdFALSE,
@@ -1145,9 +1288,35 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 	ctx.rotation_suppressed = 0;
 	ctx.rotation_pending = 0;
 
+	if (ret != 0 && ctx.is_sta_connected) {
+		/* The association completed just after the wait timed out: do not
+		 * report a failure or restart the rotation/AP fallback, the DHCP/IP
+		 * event is still on its way. */
+		ESP_LOGW(TAG, "connect to \"%s\": association completed after timeout", ssid);
+		handle_wifi_connected();
+		return 0;
+	}
 	if (ret != 0) {
-		ESP_LOGW(TAG, "connect to \"%s\" failed, resuming rotation", ssid);
 		ctx.is_sta_connected = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+		if (ap_was_running) {
+			/* The user was on the AP Web UI (single radio): bring the 5G AP
+			 * back so the page/Web UI returns, and keep the rotation paused
+			 * while the AP owns the radio.  The CONNECT response carries the
+			 * real failure code to the caller (if the socket survived). */
+			ESP_LOGW(TAG, "connect to \"%s\" failed; restoring 5G AP fallback", ssid);
+			if (xSemaphoreTake(ctx.lock, pdMS_TO_TICKS(2000)) == pdTRUE) {
+				/* A pending esp_wifi_connect()/retry would keep scanning and
+				 * move the restored AP to a random channel: stop it first. */
+				esp_wifi_disconnect();
+				vTaskDelay(pdMS_TO_TICKS(150));
+				c5_ap_restore_fallback();
+				xSemaphoreGive(ctx.lock);
+			}
+			return 1;
+		}
+#endif
+		ESP_LOGW(TAG, "connect to \"%s\" failed, resuming rotation", ssid);
 		if (ctx.auto_reconnect) {
 			disconn_handler();
 		}
@@ -1286,6 +1455,10 @@ static void delayed_set_ap_stop(void *arg)
 	if (ret == 0) {
 		set_wifi_mode(WIFI_AP_STOP);
 		ctx.try_connect_count = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+		/* STA owns the radio: the AP fallback is no longer active. */
+		ctx.ap_fallback_active = 0;
+#endif
 	}
 
 	ctx.delayed_stopAP_task = NULL;
@@ -1311,6 +1484,17 @@ static void delayed_set_ap_start(void *arg)
 	if (ret == 0 && ctx.permanent_mode == WIFI_AP_AUTO_STA_ON) {
 		set_wifi_mode(WIFI_AP_START);
 		ctx.try_connect_count = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+		/* C5 single radio: the 5G AP is the only management path now.  Pause
+		 * the rotation retry loop, otherwise it keeps trying to associate the
+		 * STA on the same radio and the AP starves (AP-only deadlock). */
+		if (!ctx.is_sta_connected) {
+			ctx.ap_fallback_active = 1;
+			ctx.rotation_cancel = 1;
+			xEventGroupSetBits(ctx.events, WIFI_EVT_CANCEL);
+			ESP_LOGI(TAG, "C5: 5G AP fallback active, rotation paused");
+		}
+#endif
 	}
 
 	ctx.delayed_startAP_task = NULL;
