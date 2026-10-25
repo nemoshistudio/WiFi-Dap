@@ -69,7 +69,8 @@ typedef enum {
 #else
 #define CURVE_TASK_CORE 0
 #endif
-#define CURVE_TASK_STACK 8192U
+#define CURVE_TASK_STACK_MAX 8192U
+#define CURVE_TASK_STACK_MIN 4096U
 #define CURVE_TASK_PRIO  4 /* below httpd (5) / DAP (16): preemption is safe */
 
 static struct {
@@ -77,6 +78,7 @@ static struct {
     SemaphoreHandle_t done_sem;  /* command completed (bring-up/selftest)   */
     SemaphoreHandle_t idle_sem;  /* worker back to idle                     */
     TaskHandle_t task;
+    uint32_t task_stack;         /* actual worker stack bytes (adaptive) */
     esp_timer_handle_t tick_timer;
 
     volatile curve_cmd_t cmd;
@@ -2511,17 +2513,32 @@ esp_err_t curve_engine_init(void)
         ESP_LOGE(CURVE_TAG, "engine init: esp_timer_create failed");
         return ESP_FAIL;
     }
-    created = xTaskCreatePinnedToCore(curve_worker_task, "curve_sampler",
-                                      CURVE_TASK_STACK, NULL, CURVE_TASK_PRIO,
-                                      &s_engine.task, CURVE_TASK_CORE);
+    /* Unified NCM+WiFi firmware can be short of one 8 KiB contiguous block
+     * after the DAP/HTTP stacks are up.  Try decreasing stacks instead of
+     * failing the whole sampler; the actual size is reported in the boot log. */
+    uint32_t stack_bytes = CURVE_TASK_STACK_MAX;
+    created = pdFAIL;
+    while (stack_bytes >= CURVE_TASK_STACK_MIN) {
+        created = xTaskCreatePinnedToCore(curve_worker_task, "curve_sampler",
+                                          stack_bytes, NULL, CURVE_TASK_PRIO,
+                                          &s_engine.task, CURVE_TASK_CORE);
+        if (created == pdPASS) {
+            s_engine.task_stack = stack_bytes;
+            break;
+        }
+        ESP_LOGW(CURVE_TAG, "engine init: %u B worker stack unavailable; retrying",
+                 (unsigned)stack_bytes);
+        stack_bytes -= 1024U;
+    }
     if (created != pdPASS) {
-        ESP_LOGE(CURVE_TAG, "engine init: worker task creation failed");
+        ESP_LOGE(CURVE_TAG, "engine init: worker task creation failed (no stack in %u..%u B)",
+                 (unsigned)CURVE_TASK_STACK_MIN, (unsigned)CURVE_TASK_STACK_MAX);
         s_engine.task = NULL;
         return ESP_FAIL;
     }
     s_inited = true;
     ESP_LOGI(CURVE_TAG, "sampler engine initialized (worker core %d, %u B stack)",
-             CURVE_TASK_CORE, (unsigned)CURVE_TASK_STACK);
+             CURVE_TASK_CORE, (unsigned)s_engine.task_stack);
     return ESP_OK;
 }
 
