@@ -30,3 +30,6 @@ const char birdiebot_board_name[] = BIRDIEBOT_BOARD_NAME;
 #if defined(CONFIG_IDF_TARGET_ESP32) && (BIRDIEBOT_BOARD_TARGET_ID != 1)
 #warning "birdiebot_board: selected board does not match IDF target esp32 (check 'WiFi Dap board configuration -> Target board')"
 #endif
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && (BIRDIEBOT_BOARD_TARGET_ID != 4)
+#warning "birdiebot_board: selected board does not match IDF target esp32c5 (check 'WiFi Dap board configuration -> Target board')"
+#endif

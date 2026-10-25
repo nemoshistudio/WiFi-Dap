@@ -5,6 +5,7 @@ menu "WiFi Dap board configuration"
         default BIRDIEBOT_BOARD_ZXR_DAP_S3 if IDF_TARGET_ESP32S3
         default BIRDIEBOT_BOARD_GENERIC_C3 if IDF_TARGET_ESP32C3
         default BIRDIEBOT_BOARD_GENERIC_ESP32 if IDF_TARGET_ESP32
+        default BIRDIEBOT_BOARD_GENERIC_C5 if IDF_TARGET_ESP32C5
         help
             Board pin map used by the CMSIS-DAP layer (components/DAP),
             the UART TCP bridge and the status LEDs.
@@ -48,6 +49,17 @@ menu "WiFi Dap board configuration"
                 SWCLK=14 SWDIO=13 TDO=19 TDI=18 nTRST=25 nRESET=26,
                 UART2 bridge TX=23 RX=22, no status LEDs.
                 Compile-only in this project (no hardware validation).
+
+        config BIRDIEBOT_BOARD_GENERIC_C5
+            bool "BOARD_GENERIC_C5 (compile-only, ESP32-C5)"
+            depends on IDF_TARGET_ESP32C5
+            help
+                Compile-only ESP32-C5 reference wiring (no C5 hardware
+                validation in this branch; see docs/esp32-c5-port.md):
+                SWCLK=6 SWDIO=7 (SPI2 FSPICLK/FSPID direct IO_MUX),
+                TDO=8 TDI=9 nTRST=3 nRESET=10,
+                UART1 bridge TX=23 RX=24, no status LEDs.
+                Wi-Fi-only variant: ESP32-C5 has no USB-OTG/NCM.
 
     endchoice
 

@@ -58,6 +58,8 @@
 #  include "../boards/board_generic_c3.h"
 #elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_ESP32)
 #  include "../boards/board_generic_esp32.h"
+#elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_C5)
+#  include "../boards/board_generic_c5.h"
 #else
 /*
  * CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3 (Kconfig default) or no sdkconfig.h at

@@ -41,6 +41,7 @@ BOARDS = {
     "GENERIC_S3": "BOARD_GENERIC_S3",
     "GENERIC_C3": "BOARD_GENERIC_C3",
     "GENERIC_ESP32": "BOARD_GENERIC_ESP32",
+    "GENERIC_C5": "BOARD_GENERIC_C5",
 }
 
 # Expected board identity values (docs/board-pins.md §3/§4).
@@ -49,6 +50,7 @@ IDENTITY = {
     "GENERIC_S3": dict(id="generic_s3", target="esp32s3", target_id=3),
     "GENERIC_C3": dict(id="generic_c3", target="esp32c3", target_id=2),
     "GENERIC_ESP32": dict(id="generic_esp32", target="esp32", target_id=1),
+    "GENERIC_C5": dict(id="generic_c5", target="esp32c5", target_id=4),
 }
 
 ERRORS: list[str] = []
@@ -233,7 +235,7 @@ def check_project_defaults(board: str = "ZXR_DAP_S3") -> None:
     macros = gcc_macros(board)
     for macro, want in (("BIRDIEBOT_UART_BRIDGE_PORT", "1346"),
                         ("UART_BRIDGE_BAUDRATE", "115200"),
-                        ("BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ", "1000000")):
+                        ("BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ", "2000000")):
         got = macros.get(macro)
         if got != want:
             fail(f"{macro}={got} expected {want} (docs/board-pins.md §5)")

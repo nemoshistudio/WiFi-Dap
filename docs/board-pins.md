@@ -25,6 +25,7 @@ idf.py menuconfig
             ( ) BOARD_ZXR_DAP_S3   (default, ESP32-S3 WiFi Dap)
             ( ) BOARD_GENERIC_S3
             ( ) BOARD_GENERIC_C3
+            ( ) BOARD_GENERIC_C5   (compile-only, ESP32-C5)
             ( ) BOARD_GENERIC_ESP32
 ```
 
@@ -35,13 +36,16 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | `esp32s3` | `BIRDIEBOT_BOARD_ZXR_DAP_S3` | `..._ZXR_DAP_S3` / `..._GENERIC_S3` |
 | `esp32c3` | `BIRDIEBOT_BOARD_GENERIC_C3` | `..._GENERIC_C3` |
 | `esp32` | `BIRDIEBOT_BOARD_GENERIC_ESP32` | `..._GENERIC_ESP32` |
+| `esp32c5` | `BIRDIEBOT_BOARD_GENERIC_C5` | `..._GENERIC_C5` |
 
 对应 sdkconfig 宏：`CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3=y` 等。
 `components/board/Kconfig` 里用 `depends on IDF_TARGET_*` 隐藏了与当前 target
 不匹配的选项；若在 `sdkconfig.defaults.esp32c3` 等处显式指定，请写整名
 （如 `CONFIG_BIRDIEBOT_BOARD_GENERIC_C3=y`）。
 
-> C3 / ESP32 在本项目只做**编译验收**（集成计划 §5.2），不做硬件验证。
+> C3 / ESP32 / C5 在本项目只做**编译验收**（集成计划 §5.2；C5 见
+> docs/esp32-c5-port.md），不做硬件验证。C5 板是 **Wi-Fi-only** 变体（该芯片
+> 无 USB-OTG/NCM）。
 
 ---
 
@@ -98,6 +102,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | `BOARD_ZXR_DAP_S3` | ESP32-S3 | UART1 | ✅（5/6） | ✅（4） | 默认板，WiFi Dap 实机 |
 | `BOARD_GENERIC_S3` | ESP32-S3 | UART1 | ❌ | ❌ | 上游通用 S3 接线（仅编译/参考） |
 | `BOARD_GENERIC_C3` | ESP32-C3 | UART1 | ❌ | ❌ | 仅编译 |
+| `BOARD_GENERIC_C5` | ESP32-C5 | UART1 | ❌ | ❌ | 仅编译；Wi-Fi-only（无 USB-OTG/NCM） |
 | `BOARD_GENERIC_ESP32` | ESP32 | UART2 | ❌ | ❌ | 仅编译 |
 
 板文件路径：`components/board/boards/board_<board_id>.h`；
@@ -176,6 +181,26 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 > 文件按新架构只给单线 `PIN_SWDIO_MOSI=13`，`PIN_SWDIO` 是它的别名。若实际使用
 > 双线电路，WP-101 需要复核输入采样路径（或在板文件中先定义 `PIN_SWDIO 12`）。
 
+### 4.5 `BOARD_GENERIC_C5`（ESP32-C5，仅编译）
+
+| 功能 | 宏 | 引脚 |
+|---|---|---|
+| SWCLK / TCK | `PIN_SWCLK` | GPIO6（SPI2 FSPICLK 直连） |
+| SWDIO / TMS | `PIN_SWDIO_MOSI` | GPIO7（SPI2 FSPID 直连；strapping，boot 后可用） |
+| TDO → host | `PIN_TDO` | GPIO8 |
+| host → TDI | `PIN_TDI` | GPIO9 |
+| nTRST | `PIN_nTRST` | GPIO3（C5 自身 JTAG MTDI；USB-JTAG 调试时释放） |
+| nRESET | `PIN_nRESET` | GPIO10（SPI2 FSPICS0，可作普通 GPIO） |
+| UART 桥 TX | `UART_BRIDGE_TX_PIN` | GPIO23（UART1） |
+| UART 桥 RX | `UART_BRIDGE_RX_PIN` | GPIO24（UART1） |
+| LED | — | 无：`HAS_STATUS_LEDS=0`、`HAS_WIFI_LED=0`（宏为 `_`） |
+
+> C5 引脚约束（datasheet §2.3/§2.4）：GPIO13/14 = USB Serial/JTAG（本变体只作
+> console/下载，无 USB-OTG）；GPIO15~18/20~22 = flash/PSRAM；GPIO27 = VDD_SPI
+> （QFN48）；GPIO2/3/7/25/26/27/28 为 strapping；GPIO2~5 为 C5 自身 JTAG。
+> 该板为**编译验收**接线（无 C5 硬件验证），上板前必须按实际板复核；详见
+> docs/esp32-c5-port.md。
+
 ---
 
 ## 5. 项目级默认值（与板无关）
@@ -252,7 +277,7 @@ int main(void) { return BIRDIEBOT_BOARD_TARGET_ID + BIRDIEBOT_BOARD_HAS_STATUS_L
 EOF
 
 # 四块板逐一语法检查（-D 模拟 Kconfig 选择）
-for b in ZXR_DAP_S3 GENERIC_S3 GENERIC_C3 GENERIC_ESP32; do
+for b in ZXR_DAP_S3 GENERIC_S3 GENERIC_C3 GENERIC_C5 GENERIC_ESP32; do
   gcc -fsyntax-only -x c -DCONFIG_BIRDIEBOT_BOARD_$b \
       -I components/board/include - <<'EOF'
 #include "birdiebot_board.h"
