@@ -503,6 +503,36 @@ class ExtendedModeTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 hil.validate_args(parser, args)
 
+    def test_soak_offline_uses_start_bin(self) -> None:
+        # Regression for the device-window failure: the soak must start curves
+        # through /api/curve/start-bin (CBS1), never the legacy 16 KiB JSON
+        # body (which the low-heap unified firmware rejects with 503).
+        args = self._parse(["--soak-seconds", "35"])
+        args.host = "dry-run"
+        args.port = 0
+        args.duration = 0.3
+        args.one_series_duration = 0.15
+        args.poll_interval = 0.02
+        args.playwright = "off"
+        args.verbose = False
+        args.allow_legacy_firmware = False
+        args.allow_dap_session = False
+        args.soak_seconds = 2
+        args.soak_interval = 0.5
+        args.soak_poll = 0.1
+        report = hil.run_gate(args, transport=hil.FakeDevice())
+        self.assertEqual(report["exit_code"], hil.EXIT_PASS,
+                         msg=json.dumps(report["warnings"]))
+        soak = report["extended"]["extended_soak"]
+        self.assertEqual(soak["status"], "pass")
+        self.assertEqual(soak["failures"], 0)
+        self.assertEqual(soak["start_failures"], 0)
+        self.assertEqual(soak["start_methods"], ["start-bin"])
+        self.assertGreaterEqual(soak["iterations"], 1)
+        self.assertGreater(soak["frames_total"], 0)
+        self.assertIsNotNone(soak["heap_free_start"])
+        self.assertFalse(soak["aborted_early"])
+
     def test_swd_clock_matrix_disabled_by_default(self) -> None:
         report = self._run_offline([])
         self.assertFalse(report["modes"]["swd_clock_matrix"])

@@ -824,8 +824,15 @@ def phase_target_status_post(gate: Gate, http: HttpTransport,
         gate.metric("heap_delta_bytes", delta)
 
 
-def _cbs1_body(args: argparse.Namespace, count: int) -> bytes:
-    """Build a CBS1 streaming start body (no 16 KiB JSON body on unified builds)."""
+def _cbs1_body(args: argparse.Namespace, count: int,
+               interval_us: Optional[int] = None) -> bytes:
+    """Build a CBS1 streaming start body (no 16 KiB JSON body on unified builds).
+
+    ``interval_us`` overrides ``args.interval_us`` for callers (the soak uses
+    its own interval) without mutating the argparse namespace.
+    """
+    effective_interval = (args.interval_us if interval_us is None
+                          else int(interval_us))
     groups = []
     left = count
     while left > 0:
@@ -834,7 +841,7 @@ def _cbs1_body(args: argparse.Namespace, count: int) -> bytes:
         left -= take
     body = bytearray(b"CBS1")
     body += struct.pack("<BBBB", 1, 0x03, 0, 0)  # version, halt|want_pc, periodic, watch count
-    body += struct.pack("<IIII", args.interval_us, 0, 0, 0)
+    body += struct.pack("<IIII", effective_interval, 0, 0, 0)
     body += struct.pack("<BBBB", 0, 0, 0, 0)
     body += struct.pack("<BBH", 0, len(groups), 0)
     index = 0
@@ -2871,43 +2878,97 @@ def phase_extended_ota(gate: Gate, args: argparse.Namespace) -> None:
         section["status"] = "pass"
 
 
+def _soak_start_curve(http: HttpTransport, args: argparse.Namespace,
+                      count: int) -> Tuple[Dict[str, Any], Response, str]:
+    """Start one soak curve session using the same wire path as the gate.
+
+    The unified NCM+WiFi firmware cannot allocate the legacy 16 KiB JSON body
+    on a low-heap boot, so `POST /api/curve/start-bin` (CBS1) is tried first -
+    exactly like the read-only gate (`start_curve()`); the legacy JSON endpoint
+    is only used when start-bin is unavailable (old firmware).
+    """
+    binary = _cbs1_body(args, count, interval_us=args.soak_interval_us)
+    response = http.request_bytes(
+        "POST", CURVE_START_BIN_PATH, data=binary,
+        headers={"Content-Type": "application/octet-stream"},
+        timeout=args.timeout, retries=0)
+    method = "start-bin"
+    if response.status in (404, 405, 501):
+        response = http.request("POST", CURVE_START_PATH,
+                                body=_series_body(args, count),
+                                timeout=args.timeout, retries=0)
+        method = "json"
+    try:
+        data = response.json()
+    except ProtocolError:
+        data = {}
+    return data, response, method
+
+
 def phase_extended_soak(gate: Gate, args: argparse.Namespace,
                         http: HttpTransport) -> None:
-    """Opt-in stability soak: repeated curve sessions + heap/latency sampling."""
+    """Opt-in stability soak: repeated curve sessions + heap/latency sampling.
+
+    Each cycle starts a 1..4-series curve session via `curve/start-bin` (CBS1),
+    polls `curve/status` for `--soak-interval` seconds, stops it and samples
+    `target/status` heap.  Three consecutive start failures abort the soak
+    early (a broken start path must not spin for 10 minutes).  The curve is
+    stopped in every cycle and again by `extended_cleanup()`; no target Flash
+    is touched.
+    """
     section: Dict[str, Any] = {"status": "skipped", "seconds": args.soak_seconds}
     gate.metric("extended_soak", section)
     if not args.soak_seconds:
         return
     iterations = 0
     failures = 0
+    start_failures = 0
+    consecutive_start_failures = 0
+    aborted_early = False
     heaps: List[int] = []
     latencies: List[float] = []
+    frames_per_cycle: List[int] = []
+    start_methods = set()
+    start_error_samples: List[Dict[str, Any]] = []
     curve_errors = 0
     target_misses = 0
     started = time.monotonic()
     deadline = started + args.soak_seconds
     series = max(1, min(4, args.soak_series))
     gate.check("extended.soak.started", True,
-               "soak %.0f s, %.1f s per cycle, %d series"
+               "soak %.0f s, %.1f s per cycle, %d series, start-bin path"
                % (args.soak_seconds, args.soak_interval, series),
                severity="info")
     while time.monotonic() < deadline:
         iterations += 1
+        cycle_ok = True
         try:
-            start = http.request("POST", CURVE_START_PATH, body={
-                "interval_us": args.soak_interval_us,
-                "series": [{"id": index, "size": 4, "expr": {
-                    "kind": "addr",
-                    "address": args.address + index * 4}} for index in
-                    range(series)],
-                "trigger": "periodic",
-            }, timeout=args.timeout, retries=0)
-            latencies.append(start.elapsed_ms)
-            if start.status != 200:
-                failures += 1
+            data, response, method = _soak_start_curve(http, args, series)
+            start_methods.add(method)
+            latencies.append(response.elapsed_ms)
+            if response.status != 200 or data.get("ok") is not True:
+                start_failures += 1
+                consecutive_start_failures += 1
+                if len(start_error_samples) < 5:
+                    start_error_samples.append({
+                        "http": response.status,
+                        "err": data.get("err"),
+                        "method": method,
+                    })
+                section["last_error"] = (
+                    "curve start (%s): HTTP %d %r"
+                    % (method, response.status, data.get("err")))
+                if consecutive_start_failures >= 3:
+                    aborted_early = True
+                    break
+                time.sleep(min(1.0, max(0.0,
+                                        deadline - time.monotonic())))
                 continue
+            consecutive_start_failures = 0
+            # Sample window: the curve task must keep running and advancing.
             cycle_end = min(deadline, time.monotonic() + args.soak_interval)
             frames = 0
+            running_seen = False
             while time.monotonic() < cycle_end:
                 status = http.request("GET", CURVE_STATUS_PATH,
                                       timeout=args.timeout, retries=0)
@@ -2916,14 +2977,30 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
                 frames = int(status_data.get("frames") or 0)
                 curve_errors += int(status_data.get("error") or 0)
                 if status_data.get("running") is not True:
-                    failures += 1
+                    cycle_ok = False
                     break
+                running_seen = True
                 time.sleep(max(0.05, args.soak_poll))
-            stop = http.request("POST", CURVE_STOP_PATH, body={},
-                                timeout=args.timeout, retries=1)
-            latencies.append(stop.elapsed_ms)
-            if stop.status != 200:
-                failures += 1
+            frames_per_cycle.append(frames)
+            if not running_seen:
+                cycle_ok = False
+            # Stop the session and verify the sampler really stopped.
+            try:
+                stop = http.request("POST", CURVE_STOP_PATH, body={},
+                                    timeout=args.timeout, retries=1)
+                latencies.append(stop.elapsed_ms)
+                if stop.status != 200:
+                    cycle_ok = False
+                stop_status = http.request("GET", CURVE_STATUS_PATH,
+                                           timeout=args.timeout, retries=0)
+                stop_data = stop_status.json()
+                if stop_data.get("running") is not False:
+                    cycle_ok = False
+                curve_errors += int(stop_data.get("error") or 0)
+            except (DeviceUnreachable, ProtocolError) as exc:
+                cycle_ok = False
+                section["last_error"] = "curve stop: %s" % exc
+            # Heap snapshot after the session is released.
             status = http.request("GET", TARGET_STATUS_PATH,
                                   timeout=args.timeout, retries=0)
             latencies.append(status.elapsed_ms)
@@ -2931,19 +3008,19 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
             heap = integer(status_data.get("heap_free"))
             if heap is not None:
                 heaps.append(heap)
-            section.setdefault("frames_per_cycle", []).append(frames)
             if iterations % 3 == 0:
                 info = http.request("GET", TARGET_INFO_PATH,
                                     timeout=args.timeout, retries=0)
                 latencies.append(info.elapsed_ms)
                 if info.json().get("detected") is not True:
                     target_misses += 1
+                    cycle_ok = False
+            if not cycle_ok:
+                failures += 1
         except (DeviceUnreachable, ProtocolError) as exc:
             failures += 1
             section["last_error"] = str(exc)
             time.sleep(1.0)
-        except GateAbort:
-            raise
     elapsed = time.monotonic() - started
     heap_start = heaps[0] if heaps else None
     heap_end = heaps[-1] if heaps else None
@@ -2952,8 +3029,14 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
         "iterations": iterations,
         "elapsed_s": round(elapsed, 1),
         "failures": failures,
+        "start_failures": start_failures,
+        "start_error_samples": start_error_samples,
+        "start_methods": sorted(start_methods),
+        "aborted_early": aborted_early,
         "curve_errors": curve_errors,
         "target_misses": target_misses,
+        "frames_total": sum(frames_per_cycle),
+        "frames_per_cycle": frames_per_cycle,
         "heap_free_start": heap_start,
         "heap_free_end": heap_end,
         "heap_free_min": heap_min,
@@ -2963,35 +3046,42 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
         if latencies else None,
         "http_latency_max_ms": round(max(latencies), 1) if latencies else None,
     })
-    gate.require("extended.soak.iterations", iterations > 0,
-                 "soak performed no iterations")
-    gate.require("extended.soak.no_failures", failures == 0,
-                 "%d failed sample cycle(s) during soak" % failures)
-    gate.require("extended.soak.curve_errors", curve_errors == 0,
-                 "curve sampler reported %d error(s) during soak"
-                 % curve_errors)
-    gate.require("extended.soak.target_alive", target_misses == 0,
-                 "target was not detected %d time(s) during soak"
-                 % target_misses)
+    section["status"] = "pass" if (failures == 0 and curve_errors == 0
+                                   and target_misses == 0
+                                   and not aborted_early) else "fail"
+    gate.check("extended.soak.iterations", iterations > 0,
+               "soak performed no iterations")
+    gate.check("extended.soak.no_failures", failures == 0,
+               "%d failed sample cycle(s) during soak (%r), start_methods=%r"
+               % (failures, section.get("last_error"),
+                  section["start_methods"]))
+    gate.check("extended.soak.curve_errors", curve_errors == 0,
+               "curve sampler reported %d error(s) during soak"
+               % curve_errors)
+    gate.check("extended.soak.target_alive", target_misses == 0,
+               "target was not detected %d time(s) during soak"
+               % target_misses)
     if heap_min is not None:
-        gate.require("extended.soak.heap_min", heap_min >= args.heap_min_free,
-                     "heap_free dropped to %d B (threshold %d B)"
-                     % (heap_min, args.heap_min_free),
-                     values={"heap_free_min": heap_min})
-        gate.require("extended.soak.heap_no_leak",
-                     section["heap_delta"] is not None
-                     and section["heap_delta"] >= -args.heap_leak_tolerance,
-                     "heap_free changed by %r B over the soak (tolerance -%d B)"
-                     % (section["heap_delta"], args.heap_leak_tolerance))
-    section["status"] = "pass" if not failures and curve_errors == 0 \
-        and target_misses == 0 else "fail"
+        gate.check("extended.soak.heap_min", heap_min >= args.heap_min_free,
+                   "heap_free dropped to %d B (threshold %d B)"
+                   % (heap_min, args.heap_min_free),
+                   values={"heap_free_min": heap_min})
+        gate.check("extended.soak.heap_no_leak",
+                   section["heap_delta"] is not None
+                   and section["heap_delta"] >= -args.heap_leak_tolerance,
+                   "heap_free changed by %r B over the soak (tolerance -%d B)"
+                   % (section["heap_delta"], args.heap_leak_tolerance))
     gate.info("extended.soak.summary",
-              "%d cycles in %.1f s, failures=%d, heap %r..%r B, "
-              "HTTP avg=%.1f ms max=%.1f ms"
-              % (iterations, elapsed, failures, heap_min, heap_end,
+              "%d cycles (%.2f s avg) in %.1f s, failures=%d, frames=%d, "
+              "heap %r..%r B, HTTP avg=%.1f ms max=%.1f ms, methods=%r"
+              % (iterations, elapsed / iterations if iterations else 0.0,
+                 elapsed, failures, sum(frames_per_cycle), heap_min, heap_end,
                  section.get("http_latency_avg_ms") or 0.0,
-                 section.get("http_latency_max_ms") or 0.0),
-              values=section)
+                 section.get("http_latency_max_ms") or 0.0,
+                 section["start_methods"]),
+              values={"seconds": section["elapsed_s"],
+                      "failures": failures,
+                      "frames_total": sum(frames_per_cycle)})
 
 
 def phase_extended_swd_clock(gate: Gate, args: argparse.Namespace,
