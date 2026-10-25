@@ -578,6 +578,16 @@ static esp_err_t curve_handle_stop(httpd_req_t *req)
                                 "{\"ok\":false,\"err\":\"%s\"}",
                                 err_msg[0] != '\0' ? err_msg : esp_err_to_name(err));
     }
+    /* Normal manual stop: release the frames ring so the ~1.8 MB single-file
+     * Web UI can still be served from the same small NCM+WiFi heap.  Snapshot
+     * capture keeps its ring (complete/aborted) for post-trigger retrieval. */
+    {
+        curve_status_t st;
+        curve_engine_status(&st);
+        if (st.snapshot_state == CURVE_SNAPSHOT_OFF) {
+            curve_engine_release_ring();
+        }
+    }
     return curve_send_json(req, "200 OK", "{\"ok\":true,\"running\":false}");
 }
 
