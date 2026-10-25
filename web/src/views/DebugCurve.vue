@@ -1414,7 +1414,7 @@ const LEGEND_LIMIT = 24
 const VARIABLE_PAGE_SIZE = 300
 /** 搜索时首屏更小（100），让过滤结果更快上屏（debounce 150ms + 渲染 <200ms）。 */
 const SEARCH_PAGE_SIZE = 100
-/** 已选面板默认只渲染前 64 行（批量选择 256 时避免挂载数百个 Element 组件），可 Show all。 */
+/** 已选面板默认只渲染前 64 行（批量选择接近 64 上限时避免一次挂载过多 Element 组件），可 Show all。 */
 const SELECTED_RENDER_LIMIT = 64
 /** 采样统计 UI 刷新间隔（数据仍按采样率入 ring）；降低 Vue 全页 rerender 频率。 */
 const STATS_FLUSH_MS = 1000
@@ -1434,9 +1434,10 @@ const AUTO_MAX_RATE = 100
 /** Auto 自适应窗口（毫秒）。 */
 const AUTO_RATE_WINDOW_MS = 2500
 /**
- * 环形缓冲总点数：曲线窗口仅 20s；多路本地 v2（≤256 系列）下每系列 lo/hi/values
- * 三个数组的内存 = points × 16B。6000 点 @100Hz ≈ 60s（本地 50Hz ≈ 120s），
- * 既覆盖图表窗口/CSV 导出，也把 256 路内存从 ~245MB 降到 ~24MB，减少 GC 卡顿。
+ * 环形缓冲总点数：曲线窗口仅 20s；多路本地 v2（精简版 ≤64 系列）下每系列
+ * lo/hi/values 三个数组的内存 = points × 16B。6000 点 @100Hz ≈ 60s（本地 50Hz
+ * ≈ 120s），既覆盖图表窗口/CSV 导出，也把 64 路内存从 ~61MB 降到 ~6MB，减少
+ * GC 卡顿。
  */
 const MAX_POINTS = 6000
 /** 曲线窗口（秒）：X 轴显示最近 20 秒，自动滚动。 */
@@ -1542,7 +1543,7 @@ const isDebugMode = computed(() => samplingMode.value === 'debug')
 const samplingSource = ref<SamplingSource>('local')
 const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
-/** 当前来源允许的最大曲线数：设备本地随固件提升到 32，Web-DAP 仍为 24。 */
+/** 当前来源允许的最大曲线数：设备本地为精简版 64，Web-DAP 仍为 24。 */
 const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : MAX_CURVE_SERIES))
 /** 本地可采集系列（派生曲线不参与采集）。 */
 const localRateSeries = computed(() => seriesList.value.filter((item) => !item.derived))
@@ -1775,7 +1776,7 @@ const localBreakpointError = computed(() => {
 const localStartDisabled = computed(() => {
   if (seriesList.value.length === 0) return true
   if (!isLocalSource.value) return false
-  // task-55：目标刷新率分桶超出固件容量（>8 组 / >256 路）时禁止 Start（面板有明确原因）。
+  // task-55：目标刷新率分桶超出固件容量（>8 组 / >64 路）时禁止 Start（面板有明确原因）。
   if (hasRateOverrides.value && ratePlan.value.error) return true
   if (localTrigger.value === 'breakpoint') return breakpointResolution.value?.ok !== true
   if (localTrigger.value === 'watchpoint') {
@@ -1800,7 +1801,7 @@ const localGap = ref(false)
 /** 协议 v2：固件 group 数 / 当前轮转 group（status/start 回读）。 */
 const localGroupCount = ref(0)
 const localCurrentGroup = ref<number | null>(null)
-/** 本地选中的系列上限（v2 总 256；每组 32，自动切分）。 */
+/** 本地选中的系列上限（精简版 v2 总 64；每组 ≤64，自动切分）。 */
 const localSeriesLimit = CURVE_LOCAL_MAX_TOTAL_SERIES
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
 const autoRate = ref(AUTO_MAX_RATE)
@@ -3282,7 +3283,7 @@ async function startLocalSampling(): Promise<void> {
   // 不用“假设固件接受新字段”的方式伪造精确速率。
   if (!localCapabilitiesKnown.value) await refreshLocalCapabilities()
   // task-55：设置了每变量目标刷新率时走“divisor 分桶 + 组权重”；task-62 新固件
-  // 支持 sample_every 时按目标 Hz 精确下发。三条路径共用 64/组、256B/组、8 组、256 路限制。
+  // 支持 sample_every 时按目标 Hz 精确下发。三条路径共用 64/组、256B/组、8 组、64 路限制。
   if (usePreciseSampleEvery.value && preciseGroupsError.value) {
     notice.value = {type: 'error', title: preciseGroupsError.value}
     return
@@ -3420,7 +3421,7 @@ async function startLocalSampling(): Promise<void> {
   localStartFallbackReason.value = ''
   resetBacktraceState()
   let started
-  // P0-1：优先 CBS1 start-bin（256 series ≈5.9 KiB 流式、不占 16 KiB 连续堆）；旧固件
+  // P0-1：优先 CBS1 start-bin（精简版 ≤64 series 流式、不占 16 KiB 连续堆）；旧固件
   // 404/400/415/405/501 时函数内部自动回退旧 JSON start（16384 上限），结果带 transport。
   const startOnce = () => (groupSpecs.length === 1 && !hasVariants
     // 单组且无 variants：旧 root-series 语义（兼容旧固件）；多组/variants：groups 语义。
@@ -4376,7 +4377,7 @@ const unsampleableCount = computed(() => {
   return info.variables.filter((node) => !node.sampleable).length
 })
 
-/** O(1) 选中集合：替代每行线性扫 seriesList（300 行 × 256 选中）。 */
+/** O(1) 选中集合：替代每行线性扫 seriesList（300 行 × 最多 64 选中）。 */
 const selectedKeySet = computed<Set<string>>(() => new Set(seriesList.value.map((item) => item.key)))
 
 function isRowSelected(row: VariableRow): boolean {
@@ -4537,7 +4538,7 @@ function addSelectedRowsBulk(rows: Array<{name: string; key: string; node: Varia
     created.push(series)
   }
   if (created.length > 0) {
-    // 一次性替换数组：避免批量选择时 256 次 reactive 更新/重绘。
+    // 一次性替换数组：避免批量选择时逐项 reactive 更新/重绘。
     seriesList.value = [...seriesList.value, ...created]
     // 大批量选择时先折叠已选面板，避免首次挂载数百个 Element 组件阻塞交互。
     if (seriesList.value.length > SELECTED_RENDER_LIMIT) selectedCollapsed.value = true
@@ -5422,7 +5423,7 @@ function setGroupWeight(index: number, value: number): void {
   groupWeights.value = next
 }
 
-/** 容量错误（>8 组 / >256 路等）：明确拒绝，不静默丢系列。 */
+/** 容量错误（>8 组 / >64 路等）：明确拒绝，不静默丢系列。 */
 const ratePlanErrorText = computed(() => {
   if (!hasAnyRatePlan.value) return ''
   const plan = ratePlan.value
@@ -7505,11 +7506,11 @@ function drawChartLocal(now = performance.now()): void {
     context.fillText(`${time.toFixed(0)}s`, x, padding.top + plotHeight + 6)
   }
 
-  // 数据曲线：共享窗口若点数超过列数则按列 min/max 降采样；A 模式 256 路时
+  // 数据曲线：共享窗口若点数超过列数则按列 min/max 降采样；A 模式大系列数时
   // 合并到 1/2~1/3 像素列（视觉仍连续），把路径段数从 ~28 万降到 ~9 万/帧。
   const useDecimation = orderCount > plotWidth * 1.5
   const columnScale = drawn.length > 192 ? 12 : drawn.length > 96 ? 3 : 1
-  // A 模式 256 路：隔点采样（min/max 包络近似），把每帧变换/路径成本再减半。
+  // A 模式大系列数：隔点采样（min/max 包络近似），把每帧变换/路径成本再减半。
   const orderStep = drawn.length > 192 ? 3 : 1
   const plotColumns = Math.max(1, Math.ceil(plotWidth / columnScale))
   if (columnMin.length < plotColumns) {
@@ -7518,7 +7519,7 @@ function drawChartLocal(now = performance.now()): void {
   }
   context.lineWidth = 1.5
   const yMode = yAxisMode.value
-  // 同色曲线合批：最多 24 种颜色 -> 每帧 ~24 次 stroke，而不是 256 次。
+  // 同色曲线合批：最多 24 种颜色 -> 每帧 ~24 次 stroke，而不是逐曲线 stroke。
   const byColor = new Map<string, CurveSeries[]>()
   for (const item of drawn) {
     if (!seriesValues.get(item.id)) continue

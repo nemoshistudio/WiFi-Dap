@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 1051
+const EXPECTED_TOTAL = 938
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 903
+const EXPECTED_ADDED = 790
 
 const errors = []
 const warnings = []
@@ -96,7 +96,7 @@ const ADDED_KEYS = [
     ]),
     ...keys('protocol', [
         'title', 'version', 'webVersion', 'firmwareVersion', 'buildTag', 'buildTime', 'match',
-        'mismatchTitle', 'mismatchDetail', 'mismatchLegacy', 'mismatchOtaDisabled', 'refreshHint',
+        'mismatchTitle', 'mismatchDetail', 'mismatchLegacy', 'refreshHint',
         'unknownVersion',
     ]),
     ...keys('wifi.saved', [
@@ -106,16 +106,7 @@ const ADDED_KEYS = [
         'connectFailed', 'apDefault', 'apCustom', 'apDefaultHint', 'listFull', 'evictedHint',
     ]),
     ...keys('wifi.ap', ['resetDefault', 'resetConfirm']),
-    ...keys('ota.upload', [
-        'title', 'description', 'selectFile', 'dragHint', 'fileName', 'fileSize', 'fileVersion',
-        'fileDate', 'fileInvalid', 'tooLarge', 'sha256', 'verifyingFile', 'upload', 'uploading',
-        'cancel', 'cancelConfirm', 'progress', 'speed', 'eta', 'verifying', 'ready',
-        'rebootNote', 'success', 'failed', 'aborted', 'sameVersionWarn', 'downgradeWarn',
-        'current', 'slotSize', 'slotFree', 'securityHint',
-    ]),
-    ...keys('ota.status', ['idle', 'receiving', 'verifying', 'ready', 'applying', 'error']),
     ...keys('about', ['hardwareVersion', 'manufactureDate', 'board', 'copyInfo']),
-    ...keys('system', ['reboot', 'rebooting']),
     ...keys('uart', [
         'instance', 'connectFailed', 'overflowWarning', 'binaryError', 'remoteUnsupported',
         'invalidHex', 'hexMode', 'hexdumpMode', 'highlightRx', 'highlightTx',
@@ -241,7 +232,7 @@ const ADDED_KEYS = [
         'presetEmpty', 'presetDefault', 'presetSaved', 'presetApplied', 'presetName', 'presetSave', 'presetSelect', 'presetLoad', 'presetDelete', 'watchAdd', 'watchRemove', 'watchTitle', 'derivedWhileSampling', 'derivedNeedTwo', 'derivedType', 'derivedAdd', 'derivedSub', 'diagCopyFailed', 'diagTitle', 'diagCopied', 'diagCopy', 'diagHint', 'recordNeedSampling', 'recordStarted', 'recordEmpty', 'recordDefault', 'recordSaved', 'recordSaveFailed', 'recordLimit', 'recordLoaded', 'recordLoadFailed', 'recordTitle', 'recordStart', 'recordStop', 'recordName', 'recordSave', 'recordRows', 'recordSelect', 'recordLoad', 'recordDelete', 'recordRefresh', 'playbackExit', 'playbackPause', 'playbackPlay', 'playbackSpeed', 'cursorDeltaTitle', 'cursorHint', 'cursorClear', 'ariaChart', 'groupWeight',
     ]),
     ...keys('page', ['debugCurve']),
-    // P0 Web platform (task-54): dashboard / guided flow / command palette / diagnostics
+    // P0 Web platform (task-54, slimmed 2026-10-26): dashboard / command palette / diagnostics
     ...keys('dashboard', [
         'title', 'subtitle', 'refresh', 'lastUpdated', 'dapTitle', 'wsConnection', 'wsHost',
         'dapSession', 'dapSessionUnknown', 'dapSessionAfterKick', 'dapSessionActive', 'dapSessionIdle', 'errors', 'noErrors',
@@ -250,26 +241,19 @@ const ADDED_KEYS = [
         'targetTitle', 'targetUnknown', 'targetHint', 'targetModel',
         'linkTitle', 'linkWired', 'linkWifi', 'linkUnknown', 'linkHostname', 'linkWiredHint',
         'linkWifiHint', 'linkUnknownHint', 'quickActions', 'gotoTarget', 'gotoCurve', 'gotoUart',
-        'openGuided', 'openDiagnostics', 'deviceOfflineHint', 'flashSuccess', 'flashing',
+        'openDiagnostics', 'deviceOfflineHint', 'flashSuccess', 'flashing',
 
-        'currentPhysical', 'wiredPreferred', 'wifiLinkNcmAvailable', 'linkAddress', 'wifiGateway', 'ncmState', 'ncmActive', 'ncmInactive', 'ncmNotReported', 'dhcpState', 'dhcpStateInit', 'dhcpStateStarted', 'dhcpStateStopped', 'dhcpError', 'wiredDeviceIp', 'ncmHintOk', 'ncmHintReplug', 'ncmHintUnavailable', 'healthTitle', 'healthOk', 'healthWarn', 'healthError', 'healthUnknown', 'healthRefresh', 'healthRefreshed', 'healthRefreshFailed', 'healthOfflineHint', 'rttTitle', 'rttValue', 'rttStats', 'rttNone', 'rttHint', 'statusEndpoint', 'statusSupported', 'statusUnsupported', 'statusRequestFailed', 'dapLatency', 'dapLatencyValue', 'swdActual', 'swdActualValue', 'heapFreeShort', 'heapLargestShort', 'lastUpdate', 'unknownField', 'lastSeen', 'wifiQualityExcellent', 'wifiQualityGood', 'wifiQualityFair', 'wifiQualityPoor', 'devicesTitle', 'devicesSubtitle', 'deviceRefresh', 'deviceAdd', 'deviceAddHint', 'deviceAddFailed', 'deviceAdded', 'deviceName', 'deviceCurrent', 'deviceOpen', 'deviceOpenHint', 'deviceRename', 'deviceRenameTitle', 'deviceRenamed', 'deviceDelete', 'deviceEmpty', 'deviceInvalidHost', 'deviceSameHost', 'deviceRemoveConfirm', 'deviceTarget', 'deviceVersion', 'deviceRssi', 'deviceSourceCurrent', 'deviceSourceDiscovered', 'deviceSourceManual', 'deviceSourceRecent', 'devicesUnsupported', 'devicesFailed', 'devicesOk', 'devicesLoading', 'devicesLastUpdated', 'deviceManage',
-        'wifiChannel', 'dapXferCount', 'dapXferLast', 'dapRing', 'devicesBusy', 'devicesNone',]),
-    ...keys('guided', [
-        'title', 'subtitle', 'progress', 'notAuto', 'stepConnect', 'stepConnectHint', 'stepDetect',
-        'stepDetectHint', 'stepElf', 'stepElfHint', 'stepSample', 'stepSampleHint', 'stepFlash',
-        'stepFlashHint', 'stateDone', 'stateTodo', 'current', 'openCurve', 'gotoFlash', 'markElfDone',
-        'markSampleDone', 'skip', 'reopen', 'connectionRequired', 'allDone', 'closedHint',
-
-        'reset', 'resetDone', 'autoDetected', 'manualConfirm', 'manualConfirmed', 'manualHint', 'elfAutoHint', 'sampleAutoHint',]),
+        'currentPhysical', 'wiredPreferred', 'wifiLinkNcmAvailable', 'linkAddress', 'wifiGateway', 'ncmState', 'ncmActive', 'ncmInactive', 'ncmNotReported', 'dhcpState', 'dhcpStateInit', 'dhcpStateStarted', 'dhcpStateStopped', 'dhcpError', 'wiredDeviceIp', 'ncmHintOk', 'ncmHintReplug', 'ncmHintUnavailable', 'healthTitle', 'healthOk', 'healthWarn', 'healthError', 'healthUnknown', 'healthRefresh', 'healthRefreshed', 'healthRefreshFailed', 'healthOfflineHint', 'rttTitle', 'rttValue', 'rttStats', 'rttNone', 'rttHint', 'statusEndpoint', 'statusSupported', 'statusUnsupported', 'statusRequestFailed', 'dapLatency', 'dapLatencyValue', 'swdActual', 'swdActualValue', 'heapFreeShort', 'heapLargestShort', 'lastUpdate', 'unknownField', 'lastSeen', 'wifiQualityExcellent', 'wifiQualityGood', 'wifiQualityFair', 'wifiQualityPoor',
+        'wifiChannel', 'dapXferCount', 'dapXferLast', 'dapRing',]),
     ...keys('palette', [
         'title', 'placeholder', 'openHint', 'recent', 'pages', 'actions', 'empty', 'footer',
         'actionDetect', 'actionDetectHint', 'actionReset', 'actionResetHint', 'actionCurveToggle',
         'actionCurveToggleHint', 'actionKick', 'actionKickHint', 'actionCopyDiag', 'actionCopyDiagHint',
-        'actionGuided', 'actionGuidedHint', 'actionDiagnostics', 'actionDiagnosticsHint',
+        'actionDiagnostics', 'actionDiagnosticsHint',
         'actionRefreshWifi', 'actionRefreshWifiHint', 'notConnected', 'kickOk', 'kickFail',
         'copyFailed', 'resetOk', 'resetFail', 'refreshWifiSent',
 
-        'variables', 'functions', 'elfIndexSummary', 'elfUnavailable', 'noAddress', 'functionCopied', 'actionDevices', 'actionDevicesHint',]),
+        'variables', 'functions', 'elfIndexSummary', 'elfUnavailable', 'noAddress', 'functionCopied',]),
     ...keys('diag', [
         'title', 'subtitle', 'errors', 'noErrors', 'dap', 'swd', 'heap', 'wifi', 'target',
         'protocol', 'link', 'lastKick', 'lastProbe', 'kickNone', 'kickOk', 'kickUnsupported', 'kickFailed',

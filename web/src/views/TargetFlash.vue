@@ -13,19 +13,7 @@
         :flash-success="phase === 'success'"
         @detect="onDetect"
         @goto-flash="scrollToFlash"
-        @open-guided="openGuided"
         @open-diagnostics="openDiagnostics"
-    />
-
-    <GuidedFlow
-        ref="guidedRef"
-        :connected="deviceConnected"
-        :detected="targetInfo?.detected === true"
-        :detecting="detecting"
-        :flashing="flashing"
-        :flashed="phase === 'success'"
-        @detect="onDetect"
-        @goto-flash="scrollToFlash"
     />
 
     <el-alert
@@ -323,10 +311,7 @@ import {
   formatDevId,
   parseTargetDetection,
 } from "@/utils/targetProfile";
-import {ControlEvent} from "@/api";
-import {useWsStore} from "@/stores/websocket";
 import TargetDashboard from "@/components/dashboard/TargetDashboard.vue";
-import GuidedFlow from "@/components/dashboard/GuidedFlow.vue";
 import DiagnosticsPanel from "@/components/dashboard/DiagnosticsPanel.vue";
 import {onAction} from "@/components/dashboard/actionBus";
 import {
@@ -336,7 +321,6 @@ import {
   startLinkPolling,
   stopLinkPolling,
 } from "@/components/dashboard/dashboardState";
-import { emitGuidedSignal } from "@/components/dashboard/guidedSignals";
 import {getSwdClock, setSwdClock} from "@/api/apiTarget";
 
 type FlashPhase = 'idle' | 'flashing' | 'success' | 'error'
@@ -367,16 +351,13 @@ const swdClockBusy = ref(false);
 const swdClockError = ref('');
 
 /* -----------------------------------------------------------------------
- * P0 web platform: dashboard / guided flow / diagnostics integration.
+ * P0 web platform: dashboard / diagnostics integration.
  * The dashboard itself is read-only; all device actions below stay explicit
  * user clicks (or a command-palette action the user just invoked).
  * --------------------------------------------------------------------- */
-const guidedRef = ref<InstanceType<typeof GuidedFlow> | null>(null);
 const diagnosticsRef = ref<InstanceType<typeof DiagnosticsPanel> | null>(null);
 const flashSectionRef = ref<HTMLElement | null>(null);
 const diagnosticsOpen = ref(false);
-const wsStore = useWsStore();
-const deviceConnected = computed(() => wsStore.state === ControlEvent.CONNECTED);
 let offAction: (() => void) | null = null;
 
 let statusTimer = 0;
@@ -631,10 +612,6 @@ async function onDetect() {
   }
   // Shared telemetry for the dashboard / diagnostics / command palette.
   recordTargetDetection(targetInfo.value, detectError.value);
-  if (targetInfo.value?.detected === true) {
-    // P1-18: guide auto-advance from the real detection result.
-    emitGuidedSignal('target-detected', 'TargetFlash');
-  }
   void refreshTargetStatus();
   // Flash 基地址/容量可能因芯片而异：检测成功后按设备参数重新转换已选固件。
   if (selectedFile.value && !flashing.value) {
@@ -786,8 +763,6 @@ async function onStartFlash() {
       flashHandle = null;
       phase.value = 'success';
       result.value = flashResult;
-      // P1-18: guide auto-advance from the real verified flash result.
-      emitGuidedSignal('flash-success', 'TargetFlash');
       globalNotify(translate('target.success'), 'success');
     },
     onFailure: (failure) => {
@@ -817,17 +792,13 @@ async function onResetTarget() {
 }
 
 /* -------------------------------------------------------------------------
- * Dashboard / guided flow / diagnostics glue
+ * Dashboard / diagnostics glue
  * ---------------------------------------------------------------------- */
 
 function scrollToFlash(): void {
   void nextTick(() => {
     flashSectionRef.value?.scrollIntoView({behavior: 'smooth', block: 'start'});
   });
-}
-
-function openGuided(): void {
-  guidedRef.value?.open();
 }
 
 function scrollToDiagnostics(): void {
@@ -840,13 +811,6 @@ function scrollToDiagnostics(): void {
 function openDiagnostics(): void {
   diagnosticsOpen.value = true;
   scrollToDiagnostics();
-}
-
-function scrollToDevices(): void {
-  void nextTick(() => {
-    const el = document.querySelector('[data-testid="dashboard-devices"]');
-    el?.scrollIntoView({behavior: 'smooth', block: 'start'});
-  });
 }
 
 function toggleDiagnostics(): void {
@@ -878,9 +842,6 @@ onMounted(() => {
         break;
       case 'diagnostics-open':
         openDiagnostics();
-        break;
-      case 'devices-open':
-        scrollToDevices();
         break;
       default:
         break;

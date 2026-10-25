@@ -61,9 +61,15 @@ export const CURVE_LOCAL_MIN_SERIES = 1
 /** 单组系列上限（兼容旧接口名；v2 多组见 MAX_TOTAL_SERIES）。 */
 export const CURVE_LOCAL_MAX_SERIES = 64
 export const CURVE_LOCAL_MAX_GROUPS = 8
-/** 固件 task-51：每组上限 64 路，总上限 512 路。 */
+/** 固件 task-51：每组上限 64 路（协议 v2 仍保留多组能力，切分逻辑不变）。 */
 export const CURVE_LOCAL_MAX_SERIES_PER_GROUP = 64
-export const CURVE_LOCAL_MAX_TOTAL_SERIES = 256
+/**
+ * 精简单次采样的变量总数上限：256 -> 64（docs/feature-flags.md，item C4）。
+ *
+ * 只收紧 Web 选择/下发的总路数上限；CVF2 / CBS1 的分组帧格式与每组 ≤64 路、
+ * ≤256 B 的协议约束不变（firmware `curve64` 同步收紧到 64 路）。
+ */
+export const CURVE_LOCAL_MAX_TOTAL_SERIES = 64
 export const CURVE_LOCAL_MAX_VARIANTS = 16
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
@@ -154,7 +160,7 @@ export interface CurveLocalSeriesSpec {
     sampleEvery?: number
 }
 
-/** 协议 v2 分组（每组 ≤32 路，总和 ≤256）。 */
+/** 协议 v2 分组（每组 ≤64 路；精简单次采样总上限 64 路）。 */
 /**
  * DWT watchpoint 访问类型（固件 task-57）：
  *   write = DWT_FUNCTION 6（store）、read = 5（load）、readwrite = 7（load/store）。
@@ -463,7 +469,7 @@ export function parseBreakpointAddressInput(text: string): number | null {
     return normalizeBreakpointAddress(address)
 }
 
-/** 协议 v2 分组切分结果（纯函数，便于单测 0/32/33/64/256/257）。 */
+/** 协议 v2 分组切分结果（纯函数，便于单测 0/64/65 与协议多组切分）。 */
 export interface SeriesGroupSplit<T> {
     groups: T[][]
     groupCount: number
@@ -473,7 +479,8 @@ export interface SeriesGroupSplit<T> {
 
 /**
  * 按每组 perGroup 路切分；可选按字节上限再切（固件每组 sum(size)≤256 B）。
- * 默认 64/组、最多 8 组 = 总 512 路。
+ * 默认 64/组、最多 8 组（协议能力）；默认总上限 64 路（精简版单次采样上限，
+ * 调用方可用 `maxTotal` 显式覆盖以验证协议多组路径）。
  */
 export function splitSeriesIntoGroups<T>(
     series: readonly T[],
@@ -1288,8 +1295,9 @@ class Cbs1Writer {
  *
  * - 与 JSON `/api/curve/start` 语义完全等价（复用 `validateStartLocalCurve`
  *   与同一套 expr_s/variants/sample_every/watch/condition/snapshot 字段）；
- * - 4×64 series（256 路、expr `A<addr8>`）约 5936 B（与固件 host 测试一致），
- *   走流式解析、不占 16 KiB 连续堆；
+ * - 编码器/协议仍支持多组（如 4×64 = 256 路、expr `A<addr8>` 约 5936 B，与
+ *   固件 host 测试一致）；精简版 Web 单次采样上限 64 路，走流式解析、不占
+ *   16 KiB 连续堆；
  * - 单组无 variants 的旧请求在二进制里同样编码为 1 个 group（weight=1）。
  *
  * 布局（docs/curve-local-sampler.md §15.1 / curve_priv.h CURVE_BIN_MAGIC）：
@@ -1386,7 +1394,7 @@ const CBS1_FALLBACK_STATUSES = new Set([400, 404, 405, 415, 501])
 
 /**
  * 启动设备本地采样（P0-1）：优先 `POST /api/curve/start-bin`（CBS1 流式二进制，
- * 256 series ≈5.9 KiB），旧固件 404/400/415（以及 405/501）时自动回退现有 JSON
+ * 精简版最大 64 series；编码器仍支持协议多组），旧固件 404/400/415（以及 405/501）时自动回退现有 JSON
  * `/api/curve/start`（body ≤16384）。两者成功响应相同，结果带 `transport`。
  */
 export async function startLocalCurveAuto(options: StartLocalCurveOptions): Promise<StartLocalCurveResult> {

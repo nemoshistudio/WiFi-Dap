@@ -118,7 +118,12 @@ export enum WtUartCmd {
     GET_DEFAULT_NUM = 24,
 }
 
-/** OTA(5) JSON commands (docs/protocol.md §2.5; local upload is WP-207). */
+/** OTA(5) JSON commands (docs/protocol.md §2.5).
+ *
+ * Kept as the protocol contract only: the Web OTA page/API/WS module were
+ * removed by contract (docs/feature-flags.md, item A1) and the slimmed firmware
+ * disables the OTA handlers. The module id / command ids stay reserved so a
+ * future re-enable does not renumber the protocol. */
 export enum WtOtaCmd {
     GET_INFO = 1,
     GET_PROGRESS = 3,

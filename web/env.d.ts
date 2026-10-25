@@ -18,8 +18,6 @@ interface ImportMetaEnv {
     readonly VITE_DEVICE_HOST_NAME?: string
     /** `true` 时不在 App.vue 建立 WS（离线预览/截图用） */
     readonly VITE_DISABLE_CONNECTION?: string
-    /** Wave 1 固定关闭，WP-207 打开 OTA 上传 UI */
-    readonly VITE_ENABLE_OTA?: string
     /** 构建期功能裁剪开关，缺省启用 */
     readonly VITE_ENABLE_UART?: string
     readonly VITE_ENABLE_DATA_FLOW?: string

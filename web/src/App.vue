@@ -14,17 +14,14 @@ import { globalNotify } from '@/composables/notification'
 import {
   isDataFlowEnabled,
   isDevMode,
-  isOTAEnabled,
   isUartEnabled
 } from '@/composables/buildMode'
 import { useSystemModule } from '@/composables/useSystemModule'
 import { useDataFlowModule } from '@/composables/useDataFlowModule'
 import { useUartModule } from '@/composables/useUartModule'
-import { useUpdateModule } from '@/composables/useUpdateModule'
 import { translate } from '@/locales'
 import CommandPalette from '@/components/command/CommandPalette.vue'
 import { ensureDashboardTelemetry } from '@/components/dashboard/dashboardState'
-import { ensureGuidedSignalBridge } from '@/components/dashboard/guidedSignals'
 import { ensureCommandIndexBridge } from '@/utils/commandIndex'
 import { runAfterPaint, runWhenIdle } from '@/utils/idle'
 
@@ -64,9 +61,6 @@ function registerModules() {
   if (isUartEnabled()) {
     useUartModule()
   }
-  if (isOTAEnabled()) {
-    useUpdateModule()
-  }
 }
 
 function deviceHost(): string {
@@ -105,10 +99,8 @@ onMounted(() => {
   // P1-16: non-first-screen work waits for the first painted frame / idle time.
   runAfterPaint(() => {
     changeFavicon()
-    // P1-17/P1-18 bridges: the palette reads the curve page's ELF index; the
-    // guide listens for real events (detection / ELF index / sampling / flash).
+    // P1-17 bridge: the palette reads the curve page's ELF index.
     ensureCommandIndexBridge()
-    ensureGuidedSignalBridge()
   })
   runWhenIdle(() => {
     // Mark the first-screen baseline end (read in Playwright / diagnostics).
@@ -119,8 +111,7 @@ onMounted(() => {
 })
 
 /**
- * 全局持久提示条（非阻塞）：协议版本 mismatch / legacy / unknown 常驻提示
- * （OTA 上传另行禁用）。
+ * 全局持久提示条（非阻塞）：协议版本 mismatch / legacy / unknown 常驻提示。
  */
 const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; description: string } | null>(() => {
   const fwProtocol = systemStore.fwProtocolVersion === null ? '?' : systemStore.fwProtocolVersion
@@ -129,7 +120,7 @@ const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; des
       return {
         type: 'error',
         title: translate('protocol.mismatchTitle'),
-        description: `${translate('protocol.mismatchDetail', { web: PROTOCOL_VERSION, fw: fwProtocol })} ${translate('protocol.mismatchOtaDisabled')} ${translate('protocol.refreshHint')}`,
+        description: `${translate('protocol.mismatchDetail', { web: PROTOCOL_VERSION, fw: fwProtocol })} ${translate('protocol.refreshHint')}`,
       }
     case 'legacy':
       return {

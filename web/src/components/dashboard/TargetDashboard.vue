@@ -10,9 +10,6 @@
         <el-button size="small" :loading="refreshing" data-testid="dashboard-refresh" @click="onRefresh">
           {{ translate('dashboard.refresh') }}
         </el-button>
-        <el-button size="small" data-testid="dashboard-guided" @click="emit('open-guided')">
-          {{ translate('dashboard.openGuided') }}
-        </el-button>
         <el-button size="small" data-testid="dashboard-diagnostics" @click="emit('open-diagnostics')">
           {{ translate('dashboard.openDiagnostics') }}
         </el-button>
@@ -203,9 +200,6 @@
       <LinkHealthCard />
     </div>
 
-    <!-- Device discovery / multi-device (P1-19) -->
-    <DeviceListCard />
-
     <!-- Error summary -->
     <div class="bb-dash__errors" data-testid="dashboard-errors">
       <h3 class="text-sm font-semibold">{{ translate('dashboard.errors') }}</h3>
@@ -263,7 +257,6 @@ import {
   refreshDashboard,
 } from '@/components/dashboard/dashboardState';
 import LinkHealthCard from '@/components/dashboard/LinkHealthCard.vue';
-import DeviceListCard from '@/components/dashboard/DeviceListCard.vue';
 
 const props = defineProps<{
   targetInfo: TargetInfo | null;
@@ -276,7 +269,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'detect'): void;
   (e: 'goto-flash'): void;
-  (e: 'open-guided'): void;
   (e: 'open-diagnostics'): void;
 }>();
 
