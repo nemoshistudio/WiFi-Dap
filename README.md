@@ -4,7 +4,7 @@
 
 A wireless CMSIS-DAP debug probe built on the **ESP32-S3**, with a full embedded Web management panel. Flash it once over USB, then debug over Wi-Fi (SWD/JTAG), bridge UART traffic, manage the device, and perform browser-local OTA updates.
 
-The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap) (MIT) and [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) (Apache-2.0 platform layer), upgraded to **ESP-IDF 5.2.1** and extended with a Web UI plus a JSON/WebSocket protocol. Full documentation index: **[docs/README.md](docs/README.md)**.
+The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap) (MIT) and [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) (Apache-2.0 platform layer), upgraded to **ESP-IDF 5.5.6** and extended with a Web UI plus a JSON/WebSocket protocol. Full documentation index: **[docs/README.md](docs/README.md)**.
 
 > ⚠️ **Secure-by-default warning**: the Web/JSON API, WebSocket-DAP, UART TCP bridge and OTA upload are **unauthenticated by default**, and all transports are plaintext. Deploy only on a **trusted LAN** and read [§9 Security defaults & hardening](#9-security-defaults--hardening).
 
@@ -104,13 +104,12 @@ Key pins of the default `BOARD_ZXR_DAP_S3`:
 
 ### 4.1 Prerequisites
 
-- **Recommended**: Docker (`espressif/idf:v5.2.1` image) plus `bash`, `flock`, `python3`, `gcc`.
-- A local **ESP-IDF v5.2.1** installation also works (`main/idf_component.yml` requires `idf >= 5.2.0`).
+- **Recommended**: Docker (`espressif/idf:v5.5.6` image) plus `bash`, `flock`, `python3`, `gcc`.
+- A local **ESP-IDF v5.5.6** installation also works (`main/idf_component.yml` requires `idf >= 5.5.2`).
 - Node.js (20+) and npm are only needed to rebuild the Web UI; firmware builds use the committed `project_components/html/*.gz` assets.
 
 ```bash
-docker pull espressif/idf:v5.2.1
-docker pull espressif/idf:v5.5.6   # only needed for the ESP32-C5 target
+docker pull espressif/idf:v5.5.6
 ```
 
 ### 4.2 One-shot build (Docker)
@@ -123,8 +122,8 @@ scripts/build_all.sh
 scripts/build_all.sh -t esp32s3
 scripts/build_all.sh --clean -t esp32s3
 
-# ESP32-C5 (Wi-Fi-only, IDF v5.5.6 image; C5 is opt-in, not in the default matrix)
-IDF_DOCKER_IMAGE_C5=espressif/idf:v5.5.6 scripts/build_all.sh -t esp32c5
+# ESP32-C5 (Wi-Fi-only, compile-only; C5 is opt-in, not in the default matrix)
+scripts/build_all.sh -t esp32c5
 ```
 
 - Each target has its own build dir and SDKCONFIG: `build/<target>/`, `build/<target>/sdkconfig`; logs in `build/logs/<target>.log`.
@@ -158,7 +157,7 @@ Write **bootloader + partition table + ota_0** only; leave `otadata` blank (0xFF
 
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
-  --device=/dev/ttyUSB0 -v "$PWD:/project" -w /project espressif/idf:v5.2.1 \
+  --device=/dev/ttyUSB0 -v "$PWD:/project" -w /project espressif/idf:v5.5.6 \
   bash -c 'esptool.py --chip esp32s3 -p /dev/ttyUSB0 --before default_reset --after hard_reset \
     write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB \
     0x0 build/esp32s3/bootloader/bootloader.bin \
@@ -361,12 +360,12 @@ Three sources (details and per-file mapping: [docs/merge-map.md](docs/merge-map.
 | Ref | Repository | License | Contribution |
 |---|---|---|---|
 | **A** | [nemoshistudio/wireless-esp8266-dap](https://github.com/nemoshistudio/wireless-esp8266-dap) (fork of windowsair's project) | MIT | CMSIS-DAP core, USBIP/elaphureLink proxy, fork changes (LED, S3 UART, …) |
-| **C** | [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) | Apache-2.0 | ESP-IDF 5.2.1 platform: wifi_manager / web_server / wt_nvs / memory_pool / SSDP / UART service / DataFlow |
+| **C** | [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) | Apache-2.0 | ESP-IDF 5.5.6 platform: wifi_manager / web_server / wt_nvs / memory_pool / SSDP / UART service / DataFlow |
 | **D** | [kerms/wireless-esp32-tools-web-host](https://github.com/kerms/wireless-esp32-tools-web-host) | MIT | Vue 3 + Vite Web UI (extended here with OTA / Wi-Fi management / auth / i18n) |
 
 What this repository (WiFi Dap) changes:
 
-- Upgraded to **ESP-IDF 5.2.1** and componentized (`components/` + `project_components/`); board pins abstracted into `components/board` (`BOARD_*` + Kconfig, no per-target pin branches elsewhere).
+- Upgraded to **ESP-IDF 5.5.6** and componentized (`components/` + `project_components/`); board pins abstracted into `components/board` (`BOARD_*` + Kconfig, no per-target pin branches elsewhere).
 - Added the **Web UI + JSON/WS protocol v1** ([docs/protocol.md](docs/protocol.md)), multi-credential Wi-Fi memory, browser-local OTA (8 MB dual slot + rollback), optional Web auth, SSDP/mDNS, coredump, and the UART service/DataFlow data plane.
 - Kept and hardened the upstream DAP proxy layer (USBIP / elaphureLink / legacy WebSocket-DAP): ring-buffer lifecycle owned by the DAP task, socket fd leak fixes, error-path handling, etc.
 - Changed defaults: SWD clock 1 MHz, UART bridge 1346/115200, AP SSID `WiFi-Dap-XXXX`; removed ESP8266/KCP/corsacOTA (3241).
@@ -458,7 +457,7 @@ More OTA error codes and state mappings: [docs/hardware-test-ota.md §5/§6](doc
   - **Project-original parts**: **Apache License 2.0** (root [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)); individual files may state another SPDX license in their header (e.g. some `scripts/` are SPDX MIT).
   - **Third-party components keep their upstream licenses**:
     - windowsair/wireless-esp8266-dap — **MIT**, covering `components/DAP`, `components/USBIP`, `components/elaphureLink`, `components/dap_proxy` (per-directory `LICENSE`);
-    - kerms/wireless-esp32-tools — **Apache-2.0**, covering the ESP-IDF 5.2.1 platform components (SPDX headers);
+    - kerms/wireless-esp32-tools — **Apache-2.0**, covering the ESP-IDF 5.5.6 platform components (SPDX headers);
     - kerms/wireless-esp32-tools-web-host — **MIT**, covering the `web/` frontend ([web/LICENCE.txt](web/LICENCE.txt));
     - ARM CMSIS-DAP — **Apache-2.0**, covering `components/DAP/cmsis-dap/**`.
   - MIT text: [LICENSES/MIT.txt](LICENSES/MIT.txt); copyright/attribution summary: [NOTICE](NOTICE); upstream differences: [§11](#11-origins--changes-from-upstream).

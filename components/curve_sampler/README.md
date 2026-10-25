@@ -670,7 +670,7 @@ fully functional (it is not disabled by a WS subscription).
 
 ## Tests / build
 
-* ESP-IDF v5.2.1 Docker build (`scripts/build_all.sh`) - all three targets
+* ESP-IDF v5.5.6 Docker build (`scripts/build_all.sh`) - all three targets
   (esp32s3/esp32c3/esp32) green; real-target timing still needs the device.
 * `test/host/run.sh` (no hardware, cJSON from the IDF image) currently reports
   **4299 checks**, covering `curve_json.c`/`curve_expr.c`/`curve_ring.c`/

@@ -47,7 +47,7 @@
 | `abc1234`（无匹配 tag） | 回退到 commit 短哈希 | ❌ |
 | 失败/无 git | 回退（见 §2.2.3） | 仅允许 `v1.0.0` 回退 |
 
-### 2.2 注入机制（CMake / ESP-IDF 5.2.1）
+### 2.2 注入机制（CMake / ESP-IDF 5.5.6）
 
 现状问题：集成分支 `CMakeLists.txt` 里的 `write_git_version_to_file()`（feature/birdiebot-v1）只执行 `git describe --tags`，失败时把**空字符串**写入 `version.txt`，且用正则剥掉 `-N-gsha` 后缀；在浅克隆/无 git 环境下会得到空 `PROJECT_VER`。**必须替换**为下述实现（WP-007 负责根 CMake；WP-143 负责发布脚本）。
 
@@ -145,7 +145,7 @@ strncpy(fm_info->fm_ver, desc->version, sizeof(fm_info->fm_ver) - 1);  /* = PROJ
 - **启动日志（读取顺序第一条）**：`app_main()` 一开始、`wifi_manager_init()` 之前打印（避免被 WiFi 阻塞/日志刷掉）：
 
 ```text
-I (312) BIRDIEBOT: WiFi Dap fw=v1.0.0 proto=1 board=BOARD_ZXR_DAP_S3 idf=5.2.1
+I (312) BIRDIEBOT: WiFi Dap fw=v1.0.0 proto=1 board=BOARD_ZXR_DAP_S3 idf=5.5.6
 ```
 
   字段来源：`fw`=`esp_app_get_description()->version`、`proto`=`BIRDIEBOT_PROTOCOL_VERSION`、`board`=`CONFIG_BIRDIEBOT_BOARD_*` 字符串化、`idf`=`esp_get_idf_version()`。**该行不得包含任何 WiFi/AP 口令**；AP 信息单独一行（只允许 SSID + IP）。
@@ -549,7 +549,7 @@ protocol_version：  ^[1-9][0-9]*$
 ## 附录 B：启动日志样例（release）
 
 ```text
-I (312) BIRDIEBOT: WiFi Dap fw=v1.0.0 proto=1 board=BOARD_ZXR_DAP_S3 idf=5.2.1
+I (312) BIRDIEBOT: WiFi Dap fw=v1.0.0 proto=1 board=BOARD_ZXR_DAP_S3 idf=5.5.6
 I (1450) wifi_manager: AP SSID=WiFi-Dap-A1B2 IP=192.168.1.1   # 不打印口令
 I (3120) web_server: HTTP server started on port 80
 I (3200) WS_REQ: ws open: 3

@@ -4,7 +4,7 @@
 
 基于 **ESP32-S3** 的无线 CMSIS-DAP 调试器，并内嵌一套完整的 Web 管理面板：一根 USB 线烧好固件后，即可通过 Wi-Fi 完成 SWD/JTAG 调试、串口转发、设备管理与浏览器本地 OTA。
 
-项目由 [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap)（MIT）与 [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools)（Apache-2.0 平台层）合并重构而来，升级到 **ESP-IDF 5.2.1**，并加入 Web UI 与 JSON/WebSocket 协议。完整文档见 **[docs/README.md](docs/README.md)**。
+项目由 [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap)（MIT）与 [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools)（Apache-2.0 平台层）合并重构而来，升级到 **ESP-IDF 5.5.6**，并加入 Web UI 与 JSON/WebSocket 协议。完整文档见 **[docs/README.md](docs/README.md)**。
 
 > ⚠️ **安全默认**：Web/JSON API、WebSocket-DAP、UART TCP 桥、OTA 上传默认**均无鉴权**，且 HTTP 为明文。请仅部署在**可信局域网**，并阅读 [§9 安全默认与加固](#9-安全默认与加固)。
 
@@ -99,12 +99,12 @@
 
 ### 4.1 环境准备
 
-- **推荐**：Docker（`espressif/idf:v5.2.1` 镜像）+ `bash`、`flock`、`python3`、`gcc`。
-- 也可直接安装 **ESP-IDF v5.2.1** 本地构建（`main/idf_component.yml` 要求 `idf >= 5.2.0`）。
+- **推荐**：Docker（`espressif/idf:v5.5.6` 镜像）+ `bash`、`flock`、`python3`、`gcc`。
+- 也可直接安装 **ESP-IDF v5.5.6** 本地构建（`main/idf_component.yml` 要求 `idf >= 5.5.2`）。
 - 仅当需要重新构建 Web UI 时才需要 Node.js（20+）与 npm；固件默认使用已嵌入的 `project_components/html/*.gz`。
 
 ```bash
-docker pull espressif/idf:v5.2.1
+docker pull espressif/idf:v5.5.6
 ```
 
 ### 4.2 一键构建（Docker）
@@ -116,6 +116,9 @@ scripts/build_all.sh
 # 只构建发布目标 / 干净重建
 scripts/build_all.sh -t esp32s3
 scripts/build_all.sh --clean -t esp32s3
+
+# ESP32-C5（Wi-Fi-only、compile-only；C5 为 opt-in，不在默认矩阵）
+scripts/build_all.sh -t esp32c5
 ```
 
 - 每个目标独立目录与 SDKCONFIG：`build/<target>/`、`build/<target>/sdkconfig`，日志 `build/logs/<target>.log`。
@@ -148,7 +151,7 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
-  --device=/dev/ttyUSB0 -v "$PWD:/project" -w /project espressif/idf:v5.2.1 \
+  --device=/dev/ttyUSB0 -v "$PWD:/project" -w /project espressif/idf:v5.5.6 \
   bash -c 'esptool.py --chip esp32s3 -p /dev/ttyUSB0 --before default_reset --after hard_reset \
     write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB \
     0x0 build/esp32s3/bootloader/bootloader.bin \
@@ -351,12 +354,12 @@ USBIP 与 elaphureLink 没有单独开关（3240 端口保持监听）；如不�
 | 代号 | 仓库 | 许可 | 贡献 |
 |---|---|---|---|
 | **A** | [nemoshistudio/wireless-esp8266-dap](https://github.com/nemoshistudio/wireless-esp8266-dap)（windowsair 上游 fork） | MIT | CMSIS-DAP 核心、USBIP/elaphureLink 代理、LED/S3 UART 等 fork 改动 |
-| **C** | [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) | Apache-2.0 | ESP-IDF 5.2.1 平台层：wifi_manager / web_server / wt_nvs / memory_pool / SSDP / UART service / DataFlow |
+| **C** | [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) | Apache-2.0 | ESP-IDF 5.5.6 平台层：wifi_manager / web_server / wt_nvs / memory_pool / SSDP / UART service / DataFlow |
 | **D** | [kerms/wireless-esp32-tools-web-host](https://github.com/kerms/wireless-esp32-tools-web-host) | MIT | Vue 3 + Vite Web UI（本项目在其基础上扩展 OTA/WiFi 管理/鉴权/i18n） |
 
 本仓库（WiFi Dap）的主要变更：
 
-- 升级到 **ESP-IDF 5.2.1**，按组件拆分（`components/` + `project_components/`），板级引脚抽象为 `components/board`（`BOARD_*` + Kconfig，去掉按 target 写死的引脚分支）。
+- 升级到 **ESP-IDF 5.5.6**，按组件拆分（`components/` + `project_components/`），板级引脚抽象为 `components/board`（`BOARD_*` + Kconfig，去掉按 target 写死的引脚分支）。
 - 新增 **Web UI + JSON/WS 协议 v1**（[docs/protocol.md](docs/protocol.md)）、Wi-Fi 多凭据记忆、浏览器本地 OTA（8 MB 双槽 + 回滚）、可选 Web 鉴权、SSDP/mDNS、coredump、UART service/DataFlow 数据面。
 - 保留并修复上游 DAP 代理层（USBIP / elaphureLink / legacy WebSocket-DAP）：DAP ring buffer 生命周期归 DAP 任务、socket fd 泄漏修复、错误路径处理等。
 - 默认值调整：SWD 默认时钟 1 MHz、UART 桥 1346/115200、AP SSID `WiFi-Dap-XXXX`、移除 ESP8266/KCP/corsacOTA(3241)。
@@ -448,7 +451,7 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
   - **本项目原创部分**：**Apache License 2.0**（根目录 [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)）；个别文件头另行标注（如部分 `scripts/` 为 SPDX MIT）。
   - **第三方组件按各自原许可证**：
     - windowsair/wireless-esp8266-dap —— **MIT**，覆盖 `components/DAP`、`components/USBIP`、`components/elaphureLink`、`components/dap_proxy`（各目录 `LICENSE`）；
-    - kerms/wireless-esp32-tools —— **Apache-2.0**，覆盖 ESP-IDF 5.2.1 平台层组件（源文件 SPDX 头）；
+    - kerms/wireless-esp32-tools —— **Apache-2.0**，覆盖 ESP-IDF 5.5.6 平台层组件（源文件 SPDX 头）；
     - kerms/wireless-esp32-tools-web-host —— **MIT**，覆盖 `web/` 前端（[web/LICENCE.txt](web/LICENCE.txt)）；
     - ARM CMSIS-DAP —— **Apache-2.0**，覆盖 `components/DAP/cmsis-dap/**`。
   - MIT 全文：[LICENSES/MIT.txt](LICENSES/MIT.txt)；版权署名与出处汇总：[NOTICE](NOTICE)；上游差异见 [§11](#11-与上游的关系--变更说明)。

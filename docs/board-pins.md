@@ -288,7 +288,7 @@ done
 gcc -fsyntax-only -I components/board/include components/board/src/birdiebot_board.c
 ```
 
-### 8.2 目标构建（G0/WP-007，用 Docker IDF 5.2.1）
+### 8.2 目标构建（G0/WP-007，用 Docker IDF 5.5.6）
 
 ```bash
 scripts/idf-docker.sh -C . set-target esp32s3 && scripts/idf-docker.sh build

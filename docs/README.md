@@ -14,7 +14,8 @@
 | 新用户 / 烧录与使用 | [README_CN.md](../README_CN.md) / [README.md](../README.md) | 项目定位、功能矩阵、引脚、构建烧录、Web UI、调试接入、安全默认、故障排查 |
 | 部署加固 / 安全自查 | [security.md](security.md) | 面向部署者的精简安全指南：默认实验室模式、开鉴权/改口令/关传输、端口与发现面清单、OTA 限制、Accepted risks 与 N1–N9 修复状态 |
 | 许可证 / 合规署名 | [NOTICE](../NOTICE) / [LICENSES/](../LICENSES/) | 混合许可总览（本项目原创 Apache-2.0 + 第三方 MIT/Apache-2.0 组件）与许可证全文 |
-| 工具链 / 构建发布 | [scripts/README.md](../scripts/README.md) | Docker ESP-IDF 5.2.1 构建、分区/板级校验、Web 资产、发布包、OTA/E2E 测试脚本 |
+| 工具链 / 构建发布 | [scripts/README.md](../scripts/README.md) | Docker ESP-IDF 5.5.6 构建、分区/板级校验、Web 资产、发布包、OTA/E2E 测试脚本 |
+| IDF 基线 / 升级记录 | [idf-5.5.6-upgrade.md](idf-5.5.6-upgrade.md) | S3/C3/ESP32/C5 统一升级到 ESP-IDF v5.5.6 的迁移点、构建命令、验证矩阵、风险/回滚 |
 | Web UI 前端开发 | [web/README.md](../web/README.md) / [web/README.cn.md](../web/README.cn.md) | Web UI 功能、开发与构建方式（Vue 3 + Vite） |
 | OTA 固件实现 | [components/wt_ota/README.md](../components/wt_ota/README.md) | OTA 核心状态机、C API、模块 5 注册、回滚与线程安全 |
 | 协议/接口开发 | [protocol.md](protocol.md)、[ws-binary-router.md](ws-binary-router.md) | JSON/WS 总协议与二进制数据路由（冻结契约） |
