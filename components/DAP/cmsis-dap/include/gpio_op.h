@@ -23,10 +23,11 @@
 #include "cmsis-dap/include/cmsis_compiler.h"
 #include "cmsis-dap/include/gpio_common.h"
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3) || \
+    defined(CONFIG_IDF_TARGET_ESP32C5)
 // Dedicated-GPIO CPU instruction helpers:
 //   S3: dedic_gpio_cpu_ll_read_in() (Xtensa `ee.get_gpio_in`)
-//   C3: CSR_GPIO_*_USER + RV_*_CSR macros (riscv/csr.h)
+//   C3/C5: CSR_GPIO_*_USER + RV_*_CSR macros (riscv/csr.h)
 #include "hal/dedic_gpio_cpu_ll.h"
 #endif
 
@@ -52,6 +53,14 @@ __STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
 {
   gpio_ll_iomux_func_sel(GPIO_PIN_MUX_REG[io_num], PIN_FUNC_GPIO);
 }
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+__STATIC_INLINE __UNUSED void GPIO_FUNCTION_SET(int io_num)
+{
+  /* C5 IO_MUX: GPIO function is 1 (PIN_FUNC_GPIO in soc/io_mux_reg.h).
+   * gpio_ll_func_sel() also detaches GPIO13/14 from the USB Serial/JTAG pads
+   * when they are re-used as GPIO (not used by the C5 reference board). */
+  gpio_ll_func_sel(&GPIO, (uint8_t)io_num, PIN_FUNC_GPIO);
+}
 #endif
 
 
@@ -76,6 +85,13 @@ __STATIC_INLINE __UNUSED void GPIO_SET_DIRECTION_NORMAL_OUT(int io_num)
     // PP out
     gpio_ll_od_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
 }
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+__STATIC_INLINE __UNUSED void GPIO_SET_DIRECTION_NORMAL_OUT(int io_num)
+{
+    gpio_ll_output_enable(&GPIO, (uint32_t)io_num);
+    // PP out
+    gpio_ll_od_disable(&GPIO, (uint32_t)io_num);
+}
 #endif
 
 
@@ -97,6 +113,15 @@ __STATIC_INLINE __UNUSED void GPIO_SET_LEVEL_LOW(int io_num)
 {
   gpio_ll_set_level(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num, 0);
 }
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+__STATIC_INLINE __UNUSED void GPIO_SET_LEVEL_HIGH(int io_num)
+{
+  gpio_ll_set_level(&GPIO, (uint32_t)io_num, 1);
+}
+__STATIC_INLINE __UNUSED void GPIO_SET_LEVEL_LOW(int io_num)
+{
+  gpio_ll_set_level(&GPIO, (uint32_t)io_num, 0);
+}
 #endif
 
 
@@ -109,6 +134,11 @@ __STATIC_INLINE __UNUSED int GPIO_GET_LEVEL(int io_num)
 __STATIC_INLINE __UNUSED int GPIO_GET_LEVEL(int io_num)
 {
   return gpio_ll_get_level(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
+}
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+__STATIC_INLINE __UNUSED int GPIO_GET_LEVEL(int io_num)
+{
+  return gpio_ll_get_level(&GPIO, (uint32_t)io_num);
 }
 #endif
 
@@ -128,6 +158,14 @@ __STATIC_INLINE __UNUSED void GPIO_PULL_UP_ONLY_SET(int io_num)
   gpio_ll_pulldown_dis(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
   // enable pull up
   gpio_ll_pullup_en(GPIO_HAL_GET_HW(GPIO_PORT_0), io_num);
+}
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+__STATIC_INLINE __UNUSED void GPIO_PULL_UP_ONLY_SET(int io_num)
+{
+  // disable pull down
+  gpio_ll_pulldown_dis(&GPIO, (uint32_t)io_num);
+  // enable pull up
+  gpio_ll_pullup_en(&GPIO, (uint32_t)io_num);
 }
 #endif
 
@@ -154,7 +192,10 @@ __STATIC_INLINE __UNUSED void GPIO_PULL_UP_ONLY_SET(int io_num)
 #define SWDIO_SET() do { asm volatile("ee.set_bit_gpio_out 0x1"); } while (0)
 #define SWDIO_CLR() do { asm volatile("ee.clr_bit_gpio_out 0x1"); } while (0)
 #define SWDIO_GET_IN() ({ dedic_gpio_cpu_ll_read_in() & 0x1; })
-#elif defined CONFIG_IDF_TARGET_ESP32C3
+#elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C5)
+/* ESP32-C3 / ESP32-C5: RISC-V CPU dedicated-GPIO CSR user registers
+ * (hal/dedic_gpio_cpu_ll.h: CSR_GPIO_OEN_USER/IN_USER/OUT_USER).
+ * C5 = 8 dedicated GPIO channels, same CSR mechanism as C3. */
 #define SWCLK_SET() do { RV_SET_CSR(CSR_GPIO_OUT_USER, 2); } while (0)
 #define SWCLK_CLR() do { RV_CLEAR_CSR(CSR_GPIO_OUT_USER, 2); } while (0)
 #define SWDIO_SET() do { RV_SET_CSR(CSR_GPIO_OUT_USER, 1); } while (0)

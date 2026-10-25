@@ -354,7 +354,7 @@ __STATIC_FORCEINLINE void PIN_DELAY_SLOW(int32_t delay)
       "BNEZ   %[time], l_PINDELAYSLOW%=;"
       : [time] "+r"(delay));
 }
-  #elif defined CONFIG_IDF_TARGET_ESP32C3
+  #elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C5)
 __STATIC_FORCEINLINE void PIN_DELAY_SLOW(int32_t delay)
 {
   __asm__ volatile(
@@ -384,6 +384,13 @@ __STATIC_FORCEINLINE void PIN_DELAY_FAST (void) {
   asm volatile("nop");
 #elif defined CONFIG_IDF_TARGET_ESP32C3
   // A 2025 fork: 6 cycles -> about 26.67 MHz (RISC-V)
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+  asm volatile("nop");
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+  /* ESP32-C5: same RISC-V fast-GPIO path as C3 (240 MHz CPU instead of
+   * 160 MHz). Compile-only / unverified on hardware: docs/esp32-c5-port.md. */
   asm volatile("nop");
   asm volatile("nop");
   asm volatile("nop");

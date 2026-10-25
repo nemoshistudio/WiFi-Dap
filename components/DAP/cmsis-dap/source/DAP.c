@@ -477,17 +477,27 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
     return ((4U << 16) | 1U);
   }
 
-  // Note: the supported targets are esp32 (APB 80 MHz), esp32c3 (80 MHz) and
-  // esp32s3 (80 MHz); see BUS_CLOCK_FIXED below.
+  // Note: the supported targets are esp32 (APB 80 MHz), esp32c3 (80 MHz),
+  // esp32s3 (80 MHz) and esp32c5 (80 MHz APB); see BUS_CLOCK_FIXED below.
 
   // clock >= 10MHz -> use 40MHz SPI
   if (clock >= 10000000) {
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    /* ESP32-C5: the 40 MHz SPI2 hardware backend is not ported in this branch
+     * (compile-only, no C5 hardware validation). Clamp the request to the
+     * GPIO-fast path instead of driving an uninitialized SPI peripheral; the
+     * effective SWCLK is rate-limited by the RISC-V fast-GPIO loop. See
+     * docs/esp32-c5-port.md. */
+    DAP_SPI_Deinit();
+    SWD_TransferSpeed = kTransfer_GPIO_fast;
+#else
     if (DAP_Data.debug_port != DAP_PORT_JTAG) {
       DAP_SPI_Init();
       SWD_TransferSpeed = kTransfer_SPI;
     } else {
       SWD_TransferSpeed = kTransfer_GPIO_fast;
     }
+#endif
     DAP_Data.fast_clock  = 1U;
     DAP_Data.clock_delay = 1U;
 

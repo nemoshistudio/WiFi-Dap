@@ -69,8 +69,9 @@
 /* TIMESTAMP_GET() source: esp_timer_get_time() returns microseconds */
 #include "esp_timer.h"
 
-#if !defined CONFIG_IDF_TARGET_ESP32 && !defined CONFIG_IDF_TARGET_ESP32C3 && !defined CONFIG_IDF_TARGET_ESP32S3
-  #error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 only (ESP8266 was removed)"
+#if !defined CONFIG_IDF_TARGET_ESP32 && !defined CONFIG_IDF_TARGET_ESP32C3 && \
+    !defined CONFIG_IDF_TARGET_ESP32S3 && !defined CONFIG_IDF_TARGET_ESP32C5
+  #error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 / esp32c5 only (ESP8266 was removed)"
 #endif
 
 /* The selected board must match the IDF target (Kconfig already restricts the
@@ -81,6 +82,8 @@
   #error "selected board is not an ESP32-C3 board"
 #elif defined CONFIG_IDF_TARGET_ESP32S3 && (BIRDIEBOT_BOARD_TARGET_ID != 3)
   #error "selected board is not an ESP32-S3 board"
+#elif defined CONFIG_IDF_TARGET_ESP32C5 && (BIRDIEBOT_BOARD_TARGET_ID != 4)
+  #error "selected board is not an ESP32-C5 board"
 #endif
 
 
@@ -118,7 +121,10 @@ This information includes:
    * clock calculation. */
   #define CPU_CLOCK 160000000
   // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<160MHz
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
+  #define CPU_CLOCK 240000000
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+  /* ESP32-C5 HP RISC-V core runs up to 240 MHz (docs/esp32-c5-port.md). */
   #define CPU_CLOCK 240000000
 #endif
 
@@ -484,7 +490,7 @@ __STATIC_INLINE void PORT_JTAG_SETUP(void)
   // gpio_set_pull_mode(PIN_nRESET, GPIO_PULLUP_ONLY);
   GPIO_PULL_UP_ONLY_SET(PIN_nTRST);
   GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
   // PIN_TDO output disable
   gpio_ll_output_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_TDO);
   // PIN_TDO input enable
@@ -547,7 +553,7 @@ __STATIC_INLINE void PORT_OFF(void)
 
   // gpio_set_pull_mode(PIN_nTRST, GPIO_PULLUP_ONLY);
   GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
 	gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
 	gpio_ll_od_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
 	GPIO_PULL_UP_ONLY_SET(PIN_nRESET);
@@ -688,7 +694,10 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT_ENABLE(void)
 #elif defined CONFIG_IDF_TARGET_ESP32C3
   // A 2025 fork: dedicated-GPIO OEN user CSR bit 0
   SWDIO_OUT_ENABLE();
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+  /* ESP32-C5 uses the same RISC-V dedicated-GPIO OEN CSR as C3. */
+  SWDIO_OUT_ENABLE();
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
   /* A 2025 behaviour: SWDIO pad OEN stays enabled from DAP_SPI_Deinit().
    * Toggling it here was tested on hardware and broke the second SWD
    * transaction (JUNK ACK); keep the proven implementation. */
@@ -711,7 +720,11 @@ __STATIC_FORCEINLINE void PIN_SWDIO_OUT_DISABLE(void)
   // A 2025 fork: dedicated-GPIO OEN user CSR bit 0
   SWDIO_OUT_DISABLE();
   PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI]);
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+  /* ESP32-C5: RISC-V dedicated-GPIO OEN CSR + GPIO matrix input enable. */
+  SWDIO_OUT_DISABLE();
+  gpio_ll_input_enable(&GPIO, PIN_SWDIO_MOSI);
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
   /* A 2025 behaviour: see PIN_SWDIO_OUT_ENABLE above. */
 #endif
 }
@@ -820,7 +833,7 @@ __STATIC_FORCEINLINE void PIN_nRESET_OUT(uint32_t bit)
     GPIO.enable_w1tc = (0x01 << PIN_nRESET);
 #elif defined CONFIG_IDF_TARGET_ESP32C3
     GPIO.enable_w1tc.enable_w1tc |= (0x01 << PIN_nRESET);
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
 	gpio_ll_output_disable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
 #endif
   }
@@ -831,7 +844,7 @@ __STATIC_FORCEINLINE void PIN_nRESET_OUT(uint32_t bit)
     GPIO.enable_w1ts = (0x01 << PIN_nRESET);
 #elif defined CONFIG_IDF_TARGET_ESP32C3
     GPIO.enable_w1ts.enable_w1ts |= (0x01 << PIN_nRESET);
-#elif defined CONFIG_IDF_TARGET_ESP32S3
+#elif defined CONFIG_IDF_TARGET_ESP32S3 || defined CONFIG_IDF_TARGET_ESP32C5
     gpio_ll_output_enable(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_nRESET);
 #endif
     GPIO_SET_LEVEL_LOW(PIN_nRESET);
@@ -966,9 +979,11 @@ __STATIC_INLINE void DAP_SETUP(void)
    * The drive strength has a significant impact on signal integrity.
    * In actual use, it is necessary to perform signal measurements
    * on the board and select the appropriate drive strength.
-   * (A 2025 fork: 5 mA for esp32c3/esp32s3; revisit after hardware tests.)
+   * (A 2025 fork: 5 mA for esp32c3/esp32s3; ESP32-C5 keeps the same setting
+   *  for the compile-only C5 board, revisit after hardware tests.)
    */
-#if defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3
+#if defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3 || \
+    defined CONFIG_IDF_TARGET_ESP32C5
   gpio_ll_set_drive_capability(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWCLK, GPIO_DRIVE_CAP_0);
   gpio_ll_set_drive_capability(GPIO_HAL_GET_HW(GPIO_PORT_0), PIN_SWDIO_MOSI, GPIO_DRIVE_CAP_0);
 #endif

@@ -43,8 +43,30 @@
     #include "soc/io_mux_reg.h"
     #include "soc/spi_struct.h"
     #include "soc/spi_reg.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+    /* ESP32-C5 (IDF >= v5.5): no hal/gpio_hal.h and no clk_gate_ll periph
+     * helpers; the register headers live in soc/.../register and are exposed
+     * through the soc component include dirs. The DAP C5 code uses the C5
+     * gpio_ll HAL + dedicated-GPIO CSR user registers (same RISC-V mechanism
+     * as C3) and the SPI2 register block (compile-only, see
+     * docs/esp32-c5-port.md). */
+    #include "soc/gpio_struct.h"
+    #include "soc/gpio_sig_map.h"
+    #include "hal/gpio_ll.h"
+    #include "hal/spi_ll.h"
+    #include "soc/dport_access.h"
+    #include "soc/periph_defs.h"
+    #include "soc/io_mux_reg.h"
+    #include "soc/spi_struct.h"
+    #include "soc/spi_reg.h"
+    /* The shared S3-style branches in DAP_config.h call
+     * GPIO_HAL_GET_HW(GPIO_PORT_0); C5 has a single GPIO port and no
+     * hal/gpio_hal.h, so provide the same accessor here. */
+    #ifndef GPIO_HAL_GET_HW
+    #define GPIO_HAL_GET_HW(port) (&GPIO)
+    #endif
 #else
-    #error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 only"
+    #error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 / esp32c5 only"
 #endif
 
 

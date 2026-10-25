@@ -23,13 +23,14 @@
 #include "cmsis-dap/include/gpio_common.h"
 #include "DAP_config.h"
 
-#if defined CONFIG_IDF_TARGET_ESP32C3
+#if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C5)
 // CSR_GPIO_*_USER + RV_*_CSR() for the dedicated-GPIO fast path
 #include "hal/dedic_gpio_cpu_ll.h"
 #endif
 
-#if !defined CONFIG_IDF_TARGET_ESP32 && !defined CONFIG_IDF_TARGET_ESP32C3 && !defined CONFIG_IDF_TARGET_ESP32S3
-#error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 only"
+#if !defined CONFIG_IDF_TARGET_ESP32 && !defined CONFIG_IDF_TARGET_ESP32C3 && \
+    !defined CONFIG_IDF_TARGET_ESP32S3 && !defined CONFIG_IDF_TARGET_ESP32C5
+#error "unsupported target: DAP supports esp32 / esp32c3 / esp32s3 / esp32c5 only"
 #endif
 
 /*
@@ -51,6 +52,11 @@
   #if (PIN_SWCLK != 12) || (PIN_SWDIO_MOSI != 11)
     #error "ESP32-S3 SPI-accelerated DAP requires PIN_SWCLK=GPIO12 and PIN_SWDIO_MOSI=GPIO11"
   #endif
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+  // SPI2 IO_MUX P1 pins on C5: FSPICLK=GPIO6, FSPID=GPIO7 (datasheet Table 2-8)
+  #if (PIN_SWCLK != 6) || (PIN_SWDIO_MOSI != 7)
+    #error "ESP32-C5 fast DAP requires PIN_SWCLK=GPIO6 and PIN_SWDIO_MOSI=GPIO7"
+  #endif
 #endif
 
 #if defined CONFIG_IDF_TARGET_ESP32
@@ -62,6 +68,8 @@
 #elif defined CONFIG_IDF_TARGET_ESP32C3
     #define DAP_SPI GPSPI2
 #elif defined CONFIG_IDF_TARGET_ESP32S3
+    #define DAP_SPI GPSPI2
+#elif defined CONFIG_IDF_TARGET_ESP32C5
     #define DAP_SPI GPSPI2
 #endif
 
@@ -366,6 +374,20 @@ void DAP_SPI_Init()
     DAP_SPI.user.usr_command = 0;
     DAP_SPI.user.usr_addr = 0;
 }
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+/**
+ * @brief ESP32-C5 40 MHz SPI2 backend - NOT PORTED in this branch.
+ *
+ * The C5 SWD path runs on the RISC-V GPIO-fast backend (2 MHz default, high
+ * speed requests are clamped); DAP_SWJ_Clock never selects kTransfer_SPI on
+ * C5, so this function only keeps the shared 3-wire SWD code linkable.
+ * Porting the SPI2 backend requires C5 hardware + logic analyzer
+ * (docs/esp32-c5-port.md follow-up item).
+ */
+void DAP_SPI_Init()
+{
+    // no-op on purpose: see function comment / docs/esp32-c5-port.md
+}
 #endif
 
 
@@ -411,6 +433,33 @@ __FORCEINLINE void DAP_SPI_Deinit()
     // enable SWCLK/MOSI output (CSR user GPIO OEN bits 0 and 1)
     RV_WRITE_CSR(CSR_GPIO_OEN_USER, 3);
     PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_SWDIO_MOSI]);
+}
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+/**
+ * @brief Switch back to CPU-GPIO (dedicated GPIO) mode on ESP32-C5.
+ *
+ * C5 uses the same RISC-V CPU-GPIO CSR mechanism as C3 (CSR_GPIO_OEN_USER /
+ * IN_USER / OUT_USER, bit 1 = SWCLK, bit 0 = SWDIO), but its GPIO peripheral
+ * register fields use the newer "out_sel/in_sel" names. The 40 MHz SPI2
+ * backend is not ported; the GPIO-fast path is what actually runs.
+ */
+__FORCEINLINE void DAP_SPI_Deinit()
+{
+    gpio_ll_func_sel(&GPIO, PIN_SWCLK, PIN_FUNC_GPIO);
+    gpio_ll_func_sel(&GPIO, PIN_SWDIO_MOSI, PIN_FUNC_GPIO); // MOSI
+
+    GPIO.func_out_sel_cfg[PIN_SWCLK].out_sel = CPU_GPIO_OUT1_IDX;
+    GPIO.func_out_sel_cfg[PIN_SWCLK].oen_sel = 0;
+
+    GPIO.func_out_sel_cfg[PIN_SWDIO_MOSI].out_sel = CPU_GPIO_OUT0_IDX;
+    GPIO.func_out_sel_cfg[PIN_SWDIO_MOSI].oen_sel = 0;
+
+    GPIO.func_in_sel_cfg[CPU_GPIO_IN0_IDX].sig_in_sel = 1;
+    GPIO.func_in_sel_cfg[CPU_GPIO_IN0_IDX].in_sel = PIN_SWDIO_MOSI;
+
+    // enable SWCLK/MOSI output (CSR user GPIO OEN bits 0 and 1)
+    RV_WRITE_CSR(CSR_GPIO_OEN_USER, 3);
+    gpio_ll_input_enable(&GPIO, PIN_SWDIO_MOSI);
 }
 #elif defined CONFIG_IDF_TARGET_ESP32S3
 /**
@@ -482,6 +531,24 @@ __FORCEINLINE void DAP_SPI_Acquire()
 __FORCEINLINE void DAP_SPI_Release()
 {
     PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[PIN_SWCLK], FUNC_MTCK_GPIO6);
+}
+#elif defined CONFIG_IDF_TARGET_ESP32C5
+/**
+ * @brief Gain control of SPI (C5 IO_MUX direct functions; unused because the
+ *        C5 40 MHz backend is not ported, kept for the shared code path)
+ */
+__FORCEINLINE void DAP_SPI_Acquire()
+{
+    gpio_ll_func_sel(&GPIO, PIN_SWCLK, FUNC_GPIO6_FSPICLK);
+}
+
+
+/**
+ * @brief Release control of SPI
+ */
+__FORCEINLINE void DAP_SPI_Release()
+{
+    gpio_ll_func_sel(&GPIO, PIN_SWCLK, FUNC_GPIO6_GPIO6);
 }
 #elif defined CONFIG_IDF_TARGET_ESP32S3
 /**
