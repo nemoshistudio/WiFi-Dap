@@ -6,7 +6,7 @@ tmp/
 sdkconfig.old
 sdkconfig
 .idea/
-dependencies.lock
+dependencies.lock*
 /package-lock.json
 managed_components/
 /version.txt

@@ -1,0 +1,91 @@
+# WiFi Dap -- ESP32-C5 (Wi-Fi-only) default configuration.
+#
+# Target: ESP32-C5 DevKitC-1-N8R8 / WROOM-1-N8R8 (8 MB flash, 8 MB PSRAM but
+# PSRAM is left disabled here), compile-only in this branch: no C5 hardware
+# validation yet. See docs/esp32-c5-port.md for the port status, limitations
+# and the build command.
+#
+# Why a separate ESP-IDF version for this target:
+#   ESP32-C5 (v1.0/v1.2) requires ESP-IDF >= v5.5.2. Build C5 with
+#   `IDF_DOCKER_IMAGE_C5=espressif/idf:v5.5.6 scripts/build_all.sh -t esp32c5`
+#   while S3/C3/ESP32 stay on the pinned v5.2.1 image.
+#
+# ESP32-C5 has NO USB-OTG (USB Serial/JTAG only), therefore this variant is
+# Wi-Fi-only: no USB-NCM/TinyUSB, no wired-DAP transport. The USB port is used
+# for the secondary console / flashing / C5's own JTAG only.
+#
+# 8 MB flash + the frozen dual-OTA layout (2 x 3 MB app slots) is reused from
+# the ESP32-S3 build so the Web/OTA/curve byte budgets are identical.
+
+#
+# Target / toolchain
+#
+CONFIG_IDF_TARGET="esp32c5"
+CONFIG_IDF_TARGET_ARCH_RISCV=y
+
+#
+# Flash: 8 MB (DevKitC-1-N8R8), frozen dual-OTA partition table
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions_8mb_ota.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/partitions_8mb_ota.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_PARTITION_TABLE_MD5=y
+
+#
+# App / OTA: same rollback contract as the S3 release build
+#
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+#
+# CPU: ESP32-C5 HP core up to 240 MHz (DAP SWD bit-banging uses the fast path)
+#
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+#
+# Console: UART0 primary (same as S3), USB-Serial/JTAG secondary.
+# There is no USB-OTG/NCM on C5, so the USB pads are free for the console.
+#
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+#
+# Board: ESP32-C5 compile-only reference wiring (components/board/Kconfig)
+#
+CONFIG_BIRDIEBOT_BOARD_GENERIC_C5=y
+
+#
+# Single-core target: never pin the USBIP tcp_server task to core 1
+#
+CONFIG_BIRDIEBOT_USBIP_TCP_CORE=0
+
+#
+# Wi-Fi-only variant: no USB-OTG/NCM/TinyUSB (option not even visible on C5)
+#
+CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NONE=y
+
+#
+# Web UI: WebSocket support (same server/URI modules as the other targets)
+#
+CONFIG_HTTPD_WS_SUPPORT=y
+
+#
+# Unused radios: this variant is Wi-Fi-only. ESP-IDF v5.5 enables the C5
+# 802.15.4 (Thread/Zigbee) stack by default; keep it (and BLE) off so the
+# firmware only contains the Wi-Fi path the project actually uses.
+#
+# CONFIG_BT_ENABLED is not set
+# CONFIG_IEEE802154_ENABLED is not set
+# CONFIG_OPENTHREAD_ENABLED is not set
+
+#
+# Logging: keep the same default level/colour behaviour as the other targets
+#
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_LOG_COLORS=y

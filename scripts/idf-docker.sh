@@ -36,14 +36,16 @@
 # so callers never pass an unsupported flag to idf.py.
 #
 # Environment variables:
-#   IDF_DOCKER_IMAGE             container image         (default espressif/idf:v5.2.1)
+#   IDF_DOCKER_IMAGE             container image         (default espressif/idf:v5.2.1;
+#                                overridden by the -I/--image option)
 #   IDF_CCACHE_DIR               host ccache directory   (default ~/.cache/birdiebot-ccache)
 #   IDF_DOCKER_EXTRA_ARGS        extra "docker run" args (e.g. "--device=/dev/ttyUSB0")
 #   CMAKE_BUILD_PARALLEL_LEVEL   forwarded into the container when set on the host
 #                                (the -j option takes precedence)
 set -euo pipefail
 
-readonly IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
+# Default image; can be overridden by IDF_DOCKER_IMAGE or the -I/--image option.
+IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
 readonly SCRIPT_NAME="${0##*/}"
 
 die() {
@@ -57,7 +59,7 @@ log() {
 
 usage() {
     cat <<'EOF'
-Usage: idf-docker.sh [-C <project-dir>] [-B <build-dir>] [-j <jobs>] <idf.py args...>
+Usage: idf-docker.sh [-C <project-dir>] [-B <build-dir>] [-j <jobs>] [-I <image>] <idf.py args...>
 
   -C <dir>   ESP-IDF project root to mount (default: current directory)
   -B <dir>   build directory; relative to the project root (default: idf.py's own
@@ -65,6 +67,10 @@ Usage: idf-docker.sh [-C <project-dir>] [-B <build-dir>] [-j <jobs>] <idf.py arg
              mount so artifacts survive the container.
   -j <jobs>  parallel build jobs inside the container (sets
              CMAKE_BUILD_PARALLEL_LEVEL; idf.py itself has no -j option)
+  -I <image>, --image <image>
+             explicit ESP-IDF docker image/tag for this invocation, e.g.
+             "espressif/idf:v5.5.6". Overrides IDF_DOCKER_IMAGE (which still
+             provides the default). Useful for per-target images (esp32c5).
   --git-probe  print the container's git metadata (describe/commit/date) and exit;
              use this to verify that a linked worktree's gitdir is reachable.
   -h         show this help
@@ -79,9 +85,11 @@ cache-entry is recognized explicitly so wrapper options (e.g. -j) may follow it.
   idf-docker.sh --version
   idf-docker.sh -B build/esp32c3 set-target esp32c3
   idf-docker.sh -B build/esp32c3 -j 8 build
+  idf-docker.sh -I espressif/idf:v5.5.6 -B build/esp32c5 set-target esp32c5
 
-Environment: IDF_DOCKER_IMAGE, IDF_CCACHE_DIR, IDF_DOCKER_EXTRA_ARGS,
-             CMAKE_BUILD_PARALLEL_LEVEL (forwarded; -j wins).
+Environment: IDF_DOCKER_IMAGE (default image), IDF_CCACHE_DIR,
+             IDF_DOCKER_EXTRA_ARGS, CMAKE_BUILD_PARALLEL_LEVEL
+             (forwarded; -j wins; -I/--image overrides the image).
 EOF
 }
 
@@ -136,6 +144,15 @@ while [ "$#" -gt 0 ]; do
             EXTRA_IDF_ARGS+=("$1")
             shift
             ;;
+        -I|--image)
+            [ "$#" -ge 2 ] || die "$1 requires a container image argument"
+            IMAGE="$2"
+            shift 2
+            ;;
+        --image=*)
+            IMAGE="${1#*=}"
+            shift
+            ;;
         --git-probe)
             GIT_PROBE=1
             shift
@@ -160,6 +177,8 @@ done
 if [ -n "$JOBS" ] && ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
     die "-j/--jobs must be a positive integer (got '$JOBS')"
 fi
+
+[ -n "$IMAGE" ] || die "container image must not be empty (-I/--image / IDF_DOCKER_IMAGE)"
 
 if [ "$GIT_PROBE" -eq 0 ]; then
     [ "$#" -gt 0 ] || die "no idf.py arguments given (try '$SCRIPT_NAME --version' or '$SCRIPT_NAME -h')"
@@ -294,6 +313,17 @@ DOCKER_ARGS=(
     -v "$CCACHE_HOST:/ccache"
     -w /project
 )
+
+# ESP-IDF v5.5+ component manager keeps its "root managed components" (managed
+# dependencies of IDF itself) under $IDF_TOOLS_PATH/root_managed_components.
+# The official image sets IDF_TOOLS_PATH=/opt/esp, which is root-owned, so a
+# non-root container user (this wrapper runs with the host uid/gid) cannot
+# create it and CMake fails with "PermissionError: ... /opt/esp/
+# root_managed_components". Mount a writable host directory over that path;
+# older IDF images (e.g. v5.2.1) never touch it, so this is harmless there.
+IDF_ROOT_MANAGED_DIR="${IDF_ROOT_MANAGED_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/birdiebot-idf-root-managed}"
+mkdir -p "$IDF_ROOT_MANAGED_DIR" || die "cannot create $IDF_ROOT_MANAGED_DIR"
+DOCKER_ARGS+=(-v "$IDF_ROOT_MANAGED_DIR:/opt/esp/root_managed_components")
 
 # Parallel build level: -j N (or the host CMAKE_BUILD_PARALLEL_LEVEL) is passed
 # into the container as CMAKE_BUILD_PARALLEL_LEVEL, which `cmake --build` (used by

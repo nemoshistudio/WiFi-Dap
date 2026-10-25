@@ -9,6 +9,10 @@
 #   esp32s3 : 8MB flash + partitions/partitions_8mb_ota.csv   (release target)
 #   esp32c3 : 4MB flash + partitions/partitions_4mb_single.csv (compile-only)
 #   esp32   : 4MB flash + partitions/partitions_4mb_single.csv (compile-only)
+#   esp32c5 : 8MB flash + partitions/partitions_8mb_ota.csv    (compile-only,
+#             Wi-Fi-only: no USB OTG/NCM; needs ESP-IDF >= v5.5.2, default image
+#             espressif/idf:v5.5.6 via IDF_DOCKER_IMAGE_C5). Not in the default
+#             target list: pass `-t esp32c5` explicitly.
 #
 # Each target gets its own build directory (build/esp32s3, build/esp32c3,
 # build/esp32) and a full log under build/logs/<target>.log. After a successful
@@ -26,7 +30,9 @@
 #   scripts/build_all.sh --no-lock -t esp32       # skip the flock semaphore
 #   scripts/build_all.sh --fw-version v1.0.0      # explicit PROJECT_VER override
 #
-# Environment: IDF_DOCKER_IMAGE (default espressif/idf:v5.2.1),
+# Environment: IDF_DOCKER_IMAGE (default espressif/idf:v5.2.1) for
+#              esp32s3/esp32c3/esp32; IDF_DOCKER_IMAGE_C5 (default
+#              espressif/idf:v5.5.6) for esp32c5;
 #              BUILD_LOCK_SLOTS / BUILD_LOCK_TIMEOUT (see build-lock.sh).
 set -euo pipefail
 
@@ -47,8 +53,10 @@ usage() {
     cat <<'EOF'
 Usage: build_all.sh [options]
 
-  -t, --targets "T..."   space/comma separated subset of: esp32s3 esp32c3 esp32
-                         (default: all three)
+  -t, --targets "T..."   space/comma separated subset of:
+                         esp32s3 esp32c3 esp32 [esp32c5]
+                         (default: esp32s3 esp32c3 esp32; esp32c5 is opt-in and
+                          builds with its own ESP-IDF image)
   -j, --jobs N           parallel compile jobs (passed to the container as
                          CMAKE_BUILD_PARALLEL_LEVEL; idf.py has no -j option)
       --clean            remove the per-target build directories first
@@ -158,6 +166,43 @@ fi
 defaults_file() {
     printf 'sdkconfig.defaults.%s' "$1"
 }
+
+# ESP32-C5 needs ESP-IDF >= v5.5.2 (Wi-Fi 6/dual-band support and the C5 soc
+# layer). Keep every other target on the pinned v5.2.1 image so the existing
+# release builds are untouched. IDF_DOCKER_IMAGE_C5 / IDF_DOCKER_IMAGE can
+# override both defaults.
+image_for_target() {
+    case "$1" in
+        esp32c5) printf '%s' "${IDF_DOCKER_IMAGE_C5:-espressif/idf:v5.5.6}" ;;
+        *)       printf '%s' "${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}" ;;
+    esac
+}
+
+# Component-manager "managed_components/" is a single project-level directory,
+# but ESP-IDF v5.2.1 and v5.5.x write incompatible .component_hash metadata
+# (the v5.2.1 manager refuses to reuse a directory populated by v5.5). Because
+# this project builds S3/C3/ESP32 with the pinned v5.2.1 image and ESP32-C5
+# with v5.5.6, reset that (gitignored, re-downloadable) directory whenever the
+# IDF family changes between targets/runs.
+idf_family_for_image() {
+    case "$1" in
+        *:v5.5*) printf 'v55' ;;
+        *:v5.2*) printf 'v52' ;;
+        *)       printf '%s' "${1##*:}" ;;
+    esac
+}
+reset_managed_components_if_needed() {
+    local target_image="$1" family stamp prev
+    family="$(idf_family_for_image "$target_image")"
+    stamp="$ROOT/build/.managed_components_idf_family"
+    prev="$(cat "$stamp" 2>/dev/null || true)"
+    if [ -n "$prev" ] && [ "$prev" != "$family" ] && [ -d "$ROOT/managed_components" ]; then
+        log "IDF family changed ($prev -> $family): recreating managed_components (re-downloaded by the component manager)"
+        rm -rf "$ROOT/managed_components"
+    fi
+    mkdir -p "$ROOT/build"
+    printf '%s\n' "$family" > "$stamp"
+}
 build_dir_rel() {
     printf 'build/%s' "$1"
 }
@@ -191,13 +236,16 @@ mkdir -p "$ROOT/build/logs"
 
 for target in "${TARGETS[@]}"; do
     case "$target" in
-        esp32s3|esp32c3|esp32) ;;
-        *) die "unsupported target '$target' (expected esp32s3|esp32c3|esp32)" ;;
+        esp32s3|esp32c3|esp32|esp32c5) ;;
+        *) die "unsupported target '$target' (expected esp32s3|esp32c3|esp32|esp32c5)" ;;
     esac
     build_rel="$(build_dir_rel "$target")"
     build_abs="$ROOT/$build_rel"
     log_file="$ROOT/build/logs/$target.log"
+    target_image="$(image_for_target "$target")"
     printf '\n[build_all] === %s (build dir %s) ===\n' "$target" "$build_rel"
+    log "image: $target_image"
+    reset_managed_components_if_needed "$target_image"
     log "log: $log_file"
 
     if [ "$CLEAN" -eq 1 ]; then
@@ -234,6 +282,7 @@ for target in "${TARGETS[@]}"; do
         # All -D options must precede the idf.py command (set-target), otherwise
         # idf.py treats them as unknown commands.
         set_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel"
+                 --image "$target_image"
                  -D "SDKCONFIG_DEFAULTS=$(defaults_file "$target")"
                  -D "SDKCONFIG=$sdkconfig_rel")
         [ -n "$FW_VERSION" ] && set_cmd+=(-D "BIRDIEBOT_FW_VERSION=$FW_VERSION")
@@ -247,7 +296,7 @@ for target in "${TARGETS[@]}"; do
     fi
 
     if [ "$rc" -eq 0 ]; then
-        build_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel")
+        build_cmd=("$SCRIPT_DIR/idf-docker.sh" -B "$build_rel" --image "$target_image")
         # -j belongs to the idf-docker wrapper (CMAKE_BUILD_PARALLEL_LEVEL), NOT
         # to idf.py: `idf.py build -j N` fails with "No such option: -j". It must
         # precede the idf.py -D arguments so the wrapper can consume it.

@@ -81,6 +81,9 @@ SDKCONFIG_EXPECT = {
     "sdkconfig.defaults.esp32s3": ("partitions/partitions_8mb_ota.csv", "8MB"),
     "sdkconfig.defaults.esp32c3": ("partitions/partitions_4mb_single.csv", "4MB"),
     "sdkconfig.defaults.esp32": ("partitions/partitions_4mb_single.csv", "4MB"),
+    # ESP32-C5: 8MB DevKit (N8R8) reuses the frozen dual-OTA S3 layout; no USB
+    # OTG/NCM, Wi-Fi-only variant (compile-only until hardware validation).
+    "sdkconfig.defaults.esp32c5": ("partitions/partitions_8mb_ota.csv", "8MB"),
 }
 
 # Build directory -> partition table used for the app-size check.
@@ -94,6 +97,8 @@ BUILD_TARGETS = {
     "build-esp32c3": "partitions/partitions_4mb_single.csv",
     "build/esp32": "partitions/partitions_4mb_single.csv",
     "build-esp32": "partitions/partitions_4mb_single.csv",
+    "build/esp32c5": "partitions/partitions_8mb_ota.csv",
+    "build/c5": "partitions/partitions_8mb_ota.csv",
 }
 
 ERRORS: list[str] = []
