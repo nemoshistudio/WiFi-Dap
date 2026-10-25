@@ -45,6 +45,7 @@
 #define WIFI_CRED_KEY_LAST_IDX "last_idx"
 #define WIFI_CRED_KEY_AP_SSID "ap_ssid"
 #define WIFI_CRED_KEY_AP_PASS "ap_pass"
+#define WIFI_CRED_KEY_FACTORY_SEEDED "factory_seeded"
 #define WIFI_CRED_KEY_PREFIX "cred_"
 
 #ifdef CONFIG_BIRDIEBOT_AP_PASS
@@ -441,6 +442,86 @@ static esp_err_t cred_seed_locked(nvs_handle_t handle, bool migrated)
 }
 
 /* ------------------------------------------------------------------------- */
+/* first-boot STA provisioning (Kconfig, one-shot)                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Optional factory/test-build STA credential, compiled in from
+ * CONFIG_BIRDIEBOT_WIFI_STA_PROV_SSID/_PASSWORD (empty in release builds).
+ *
+ * Real-device bring-up (e.g. ESP32-C5, which is Wi-Fi only and has no wired
+ * management interface) needs a way to join a known network on a fresh device
+ * whose NVS is empty. The credential is stored as a regular table entry, so
+ * the Web UI (WIFI cmd 2/12) can overwrite or delete it afterwards.
+ *
+ * One-shot semantics: the "factory_seeded" flag is written after the first
+ * evaluation, so deleting the credential does not resurrect it on the next
+ * boot, and a device that already has user credentials is never touched
+ * (only the flag is set). Invalid configured values are logged and skipped;
+ * they do not consume the one-shot flag (an accidental typo in a local
+ * overlay build can be fixed and re-flashed).
+ */
+static void cred_apply_factory_provisioning_locked(nvs_handle_t handle)
+{
+	uint8_t seeded = 0;
+	esp_err_t err;
+
+	if (nvs_get_u8(handle, WIFI_CRED_KEY_FACTORY_SEEDED, &seeded) == ESP_OK) {
+		return; /* already evaluated on a previous boot */
+	}
+
+#ifdef CONFIG_BIRDIEBOT_WIFI_STA_PROV_SSID
+	const char *prov_ssid = CONFIG_BIRDIEBOT_WIFI_STA_PROV_SSID;
+#else
+	const char *prov_ssid = "";
+#endif
+#ifdef CONFIG_BIRDIEBOT_WIFI_STA_PROV_PASSWORD
+	const char *prov_password = CONFIG_BIRDIEBOT_WIFI_STA_PROV_PASSWORD;
+#else
+	const char *prov_password = "";
+#endif
+
+	if (prov_ssid[0] == '\0') {
+		return; /* nothing configured (release build): keep the one-shot unused */
+	}
+	if (!wifi_cred_ssid_valid(prov_ssid) || !wifi_cred_password_valid(prov_password)) {
+		ESP_LOGW(TAG, "factory STA credential invalid (ssid_len=%u), ignored",
+		         (unsigned)wifi_cred_strnlen(prov_ssid, BIRDIEBOT_WIFI_SSID_MAX + 1));
+		return;
+	}
+
+	if (cred.count > 0) {
+		ESP_LOGI(TAG, "factory STA credential skipped: %u saved credential(s) already present",
+		         cred.count);
+	} else {
+		if (wifi_cred_record_set(&cred.table[0], prov_ssid, prov_password, 0,
+		                         BIRDIEBOT_WIFI_CRED_PRIORITY_DEFAULT) != 0) {
+			return;
+		}
+		cred.count = 1;
+		cred.last_idx = BIRDIEBOT_WIFI_CRED_NONE;
+		err = cred_write_records_locked(handle);
+		if (err == ESP_OK) {
+			err = cred_write_meta_locked(handle);
+		}
+		if (err != ESP_OK) {
+			ESP_LOGE(TAG, "factory STA credential write failed: %s", esp_err_to_name(err));
+			return;
+		}
+		/* Never log the password. */
+		ESP_LOGI(TAG, "factory STA credential provisioned (ssid=\"%s\")", prov_ssid);
+	}
+
+	err = nvs_set_u8(handle, WIFI_CRED_KEY_FACTORY_SEEDED, 1);
+	if (err == ESP_OK) {
+		err = nvs_commit(handle);
+	}
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "cannot record factory provisioning flag: %s", esp_err_to_name(err));
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* RAM-only credential helpers (contract §3 RAM-only exception)              */
 /* ------------------------------------------------------------------------- */
 
@@ -651,6 +732,13 @@ int wifi_cred_mem_init(void)
 		cred.future_schema = true;
 		ESP_LOGW(TAG, "unknown credential schema %u (newer firmware?), running empty",
 		         schema);
+	}
+
+	/* First-boot STA provisioning from the build configuration (one-shot,
+	 * empty in release builds). Skipped for a future NVS schema, which must
+	 * never be written by older firmware (§2.4.4). */
+	if (!cred.future_schema) {
+		cred_apply_factory_provisioning_locked(handle);
 	}
 
 	/* auto_save defaults to true when missing (§2.3). */

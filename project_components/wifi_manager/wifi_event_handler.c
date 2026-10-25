@@ -216,6 +216,23 @@ void wifi_event_handler(void *handler_arg __attribute__((unused)),
 	}
 	case WIFI_EVENT_AP_START:
 		printf("event: WIFI_EVENT_AP_START\n");
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+		/* Real C5 hardware: the default SoftAP is 5 GHz (channel 36) but the
+		 * single radio can only serve one band at a time, so log the effective
+		 * AP channel/band at every AP start (boot, disconnect fallback). */
+		{
+			uint8_t primary = 0;
+			wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+			wifi_band_t band = WIFI_BAND_2G;
+			if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {
+				(void)esp_wifi_get_band(&band);
+				printf("AP started: channel %u (%s), band=%s, second=%d\n",
+				       (unsigned)primary, primary >= 36 ? "5 GHz" : "2.4 GHz",
+				       band == WIFI_BAND_5G ? "5 GHz" : "2.4 GHz",
+				       (int)second);
+			}
+		}
+#endif
 		/* AP start does not change the STA power mode, but a mode transition
 		 * can have reset it: re-assert the DAP latency setting (tolerates an
 		 * AP-only mode via a warning). */

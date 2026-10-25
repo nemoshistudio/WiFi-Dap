@@ -18,4 +18,86 @@ menu "WiFi Dap WiFi manager"
             WIFI cmd 8 SET_AP_CRED (docs/wifi-credential-memory.md §6).
             README/UI must tell users to change it on first use.
 
+    menu "First-boot STA provisioning (factory/test build)"
+
+        config BIRDIEBOT_WIFI_STA_PROV_SSID
+            string "First-boot STA SSID (empty = disabled)"
+            default ""
+            help
+                Optional factory/test provisioning: on the first boot after
+                flashing (one-shot NVS flag "factory_seeded"), when the saved
+                credential table is empty, this SSID/password pair is added as
+                a normal saved station credential so the device can join the
+                lab/office network without a serial console. The Web UI can
+                afterwards overwrite or delete it like any other credential.
+
+                Leave this empty for release builds (no credentials compiled
+                into the firmware). For a local real-device test build, point
+                SDKCONFIG_DEFAULTS at an *untracked* overlay, e.g.
+                  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults.esp32c5;build/c5hw.provision.defaults"
+                with
+                  CONFIG_BIRDIEBOT_WIFI_STA_PROV_SSID="MyLab-2.4G"
+                  CONFIG_BIRDIEBOT_WIFI_STA_PROV_PASSWORD="********"
+
+        config BIRDIEBOT_WIFI_STA_PROV_PASSWORD
+            string "First-boot STA password (empty = open network)"
+            default ""
+            help
+                Password for BIRDIEBOT_WIFI_STA_PROV_SSID. Only used when the
+                SSID is non-empty; 8..64 bytes or empty for an open network.
+
+    endmenu
+
+    menu "ESP32-C5 Wi-Fi band mode"
+
+        choice BIRDIEBOT_WIFI_BAND_MODE
+            prompt "ESP32-C5 Wi-Fi band mode"
+            depends on IDF_TARGET_ESP32C5
+            default BIRDIEBOT_WIFI_BAND_MODE_AUTO
+            help
+                ESP32-C5 has a single dual-band Wi-Fi 6 radio. WIFI_BAND_MODE_AUTO
+                lets the driver select 2.4 GHz or 5 GHz automatically from the
+                connected AP / SoftAP configuration (it is *not* simultaneous
+                dual-band operation; AP and STA stay on the same band). Keep the
+                2.4 GHz-only mode only to reproduce the earlier compile-only
+                behaviour / interoperability debugging.
+
+            config BIRDIEBOT_WIFI_BAND_MODE_AUTO
+                bool "2.4 GHz + 5 GHz (auto)"
+
+            config BIRDIEBOT_WIFI_BAND_MODE_2G_ONLY
+                bool "2.4 GHz only (legacy)"
+        endchoice
+
+        config BIRDIEBOT_C5_AP_CHANNEL
+            int "ESP32-C5 default SoftAP channel (1-13 = 2.4 GHz, 36-177 = 5 GHz)"
+            depends on IDF_TARGET_ESP32C5
+            range 1 177
+            default 36
+            help
+                Default SoftAP channel on the ESP32-C5.  The default 36 makes the
+                fallback SoftAP operate in the 5 GHz band (5180 MHz, non-DFS),
+                which is the real-hardware default (docs/esp32-c5-port.md §11.9).
+
+                The C5 has a single dual-band radio: with WIFI_BAND_MODE_AUTO the
+                AP and STA must share the same band.  The STA association has
+                priority, and the smart-APSTA logic stops the SoftAP shortly
+                after a successful STA connection (C5 default: 2 s), so the AP
+                band only matters for the "no STA" fallback / first-boot AP.
+
+                Values 1-13 keep the legacy 2.4 GHz SoftAP (e.g. 6).
+
+        config BIRDIEBOT_C5_COUNTRY_CODE
+            string "ESP32-C5 Wi-Fi country code"
+            depends on IDF_TARGET_ESP32C5
+            default "CN"
+            help
+                Country/regulatory code applied with esp_wifi_set_country_code()
+                on the ESP32-C5, so the 5 GHz channel set is well defined.  "CN"
+                allows 5150-5350 MHz (channels 36-64) and 5725-5850 MHz
+                (149-165); channel 36 (the default SoftAP channel) is non-DFS.
+                Change this only after checking the local regulations.
+
+    endmenu
+
 endmenu

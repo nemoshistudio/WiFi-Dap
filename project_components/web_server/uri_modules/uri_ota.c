@@ -86,12 +86,17 @@
 #define OTA_UPLOAD_URI         "/api/ota/upload"
 #define OTA_UPLOAD_BUF_SIZE    CONFIG_BIRDIEBOT_OTA_BUF_SIZE
 #define OTA_UPLOAD_BUF_COUNT   2
-/* 5,120 B is the historical S3 upload stack.  4,096 B (already exercised on
- * this image) is only tried when the post-ring-release heap cannot fit 5,120;
- * the chosen value is reported as ota_upload_task_stack in
- * GET /api/target/status. */
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/* C5 internal heap is tighter; 3584 B is validated on real hardware. */
+#define OTA_UPLOAD_TASK_STACK          3584
+#define OTA_UPLOAD_TASK_STACK_FALLBACK 3584
+#else
+/* 5,120 B is the historical S3 upload stack.  4,096 B is only tried when the
+ * post-ring-release heap cannot fit 5,120; the chosen value is reported as
+ * ota_upload_task_stack in GET /api/target/status. */
 #define OTA_UPLOAD_TASK_STACK          5120
 #define OTA_UPLOAD_TASK_STACK_FALLBACK 4096
+#endif
 #define OTA_UPLOAD_TASK_PRIO   5
 #define OTA_REBOOT_DELAY_MS    1000
 #define OTA_JSON_RESP_MAX      640
@@ -443,6 +448,8 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 	}
 
 	if (s_free_queue == NULL || s_work_queue == NULL) {
+		ESP_LOGE(TAG, "ota unavailable: queues free=%p work=%p",
+		         (void *)s_free_queue, (void *)s_work_queue);
 		ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
 		return ESP_OK;
 	}
@@ -517,8 +524,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 	}
 	ota_diag_stage(OTA_UPLOAD_STAGE_TASK_CREATED);
 
-	/* Receive the declared body (see file header for why this runs here) and
-	 * hand the chunks to the OTA task through the static buffers. */
+	/* Receive the declared body and hand the chunks to the OTA task. */
 	uint32_t remaining = req->content_len;
 	while (remaining > 0) {
 		ota_rx_item_t slot_item;
@@ -535,6 +541,10 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 			break;
 		}
 		if (received <= 0) {
+			ESP_LOGW(TAG, "ota recv failed: %d (remaining=%u heap_largest=%u)",
+			         received, (unsigned)remaining,
+			         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+			                                                    MALLOC_CAP_8BIT));
 			ota_free_slot(slot);
 			s_ctx.recv_result = OTA_RECV_DISCONNECTED;
 			break;

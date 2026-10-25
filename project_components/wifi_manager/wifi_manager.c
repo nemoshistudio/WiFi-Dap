@@ -214,6 +214,56 @@ static void rotation_prepare_pending(const char *ssid, const char *password, int
 /* init                                                                      */
 /* ------------------------------------------------------------------------- */
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/*
+ * ESP32-C5 has one dual-band Wi-Fi 6 radio. WIFI_BAND_MODE_AUTO means "let the
+ * driver pick 2.4 GHz or 5 GHz from the AP/SoftAP configuration" -- it is NOT
+ * simultaneous dual-band operation (AP and STA stay on the same band, see the
+ * ESP-IDF v5.5 Wi-Fi guide). The default is AUTO so a C5 station can join an
+ * existing 5 GHz network; the legacy 2.4 GHz-only mode stays selectable via
+ * Kconfig for interoperability debugging.
+ *
+ * The driver rejects esp_wifi_set_band_mode() before esp_wifi_start()
+ * (ESP_ERR_WIFI_NOT_STARTED), so this must run AFTER start -- the earlier
+ * compile-only code called it before start and silently kept the default.
+ */
+static const char *wifi_band_mode_name(wifi_band_mode_t mode)
+{
+	switch (mode) {
+	case WIFI_BAND_MODE_2G_ONLY:
+		return "2.4 GHz only";
+	case WIFI_BAND_MODE_5G_ONLY:
+		return "5 GHz only";
+	case WIFI_BAND_MODE_AUTO:
+		return "2.4 GHz + 5 GHz (auto)";
+	default:
+		return "unknown";
+	}
+}
+
+static void wifi_manager_apply_band_mode(const char *where)
+{
+#if defined(CONFIG_BIRDIEBOT_WIFI_BAND_MODE_2G_ONLY)
+	const wifi_band_mode_t want = WIFI_BAND_MODE_2G_ONLY;
+#else
+	const wifi_band_mode_t want = WIFI_BAND_MODE_AUTO;
+#endif
+	wifi_band_mode_t got = WIFI_BAND_MODE_AUTO;
+	esp_err_t band_err = esp_wifi_set_band_mode(want);
+
+	if (band_err != ESP_OK) {
+		ESP_LOGW(TAG, "Wi-Fi band mode apply failed at %s: %s", where,
+		         esp_err_to_name(band_err));
+		return;
+	}
+	if (esp_wifi_get_band_mode(&got) == ESP_OK) {
+		ESP_LOGI(TAG, "Wi-Fi band mode: %s at %s", wifi_band_mode_name(got), where);
+	} else {
+		ESP_LOGI(TAG, "Wi-Fi band mode set to %s at %s", wifi_band_mode_name(want), where);
+	}
+}
+#endif /* CONFIG_IDF_TARGET_ESP32C5 */
+
 void wifi_manager_init(void)
 {
 	esp_err_t err;
@@ -242,10 +292,22 @@ void wifi_manager_init(void)
 	ctx.try_connect_count = 0;
 	ctx.pending_valid = false;
 	ctx.pending_persist = false;
-	/* Smart APSTA defaults: AP off 30 s after STA connect, AP on 10 s after a
-	 * disconnect (contract §5.6; tunable through WIFI cmd 7). */
+	/* Smart APSTA defaults (contract §5.6; tunable through WIFI cmd 7):
+	 * AP off after STA connect, AP on 10 s after a disconnect. */
 	ctx.ap_on_delay_tick = pdMS_TO_TICKS(10000);
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* ESP32-C5 has a single dual-band Wi-Fi radio: keeping the fallback SoftAP
+	 * alive while the STA is already associated makes large HTTP/OTA transfers
+	 * stall (measured on real hardware 2026-10-25: the first Web page request
+	 * after boot sent only ~6.7 KiB, then httpd reported "error in send : 11"
+	 * (EAGAIN) after its 10 s send timeout; later requests succeeded once the
+	 * AP had been stopped by the 30 s timer).  The AP is only a fallback for
+	 * "no STA connection", so on the C5 stop it 2 s after the STA connects;
+	 * it still comes back 10 s after a disconnect. */
+	ctx.ap_off_delay_tick = pdMS_TO_TICKS(2000);
+#else
 	ctx.ap_off_delay_tick = pdMS_TO_TICKS(30000);
+#endif
 
 	/* Load/migrate the multi credential table before touching any STA/AP
 	 * credential (docs/wifi-credential-memory.md §2/§7). */
@@ -268,15 +330,21 @@ void wifi_manager_init(void)
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler, NULL, NULL));
 
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
-	/* ESP32-C5 is 2.4/5 GHz dual-band. This Wi-Fi-only DAP variant is
-	 * 2.4 GHz-only for now (5 GHz is a follow-up, docs/esp32-c5-port.md):
-	 * keep the existing AP/STA/credential behaviour identical to S3. */
+	/* Real C5 hardware default: 5 GHz SoftAP on channel 36.  Set the regulatory
+	 * domain explicitly (CN: 5150-5350 MHz incl. non-DFS channel 36) before the
+	 * AP configuration is applied, so the 5 GHz channel is accepted. */
 	{
-		esp_err_t band_err = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
-		if (band_err != ESP_OK) {
-			ESP_LOGW(TAG, "2.4GHz-only band mode not applied: %s", esp_err_to_name(band_err));
+#ifdef CONFIG_BIRDIEBOT_C5_COUNTRY_CODE
+		const char *country = CONFIG_BIRDIEBOT_C5_COUNTRY_CODE;
+#else
+		const char *country = "CN";
+#endif
+		esp_err_t cc_err = esp_wifi_set_country_code(country, true);
+		if (cc_err != ESP_OK) {
+			ESP_LOGW(TAG, "Wi-Fi country code %s not applied: %s", country,
+			         esp_err_to_name(cc_err));
 		} else {
-			ESP_LOGI(TAG, "Wi-Fi band mode: 2.4 GHz only (ESP32-C5)");
+			ESP_LOGI(TAG, "Wi-Fi country code: %s (5 GHz SoftAP default)", country);
 		}
 	}
 #endif
@@ -336,6 +404,10 @@ void wifi_manager_init(void)
 	}
 
 	ESP_ERROR_CHECK(esp_wifi_start());
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* The band-mode API is only accepted once the driver is started. */
+	wifi_manager_apply_band_mode("esp_wifi_start");
+#endif
 	/* The pre-start power mode can be overridden by start/mode changes; force
 	 * no power save again now that the driver is running (debug throughput). */
 	wifi_manager_apply_no_power_save("esp_wifi_start");
@@ -467,6 +539,23 @@ static void wifi_event_scan_channel_done(uint16_t number, wifi_ap_record_t *aps)
  *                    requested rotation_cancel (<= one channel wait).
  * @return WIFI_SCAN_OK / WIFI_SCAN_FAILED / WIFI_SCAN_CANCELED / WIFI_SCAN_BUSY.
  */
+/*
+ * Channels scanned by the rotation/Web scan (one channel per scan_run step).
+ *
+ * ESP32-C5 real hardware: the C5 is dual-band, and a saved 5 GHz credential
+ * must be discoverable by the rotation scan as well, so in WIFI_BAND_MODE_AUTO
+ * the scan covers the 5 GHz non-DFS channels too (36-48 and 149-165; DFS
+ * channels 52-144 need passive scanning and would blow the <=10 s scan
+ * contract).  2.4 GHz-only mode keeps the legacy 1..13 list.
+ */
+static const uint8_t s_scan_channels[] = {
+	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_BIRDIEBOT_WIFI_BAND_MODE_AUTO)
+	36, 40, 44, 48, 149, 153, 157, 161, 165,
+#endif
+};
+#define SCAN_CHANNEL_COUNT (sizeof(s_scan_channels) / sizeof(s_scan_channels[0]))
+
 static int scan_run(wifi_ap_record_t *aps, uint16_t max_ap, uint16_t *found,
                     bool cancellable)
 {
@@ -488,7 +577,8 @@ static int scan_run(wifi_ap_record_t *aps, uint16_t max_ap, uint16_t *found,
 	ctx.task = xTaskGetCurrentTaskHandle();
 	xSemaphoreGive(ctx.lock);
 
-	for (int scan_channel = 1; scan_channel <= 13; ++scan_channel) {
+	for (size_t scan_idx = 0; scan_idx < SCAN_CHANNEL_COUNT; ++scan_idx) {
+		uint8_t scan_channel = s_scan_channels[scan_idx];
 		if (cancellable && ctx.rotation_cancel) {
 			result = WIFI_SCAN_CANCELED;
 			break;
@@ -500,7 +590,7 @@ static int scan_run(wifi_ap_record_t *aps, uint16_t max_ap, uint16_t *found,
 		if (wifi_event_trigger_scan(scan_channel,
 		                            wifi_event_scan_channel_done, number,
 		                            &aps[ctx.scan_total_aps])) {
-			ESP_LOGE(TAG, "trigger scan %d error", scan_channel);
+			ESP_LOGE(TAG, "trigger scan %u error", (unsigned)scan_channel);
 			result = WIFI_SCAN_FAILED;
 			break;
 		}
@@ -1177,6 +1267,10 @@ static int set_wifi_mode(wifi_apsta_mode_e mode)
 	/* esp_wifi_set_mode() can reset the station power mode; re-apply while the
 	 * lock is still held (the helper only calls the Wi-Fi driver). */
 	wifi_manager_apply_no_power_save("esp_wifi_set_mode");
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* Keep the C5 band mode across AP/STA mode transitions as well. */
+	wifi_manager_apply_band_mode("esp_wifi_set_mode");
+#endif
 	return err;
 }
 
@@ -1281,7 +1375,18 @@ int wifi_manager_set_ap_credential(wifi_credential_t *cred)
 	ap_config.ap.authmode = (password_len >= BIRDIEBOT_WIFI_AP_PASS_MIN)
 	                        ? WIFI_AUTH_WPA2_WPA3_PSK : WIFI_AUTH_OPEN;
 	ap_config.ap.max_connection = 4;
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* Real C5 hardware default SoftAP is 5 GHz channel 36 (5180 MHz,
+	 * non-DFS) with the CN regulatory domain; see
+	 * sdkconfig.defaults.esp32c5 / docs/esp32-c5-port.md §11.9.  A value in
+	 * 1..13 keeps the legacy 2.4 GHz AP (e.g. 6).  The single radio cannot
+	 * serve a 5 GHz AP and a 2.4 GHz STA association simultaneously: the STA
+	 * has priority and the smart-APSTA logic stops the AP ~2 s after the STA
+	 * connects (it restarts 10 s after a disconnect). */
+	ap_config.ap.channel = CONFIG_BIRDIEBOT_C5_AP_CHANNEL;
+#else
 	ap_config.ap.channel = 6;
+#endif
 	ap_config.ap.ssid_hidden = 0;
 
 	err = esp_wifi_get_mode(&mode);

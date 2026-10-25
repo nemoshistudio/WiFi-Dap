@@ -23,8 +23,10 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/idf_additions.h" /* xTaskCreateWithCaps (C5 PSRAM task stacks) */
 
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "birdiebot_board.h"
@@ -54,6 +56,70 @@
 #define UART_SERVICE_TX_TASK_STACK 3072
 #define UART_SERVICE_RX_TASK_PRIO  10
 #define UART_SERVICE_TX_TASK_PRIO  9
+
+/*
+ * Task stack placement.
+ *
+ * ESP32-C5 real hardware: the internal heap left after Wi-Fi/web/DAP is too
+ * small for the two 3 KiB UART task stacks (uart_service_init failed with
+ * ESP_ERR_NO_MEM when creating "uart_rx"; docs/esp32-c5-port.md §11.9).
+ * The UART bridge tasks are low-frequency background tasks, so their stacks
+ * may live in PSRAM (the UART driver RX/TX/event queues stay in internal RAM -
+ * they are DMA related).  Only the stack is moved; if PSRAM is unavailable
+ * at runtime the helper falls back to internal RAM.
+ *
+ * The task stacks are deleted with vTaskDeleteWithCaps() when they were
+ * allocated by xTaskCreateWithCaps().
+ */
+static bool s_rx_task_ext_stack;
+static bool s_tx_task_ext_stack;
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+#define UART_SERVICE_EXT_STACK_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+
+static BaseType_t uart_service_task_create(TaskFunction_t fn, const char *name,
+                                           uint32_t stack_depth, UBaseType_t prio,
+                                           TaskHandle_t *handle, bool *ext_stack)
+{
+    BaseType_t rc = xTaskCreateWithCaps(fn, name, stack_depth, NULL, prio,
+                                        handle, UART_SERVICE_EXT_STACK_CAPS);
+    if (rc == pdPASS) {
+        *ext_stack = true;
+        return rc;
+    }
+    ESP_LOGW(TAG, "%s: PSRAM task stack unavailable, using internal RAM", name);
+    *ext_stack = false;
+    return xTaskCreate(fn, name, stack_depth, NULL, prio, handle);
+}
+
+static void uart_service_task_delete(TaskHandle_t handle, bool ext_stack)
+{
+    if (handle == NULL) {
+        return;
+    }
+    if (ext_stack) {
+        vTaskDeleteWithCaps(handle);
+    } else {
+        vTaskDelete(handle);
+    }
+}
+#else
+static BaseType_t uart_service_task_create(TaskFunction_t fn, const char *name,
+                                           uint32_t stack_depth, UBaseType_t prio,
+                                           TaskHandle_t *handle, bool *ext_stack)
+{
+    *ext_stack = false;
+    return xTaskCreate(fn, name, stack_depth, NULL, prio, handle);
+}
+
+static void uart_service_task_delete(TaskHandle_t handle, bool ext_stack)
+{
+    (void)ext_stack;
+    if (handle != NULL) {
+        vTaskDelete(handle);
+    }
+}
+#endif
 
 typedef struct uart_service_sub_t {
     uart_service_rx_cb_t cb;
@@ -352,8 +418,10 @@ static esp_err_t uart_service_do_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(uart_service_rx_task, "uart_rx", UART_SERVICE_RX_TASK_STACK,
-                    NULL, UART_SERVICE_RX_TASK_PRIO, &s_rx_task_handle) != pdPASS) {
+    if (uart_service_task_create(uart_service_rx_task, "uart_rx",
+                                 UART_SERVICE_RX_TASK_STACK,
+                                 UART_SERVICE_RX_TASK_PRIO, &s_rx_task_handle,
+                                 &s_rx_task_ext_stack) != pdPASS) {
         ESP_LOGE(TAG, "failed to create UART RX task");
         vSemaphoreDelete(s_cfg_mutex);
         s_cfg_mutex = NULL;
@@ -364,10 +432,12 @@ static esp_err_t uart_service_do_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(uart_service_tx_task, "uart_tx", UART_SERVICE_TX_TASK_STACK,
-                    NULL, UART_SERVICE_TX_TASK_PRIO, &s_tx_task_handle) != pdPASS) {
+    if (uart_service_task_create(uart_service_tx_task, "uart_tx",
+                                 UART_SERVICE_TX_TASK_STACK,
+                                 UART_SERVICE_TX_TASK_PRIO, &s_tx_task_handle,
+                                 &s_tx_task_ext_stack) != pdPASS) {
         ESP_LOGE(TAG, "failed to create UART TX task");
-        vTaskDelete(s_rx_task_handle);
+        uart_service_task_delete(s_rx_task_handle, s_rx_task_ext_stack);
         s_rx_task_handle = NULL;
         vSemaphoreDelete(s_cfg_mutex);
         s_cfg_mutex = NULL;
@@ -392,6 +462,15 @@ static esp_err_t uart_service_do_init(void)
              s_cfg.parity == UART_SERVICE_PARITY_NONE ? "N" :
              (s_cfg.parity == UART_SERVICE_PARITY_ODD ? "O" : "E"),
              (unsigned)s_cfg.stop_bits);
+    /* Bring-up diagnostics: which allocator served the task stacks and how much
+     * internal RAM is left once the UART bridge is up (the C5 failure mode was
+     * silently returning ESP_ERR_NO_MEM here). */
+    ESP_LOGI(TAG, "UART task stacks: rx=%s tx=%s; internal free=%u largest=%u",
+             s_rx_task_ext_stack ? "PSRAM" : "internal",
+             s_tx_task_ext_stack ? "PSRAM" : "internal",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                        MALLOC_CAP_8BIT));
 
     return ESP_OK;
 }

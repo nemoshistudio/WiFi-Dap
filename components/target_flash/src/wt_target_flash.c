@@ -29,6 +29,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include "freertos/idf_additions.h" /* xTaskCreatePinnedToCoreWithCaps (C5 PSRAM stacks) */
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -125,10 +126,20 @@ static void tf_worker_task(void *arg)
 #if defined(portNUM_PROCESSORS) && (portNUM_PROCESSORS > 1)
 /* Core-1 dedicated-GPIO signals (S3) / CPU GPIO CSRs (C3) are per-core. */
 #define TF_WORKER_CORE 1
+/* 8 KiB of stack on the dual-core targets. */
+#define TF_WORKER_STACK 8192
 #else
 /* Single-core targets (ESP32-C5, ESP32, ESP32-C3): core 1 does not exist and
  * xTaskCreatePinnedToCore(..., 1) would trip the FreeRTOS core-id assert. */
 #define TF_WORKER_CORE 0
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/* ESP32-C5 real hardware: internal RAM is tight (see
+ * sdkconfig.defaults.esp32c5); 5 KiB is enough for the target-flash worker's
+ * DAP calls and frees 3 KiB for the USBIP DAP task + Wi-Fi. */
+#define TF_WORKER_STACK 5120
+#else
+#define TF_WORKER_STACK 8192
+#endif
 #endif
 
 static esp_err_t tf_worker_start(void)
@@ -142,10 +153,26 @@ static esp_err_t tf_worker_start(void)
     }
     /* The SWD bit-bang uses per-core dedicated-GPIO signals, so the DAP
      * command path must run on the DAP core - the same reason the DAP task
-     * and tcp_server are pinned there (core 1 on S3, core 0 on unicore). */
-    created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", 8192, NULL,
+     * and tcp_server are pinned there (core 1 on S3, core 0 on unicore).
+     *
+     * ESP32-C5: the target-flash worker only bit-bangs SWD towards the target
+     * (it never writes the C5's own flash), so its stack may live in PSRAM and
+     * the internal heap stays available for WiFi/DAP/OTA. */
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+    created = xTaskCreatePinnedToCoreWithCaps(
+        tf_worker_task, "tf_worker", TF_WORKER_STACK, NULL,
+        6 /* above httpd (5), below tcp_server/DAP */, &s_worker, TF_WORKER_CORE,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        ESP_LOGW(TF_TAG, "tf_worker PSRAM stack unavailable, using internal RAM");
+        created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", TF_WORKER_STACK,
+                                          NULL, 6, &s_worker, TF_WORKER_CORE);
+    }
+#else
+    created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", TF_WORKER_STACK, NULL,
                                       6 /* above httpd (5), below tcp_server/DAP */,
                                       &s_worker, TF_WORKER_CORE);
+#endif
     if (created != pdPASS) {
         s_worker = NULL;
         return ESP_FAIL;
