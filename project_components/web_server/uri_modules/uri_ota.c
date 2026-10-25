@@ -53,7 +53,19 @@
  * other HTTP/WS requests (e.g. OTA/GET_PROGRESS) are only serviced between
  * upload chunks; the browser-side upload progress bar is driven by XHR upload
  * events and is not affected.
+ *
+ * Slim build (A1, 2026-10-26): this endpoint is disabled by default
+ * (CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE=n).  The whole handler/worker
+ * implementation below is kept for a full-feature restore but is compiled
+ * out, including the static 2 x 4 KiB receive buffers; only the read-only
+ * ota_upload_get_diag() stub for GET /api/target/status remains
+ * (docs/feature-flags.md A1).  OTA partitions, bootloader rollback and
+ * main/'s wt_ota_mark_app_valid() confirmation stay enabled.
  */
+#include <sdkconfig.h>
+
+#if defined(CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE)
+
 #include "web_uri_module.h"
 #include "web_host_guard.h"
 
@@ -748,3 +760,25 @@ static int OTA_UPLOAD_EXIT(const httpd_uri_t **uri_conf)
 }
 
 WEB_URI_MODULE_REGISTER(0x82, OTA_UPLOAD_INIT, OTA_UPLOAD_EXIT);
+
+#else /* !CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE */
+
+/*
+ * Slim build (A1) diagnostics stub.  GET /api/target/status keeps its frozen
+ * ota_upload_* field set (consumed by the Web dashboard and scripts/hil_gate.py)
+ * and reports an inactive upload session.  There is no URI handler, no worker
+ * task and no static receive buffer in this build.
+ */
+#include "ota_upload_diag.h"
+
+#include <string.h>
+
+void ota_upload_get_diag(ota_upload_diag_t *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	memset(out, 0, sizeof(*out));
+}
+
+#endif /* CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE */

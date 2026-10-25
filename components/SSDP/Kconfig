@@ -1,0 +1,18 @@
+menu "WiFi Dap SSDP (UPnP discovery)"
+
+    config BIRDIEBOT_SSDP_ENABLE
+        bool "Enable the SSDP service (UDP 1900 + /SSDP.xml description)"
+        default n
+        help
+            Slim build (H1, 2026-10-26): the SSDP responder is disabled
+            because UPnP discovery is no longer part of the product.  When
+            disabled, components/SSDP/ssdp.c compiles to an empty translation
+            unit, wifi_manager no longer starts the service, the WiFi
+            IP-event handler no longer feeds it the station IP/gateway and
+            the embedded Web UI no longer serves /SSDP.xml.
+
+            The source and the public API stay in the tree so a full-feature
+            image can be restored with one Kconfig line
+            (docs/feature-flags.md H1).  mDNS (wt_mdns) is independent and
+            stays enabled.
+endmenu

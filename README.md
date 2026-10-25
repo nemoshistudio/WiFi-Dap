@@ -6,6 +6,19 @@ A wireless CMSIS-DAP debug probe built on the **ESP32-S3**, with a full embedded
 
 The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap) (MIT) and [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) (Apache-2.0 platform layer), upgraded to **ESP-IDF 5.5.6** and extended with a Web UI plus a JSON/WebSocket protocol. Full documentation index: **[docs/README.md](docs/README.md)**.
 
+> 🧪 **Slim build notice (branch `slim/fw`, 2026-10-26)**: this branch is a
+> **feature-slimmed** firmware.  Defaults vs. the full-feature firmware
+> (tag `backup/full-features-2026-10-26`): browser-local OTA upload and OTA JSON
+> module 5 **removed** (A1/A2, OTA partitions + rollback confirmation kept),
+> SSDP/UPnP **removed** (H1), `GET /api/discover` **removed** (H3), Ozone
+> compatibility tooling **removed** (J1), browser Host/Origin guard **disabled**
+> (M1 - security risk, see [docs/security.md](docs/security.md)), curve series
+> cap **256 → 64** (C4).  USBIP/DAP, Web UI basics, Web-side target flashing,
+> curves, UART, Wi-Fi and mDNS are unchanged.  Per-item flags, restore recipes
+> and resource savings: **[docs/feature-flags.md](docs/feature-flags.md)**.
+> The feature descriptions below describe the full-feature firmware; the slim
+> build is reachable from the same tree with one Kconfig toggle per item.
+
 > ⚠️ **Secure-by-default warning**: the Web/JSON API, WebSocket-DAP, UART TCP bridge and OTA upload are **unauthenticated by default**, and all transports are plaintext. Deploy only on a **trusted LAN** and read [§9 Security defaults & hardening](#9-security-defaults--hardening).
 
 ---

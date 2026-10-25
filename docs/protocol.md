@@ -2,6 +2,12 @@
 
 > 状态：**冻结草案 v1（2026-10-20，Wave 0）**。Wave 1/2 的前后端实现以本文为准；变更需 Lead 统一修改并广播。
 > 相关契约：`docs/ws-binary-router.md`（二进制路由 API）、`docs/ota-local-upload.md`（OTA 上传）、`docs/wifi-credential-memory.md`（多 WiFi 凭据）、`docs/versioning.md`（版本/握手）、`docs/i18n-keys.md`（前端文案 key）。
+>
+> **精简构建（slim/fw，2026-10-26）**：本契约描述完整功能构建。精简构建默认移除
+> **module 5 OTA JSON 查询 + `POST /api/ota/upload`**（A1/A2）、**`GET /api/discover`**
+> （H3）、**SSDP / `GET /SSDP.xml`**（H1）、并关闭 **Host/Origin 校验**（M1）；
+> 其余 HTTP/WS/JSON 接口不变。逐项宏、默认值、恢复方式与资源收益见
+> [feature-flags.md](feature-flags.md)。
 
 ---
 
@@ -9,12 +15,12 @@
 
 | 项 | 约定 |
 |---|---|
-| HTTP | 端口 80，`esp_http_server`；`GET /` 返回内嵌 UI（gzip）；`GET /ws.*` 返回 SharedWorker JS（gzip）；`GET /SSDP.xml` |
+| HTTP | 端口 80，`esp_http_server`；`GET /` 返回内嵌 UI（gzip）；`GET /ws.*` 返回 SharedWorker JS（gzip）；`GET /SSDP.xml`（仅完整功能构建；精简构建默认移除，见 feature-flags.md H1） |
 | WebSocket | 单条连接：`ws://<device-ip>/ws`；文本帧 = JSON 消息；二进制帧 = 4 字节头 + payload |
 | 心跳 | 固件每 **1500ms** 向所有 WS 客户端广播一个**空 TEXT 帧**；前端收到任意消息即重置 2s 超时 |
 | 帧大小 | 单帧 payload 上限 = `memory_pool` 可用容量（当前 2048 - 内部头 ≈ 1.8KB）；超限关闭连接（JSON）或回错误帧（二进制） |
 | 并发 | 请求-响应无 ID（沿用 D/C 约定）；同一时刻同 cmd 只允许一个在途；慢命令（WiFi 扫描/连接、OTA 进度）用异步事件/轮询响应 |
-| 登录/鉴权 | **已移除**（无 token、无首帧 AUTH、无 `Authorization`）；`Host`/`Origin` 校验始终启用（防浏览器 CSWSH/DNS-rebinding）；HTTP/WS 明文 |
+| 登录/鉴权 | **已移除**（无 token、无首帧 AUTH、无 `Authorization`）；`Host`/`Origin` 校验可配置（`CONFIG_BIRDIEBOT_WEB_HOST_GUARD`，完整功能构建默认 y，**精简构建默认 n**，见 feature-flags.md M1）；HTTP/WS 明文 |
 
 ### 1.1 JSON 请求/响应
 
@@ -104,6 +110,12 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 
 ### 2.5 OTA(5)（浏览器本地上传方案；详见 docs/ota-local-upload.md）
 
+> **精简构建默认不注册本模块**（`CONFIG_BIRDIEBOT_OTA_ENABLE=n`，A2）且不提供
+> `POST /api/ota/upload`（`CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE=n`，A1）：
+> 对 module 5 的请求返回 **unsupported module**，`/api/ota/upload` 返回 **404**。
+> OTA 分区/bootloader 回滚与 `wt_ota_mark_app_valid()` 仍在。恢复见
+> [feature-flags.md](feature-flags.md)。
+
 | cmd | 名称 | 请求 | 响应 |
 |---|---|---|---|
 | 1 | GET_INFO | – | `{"running":"ota_0","running_ver":"v1.0.0","free":<bytes>,"slot_size":<bytes>,"status":"IDLE"}` |
@@ -128,6 +140,10 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 | `POST /api/target/flash` | Header `Content-Type: application/octet-stream`、`Content-Length`、`X-Target-SHA256`（64 hex）；Body 为镜像 | 成功 `{module:6,cmd:2,ok,family,idcode,uid,written,verified,sha256,state,message}`；错误 `{ok:false,err,code}` |
 | `GET /api/target/status` | – | `{module:6,cmd:3,ok,state,total,written,verified,percent,err,message,busy}` |
 | `POST /api/target/reset` | `{"run":true}`（可选） | `{module:6,cmd:4,ok,run}` |
+
+> **精简构建**：`GET /api/discover`（module 6 cmd 6，附近设备发现）默认不注册
+> （`CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE=n`，H3），请求返回 **404**；本表其余接口
+> 不变。恢复见 [feature-flags.md](feature-flags.md)。
 
 - 支持目标：**识别全部 STM32 系列**（F0/F1/F2/F3/F4/F7/G0/G4/H5/H7/L0/L1/L4/L5/U5/WB/WL/C0 等，DEV_ID 表 + DBGMCU 候选基址 + SWD 2M/1M/500k 回退），`series`/`device` 给出系列与候选型号组；**烧录**目前仅 F4/H7（`supported=true`），其余识别后 `supported=false`。H7（H72x/H73x 1MB）已真机识别验证。
 - 错误：`400/411/415` 请求头/类型错误，`409` 忙/单会话冲突，`413` 超过目标 flash 大小，`422` 探测失败/SHA 或回读校验失败，`408` 上传超时，`500/503` 内部/超时；JSON `code` 沿用 2/3/5/6。
@@ -158,7 +174,7 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 
 ## 4. 兼容性与版本
 
-- 本协议在 D 的现有 JSON 命令（module 0/1/2/4/5 语义）基础上扩展：SYSTEM cmd 3、WIFI cmd 11–14、OTA 上传方式改为浏览器上传（原 D 的 URL 更新不用）、TARGET(6) Web 直烧 HTTP 接口。
+- 本协议在 D 的现有 JSON 命令（module 0/1/2/4/5 语义）基础上扩展：SYSTEM cmd 3、WIFI cmd 11–14、OTA 上传方式改为浏览器上传（原 D 的 URL 更新不用）、TARGET(6) Web 直烧 HTTP 接口。精简构建默认只保留 module 0/1/2/4/6 的语义（5 关闭，见 feature-flags.md A2）。
 - `protocol_version` 握手：WS 连接后前端发 `SYSTEM/GET_FM_INFO`，比较响应中的 `protocol_version` 与本端常量；不匹配则用 toast 提示“固件与网页版本不匹配，请刷新/升级”，但不阻塞使用。
 - 前端请求字段名保持 D 的驼峰/下划线约定（以 D 的 `src/api/*.ts` 为准）；后端响应用 C 的下划线字段名。
 

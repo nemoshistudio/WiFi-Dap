@@ -9,6 +9,7 @@
 #include <esp_wifi.h>
 #include <esp_event.h>
 #include <esp_log.h>
+#include <sdkconfig.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/semphr.h>
@@ -20,7 +21,9 @@
 #include <driver/gpio.h>
 #include "birdiebot_board.h"
 
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
 #include "ssdp.h"
+#endif
 #include "wifi_api.h"
 
 #define TAG __FILENAME__
@@ -521,8 +524,12 @@ void wifi_manager_init(void)
 		disconn_handler();
 	}
 
+#if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
+	/* Slim build (H1): SSDP/UPnP discovery is disabled by default; the
+	 * service source is kept behind this switch (docs/feature-flags.md). */
 	ssdp_init();
 	ssdp_start();
+#endif
 }
 
 int wifi_manager_refresh_ap_credential(void)

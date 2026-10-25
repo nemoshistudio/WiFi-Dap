@@ -2,12 +2,19 @@ menu "WiFi Dap OTA module (module 5, WP-205)"
 
     config BIRDIEBOT_OTA_ENABLE
         bool "Enable the OTA JSON module 5 (GET_INFO / GET_PROGRESS / ABORT)"
-        default y
+        default n
         help
             Registers the OTA module (id 5) on the existing WS/API JSON routers
-            through API_JSON_MODULE_REGISTER. Disable only for size-constrained
-            builds: the C upload API and rollback helpers then remain available
-            to uri_ota.c/main, but the module 5 queries are not dispatched.
+            through API_JSON_MODULE_REGISTER.
+
+            Slim build (A2, 2026-10-26): default n because the Web OTA upload
+            feature is disabled (CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE);
+            module 5 then answers nothing.  Set to y together with the upload
+            endpoint to restore the full OTA feature
+            (docs/feature-flags.md A2).  The OTA partition table, bootloader
+            rollback configuration and the rollback helpers
+            (wt_ota_mark_app_valid()) stay enabled either way: main/ still
+            confirms a pending-verify image after boot.
 
     config BIRDIEBOT_OTA_BUF_SIZE
         int "HTTP upload receive chunk size (bytes)"

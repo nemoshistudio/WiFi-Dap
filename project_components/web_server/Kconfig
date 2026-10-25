@@ -1,5 +1,62 @@
 menu "WiFi Dap web server (HTTP / WebSocket)"
 
+    # ------------------------------------------------------------------
+    # Slim-build feature switches (2026-10-26).  All default n: the code is
+    # kept in the tree and can be re-enabled from the full-features backup
+    # (tag backup/full-features-2026-10-26, or the matching Kconfig options).
+    # Per-item macro / file / restore recipe / resource cost:
+    # docs/feature-flags.md.
+    # ------------------------------------------------------------------
+
+    config BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE
+        bool "Enable the Web OTA upload endpoint (POST /api/ota/upload)"
+        default n
+        help
+            Slim build (A1): removes the browser OTA upload feature.  When
+            disabled, uri_modules/uri_ota.c compiles to a read-only
+            diagnostics stub (the frozen /api/target/status ota_upload_*
+            field set stays present and reports inactive), so the URI
+            handler, the upload worker task and its static 2 x 4 KiB receive
+            buffers are gone.
+
+            OTA partitions, the bootloader rollback configuration and
+            wt_ota_mark_app_valid() are kept for every target so images can
+            still be installed through a future/recovery path
+            (docs/feature-flags.md A1/A2).
+
+    config BIRDIEBOT_WEB_DISCOVER_ENABLE
+        bool "Enable GET /api/discover (nearby DAP discovery via mDNS)"
+        default n
+        depends on BIRDIEBOT_TARGET_FLASH_ENABLE
+        help
+            Slim build (H3): removes the nearby-device discovery endpoint.
+            When disabled, the /api/discover URI, its JSON row buffer and the
+            blocking mDNS _http._tcp query (components/target_flash
+            tf_discover.c) are compiled out; the Web keeps the manual /
+            recent-device list and treats the missing endpoint as
+            "no discovery".  mDNS advertising of this device (wt_mdns) is
+            NOT affected.
+
+    config BIRDIEBOT_WEB_HOST_GUARD
+        bool "Enable the browser Host/Origin guard (CSWSH / DNS rebinding)"
+        default n
+        help
+            SECURITY RELEVANT - disabled by default in the slim build by
+            explicit project decision (2026-10-26, docs/feature-flags.md M1
+            and docs/security.md).  The implementation stays in
+            web_host_guard.c and every handler keeps its call site, so
+            re-enabling is one Kconfig line.
+
+            With the guard disabled, HTTP and WebSocket handlers accept any
+            Host/Origin value:
+              * a malicious web page on the same network can open
+                ws://<device-ip>/ws from another origin (cross-site
+                WebSocket hijacking, CSWSH) and drive the DAP/target;
+              * a DNS-rebinding hostname resolves to the device and a
+                browser can operate it as same-origin.
+            This is only acceptable on a trusted lab/office LAN because the
+            firmware has no login/auth layer at all (docs/security.md).
+
     config BIRDIEBOT_TARGET_FLASH_ENABLE
         bool "Enable Web target-flash endpoints (/api/target/*)"
         default y
@@ -23,17 +80,23 @@ menu "WiFi Dap web server (HTTP / WebSocket)"
             between chunks and during the erase/verify phases.
 
             Intended for an internal/lab LAN only (the web login feature was
-            removed by project decision; the browser Host/Origin guard still
-            applies to these endpoints).  Disable to compile the endpoints out.
+            removed by project decision; the browser Host/Origin guard can be
+            enabled with CONFIG_BIRDIEBOT_WEB_HOST_GUARD).  Disable to compile
+            the endpoints out.
+
+            The separate GET /api/discover endpoint is registered together
+            with these URIs and has its own switch above.
 
     config BIRDIEBOT_WEB_ALLOWED_ORIGIN
         string "Extra allowed Host/Origin entries (comma separated)"
         default ""
+        depends on BIRDIEBOT_WEB_HOST_GUARD
         help
-            Comma-separated allow-list for the always-on browser Host/Origin
-            check in the web server (CSWSH / DNS-rebinding hardening; this is a
-            browser-safety policy, not a login feature).  Each entry is either
-            a full origin (scheme://host[:port]) or a bare hostname, e.g.
+            Comma-separated allow-list for the browser Host/Origin check in
+            web_host_guard.c (CSWSH / DNS-rebinding hardening; this is a
+            browser-safety policy, not a login feature).  Only used when
+            CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y.  Each entry is either a full
+            origin (scheme://host[:port]) or a bare hostname, e.g.
                 "http://192.168.1.1:8080,https://dap.local"
 
             - Host header check: the request must carry a Host that is an IP

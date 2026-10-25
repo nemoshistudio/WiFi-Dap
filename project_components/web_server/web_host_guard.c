@@ -23,13 +23,20 @@
  *
  * Accessing the device through its IP (the documented way) needs no
  * configuration; hostname/mDNS/proxy access requires an allow-list entry.
+ *
+ * Slim build (M1, 2026-10-26): this file is compiled only when
+ * CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y (default n).  The call sites in
+ * uri_api.c / uri_target.c / uri_ws.c / curve_ws.c evaluate to true when the
+ * guard is off (see web_host_guard.h) - docs/feature-flags.md M1.
  */
+#include <sdkconfig.h>
+
+#if defined(CONFIG_BIRDIEBOT_WEB_HOST_GUARD)
+
 #include "web_host_guard.h"
 
 #include <esp_http_server.h>
 #include <esp_log.h>
-
-#include <sdkconfig.h>
 
 #include <stdbool.h>
 #include <string.h>
@@ -466,3 +473,5 @@ bool web_host_guard_ws_ok(httpd_req_t *req)
 	 * blocked by the same-origin check). */
 	return web_host_guard_http_ok(req);
 }
+
+#endif /* CONFIG_BIRDIEBOT_WEB_HOST_GUARD */

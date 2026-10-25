@@ -6,6 +6,14 @@ over the **local SWD link** on a dedicated task and the page polls binary CVF2
 frame batches (multi-group round-robin + loclist variants).  The per-sample WiFi/WebSocket round-trip leaves the critical
 path (`Web -> ESP32 -> STM32` becomes one local SWD read burst per tick).
 
+
+> **Slim build (2026-10-26, C4)**: `CURVE_MAX_SERIES` is **64** (was 256 in the
+> full-feature build), so the static `curve_config_t` owned by `curve_http.c`
+> is 3 KiB smaller (and the engine's per-series tick array 192 B).  Per-group
+> limits are unchanged (≤64 series/group, ≤8 groups, ≤256 B payload/group);
+> the Web frontend clamps the selectable variable count to the same 64.
+> Restore/record: `docs/feature-flags.md` C4.
+
 ## HTTP endpoints (same origin, port 80)
 
 All JSON responses contain `{"ok":true|false}`; failures add `"err":"..."`.
@@ -325,23 +333,25 @@ function PC range:
   variants/series 1..16, total variants <=256, expression nodes <=768
   (each node 12 B).  A request that exhausts the variant/expr pool is rejected
   with a clear 400 error.  The **compact v3 `expr_s` format** is required for
-  large object-watch requests: 512 minimal series are ~17 KiB, while the same
+  large object-watch requests: 64 minimal series are ~2.2 KiB (256 series in
+  the full-feature build are ~17 KiB), while the same
   configuration in the verbose v2 object form easily exceeds the 24 KiB body.
 
-## P1.8 object watch: 512 series, expression DAG, per-tick read cache
+## P1.8 object watch: many series, expression DAG, per-tick read cache
 
 Ozone-style "watch one object" needs hundreds of member paths (e.g. 324 fields
 of `target_debug_handle`).  To support that without exploding memory:
 
-1. **Series limits**: 512 series total, up to 64 per group, 8 groups, per-group
+1. **Series limits**: 64 series total in the slim build (256 in the full-feature
+   build), up to 64 per group, 8 groups, per-group
    payload cap stays 256 B (`sum(size)`), so all CVF2/ring/weighted-schedule
    behaviour is unchanged.  The parser and status report the actual maxima.
 2. **Expression DAG dedup**: every expression node is canonicalised while it is
    appended to `curve_config_t.pool`: a new node whose `(kind, inner,
    offset/reg/address)` equals an existing node reuses that index instead of
    growing the pool.  Member paths of one object share their root/prefix nodes,
-   so 324 fields with two levels of dereference need ~326 nodes instead of
-   ~973; 512 distinct one-node `addr` series need 512 nodes.  Nodes are still
+   so an object's 64 watched fields with two levels of dereference need ~66
+   nodes instead of ~193 (the slim cap is 64 series).  Nodes are still
    addressed by `uint16_t` indexes, so evaluation is unchanged.
 3. **Per-tick pointer-read cache** (optional, automatic): while the core is
    halted the evaluator memoizes 4-byte pointer loads for the current tick

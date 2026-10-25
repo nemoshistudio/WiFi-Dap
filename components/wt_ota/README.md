@@ -5,6 +5,13 @@
 `POST /api/ota/upload` 属 **WP-206（web-dev，`project_components/web_server/uri_modules/uri_ota.c`）**，
 本组件只提供线程安全的 C API。
 
+> **Slim build (2026-10-26, A1/A2)**: on branch `slim/fw` the Web upload
+> endpoint (`uri_ota.c`, `CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE`) and the JSON
+> module 5 registration (`CONFIG_BIRDIEBOT_OTA_ENABLE`) are both **off by
+> default**; the state machine / C API in this component is kept (rollback
+> helpers are still required by `main/`), and the unused upload code is removed
+> by `--gc-sections`.  Restore recipe: `docs/feature-flags.md` A1/A2.
+
 ## 状态机（docs/ota-local-upload.md §5）
 
 ```text

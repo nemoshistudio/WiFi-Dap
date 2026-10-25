@@ -41,6 +41,11 @@
 | [i18n-keys.md](i18n-keys.md) | Web UI i18n key 契约（zh/en，冻结后 314 key）、命名规范、禁止硬编码文案、检查脚本 | `web/src/locales/**`、`web/scripts/check-i18n.mjs`、`web/build.sh` |
 | [board-pins.md](board-pins.md) | 板级引脚与硬件默认值唯一契约（4 块板、LED 缺失约定、UART 桥/默认时钟/端口、板选择方式） | `components/board/`、`components/DAP/`、`components/uart_tcp_bridge/`、`scripts/check_board_pins.py` |
 | [merge-map.md](merge-map.md) | W0 参考快照清单、三方合并基准（base/A/C/D）、A→C 路径映射、关键差异与统计、合并/对比命令 | 合并审查与 Wave-1 任务拆分（历史依据；日常开发不需要读） |
+| [feature-flags.md](feature-flags.md) | **精简构建（slim/fw，2026-10-26）**：每个移除项（A1 Web OTA / A2 OTA module 5 / H1 SSDP / H3 `/api/discover` / J1 Ozone 兼容 / M1 Host-Origin guard / C4 曲线 256→64）的 Kconfig 宏、涉及文件、默认值、恢复方式、资源收益与前端契约变化；从 `backup/full-features-2026-10-26` 恢复的步骤 | `sdkconfig.defaults.*`、各组件 Kconfig/源码、docs 索引 |
+
+> **精简构建说明**：上表契约文档描述**完整功能构建**。`slim/fw` 分支默认移除
+> A1/A2/H1/H3/M1 对应功能（宏默认 n，代码保留），并把曲线系列上限从 256 降到
+> 64（C4）；逐项恢复方式见 [feature-flags.md](feature-flags.md)。
 
 > 说明：契约文件头部的 "相关契约" 与 `analysis/...` 引用是 **W0 决策依据**，`analysis/` 不随仓库发布（见 [§5](#5-计划与分析材料不入库)），因此这些引用不是可点击链接。
 
@@ -68,7 +73,6 @@
 | [h7-flash-speedup.md](h7-flash-speedup.md) | 速度优化报告 | H7 烧录/调试 A/B 实测（sysprogs 分析、OpenOCD 候选、时钟扫描、增量烧录、C4 负结果） | ✅ 已入库（2026-10-21） |
 | [scripts/dap_stats_query.py](../scripts/dap_stats_query.py) | 自动化脚本 | stats 构建的 Vendor9 profiling 计数器读取（pyusb 原始 CMSIS-DAP，无需串口） | ✅ 已入库（2026-10-21） |
 | [web-variable-curve.md](web-variable-curve.md) | Web 功能说明 | 浏览器变量曲线页：ELF 选变量、WS-DAP 采样、`/api/dap/kick` 接管、复位/限速/导出、限制与验收证据 | ✅ 新增（2026-10-21） |
-| [ozone-timeline-hss-feasibility.md](ozone-timeline-hss-feasibility.md) | 可行性报告 | Ozone Timeline(HSS) 接入 WiFi DAP：官方支持边界、代理 DLL 方案、ABI、风险与 Phase-0 门槛 | ✅ 新增（2026-10-21） |
 | [target-flash-formats.md](target-flash-formats.md) | Web 功能说明 | 目标烧录多格式（BIN/ELF/Intel HEX/SREC→裸镜像）、段选择/空隙填充/SHA 契约、真机 4/4 验证 | ✅ 新增（2026-10-21） |
 
 测试文档中的 **【需真机】** / **【本地】** / **【需 4MB 硬件/可选】** 标记约定见各文档开头；C3/ESP32 仅为编译验收目标。

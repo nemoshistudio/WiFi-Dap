@@ -172,3 +172,17 @@ CONFIG_LOG_COLORS=y
 # curve_ws task stacks in their sources.
 CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
 CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+
+#
+# Slim build feature switches (2026-10-26; see docs/feature-flags.md)
+#
+# The Kconfig defaults for these options are already n on this branch; the
+# explicit lines below pin the slim value even if a component Kconfig default
+# is ever flipped back.  Each removal is recoverable: set the option to y here
+# (and keep the component Kconfig default y) - the code is kept in the tree,
+# and tag backup/full-features-2026-10-26 is the pristine full-feature tree.
+# CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE is not set
+# CONFIG_BIRDIEBOT_OTA_ENABLE is not set
+# CONFIG_BIRDIEBOT_SSDP_ENABLE is not set
+# CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE is not set
+# CONFIG_BIRDIEBOT_WEB_HOST_GUARD is not set
