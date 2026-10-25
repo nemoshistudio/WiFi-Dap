@@ -51,7 +51,7 @@
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
-
+#include "freertos/idf_additions.h" /* xTaskCreateWithCaps (C5 PSRAM task stacks) */
 /*
  * OTA rollback confirmation (docs/ota-local-upload.md §2.3, WP-205).
  *
@@ -277,7 +277,25 @@ void app_main()
         }
     }
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+	/* UART bridge front task: background/low-frequency with a 4 KiB stack.
+	 * The C5 internal heap is tight (see sdkconfig.defaults.esp32c5), so the
+	 * stack goes to PSRAM (memory policy: only the stack, not the UART driver
+	 * DMA buffers; the task never writes flash).  Fall back to internal RAM if
+	 * the PSRAM allocation fails. */
+	{
+		BaseType_t uart_task_ret =
+			xTaskCreateWithCaps(uart_bridge_task, "uart_server", 4096, NULL, 2,
+			                    NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		if (uart_task_ret != pdPASS) {
+			ESP_LOGW("BIRDIEBOT", "uart_server PSRAM stack unavailable, "
+			         "using internal RAM");
+			xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
+		}
+	}
+#else
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
+#endif
 
 #if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) && !defined(CONFIG_BIRDIEBOT_OTA_AUTO_MARK_VALID)
 	/* New image after OTA: confirm within 10 s or the next reset rolls back. */

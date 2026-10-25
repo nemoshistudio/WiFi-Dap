@@ -69,6 +69,35 @@ menu "WiFi Dap WiFi manager"
                 bool "2.4 GHz only (legacy)"
         endchoice
 
+        config BIRDIEBOT_C5_AP_CHANNEL
+            int "ESP32-C5 default SoftAP channel (1-13 = 2.4 GHz, 36-177 = 5 GHz)"
+            depends on IDF_TARGET_ESP32C5
+            range 1 177
+            default 36
+            help
+                Default SoftAP channel on the ESP32-C5.  The default 36 makes the
+                fallback SoftAP operate in the 5 GHz band (5180 MHz, non-DFS),
+                which is the real-hardware default (docs/esp32-c5-port.md §11.9).
+
+                The C5 has a single dual-band radio: with WIFI_BAND_MODE_AUTO the
+                AP and STA must share the same band.  The STA association has
+                priority, and the smart-APSTA logic stops the SoftAP shortly
+                after a successful STA connection (C5 default: 2 s), so the AP
+                band only matters for the "no STA" fallback / first-boot AP.
+
+                Values 1-13 keep the legacy 2.4 GHz SoftAP (e.g. 6).
+
+        config BIRDIEBOT_C5_COUNTRY_CODE
+            string "ESP32-C5 Wi-Fi country code"
+            depends on IDF_TARGET_ESP32C5
+            default "CN"
+            help
+                Country/regulatory code applied with esp_wifi_set_country_code()
+                on the ESP32-C5, so the 5 GHz channel set is well defined.  "CN"
+                allows 5150-5350 MHz (channels 36-64) and 5725-5850 MHz
+                (149-165); channel 36 (the default SoftAP channel) is non-DFS.
+                Change this only after checking the local regulations.
+
     endmenu
 
 endmenu

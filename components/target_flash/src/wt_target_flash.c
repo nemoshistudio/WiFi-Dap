@@ -29,6 +29,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include "freertos/idf_additions.h" /* xTaskCreatePinnedToCoreWithCaps (C5 PSRAM stacks) */
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -152,10 +153,26 @@ static esp_err_t tf_worker_start(void)
     }
     /* The SWD bit-bang uses per-core dedicated-GPIO signals, so the DAP
      * command path must run on the DAP core - the same reason the DAP task
-     * and tcp_server are pinned there (core 1 on S3, core 0 on unicore). */
+     * and tcp_server are pinned there (core 1 on S3, core 0 on unicore).
+     *
+     * ESP32-C5: the target-flash worker only bit-bangs SWD towards the target
+     * (it never writes the C5's own flash), so its stack may live in PSRAM and
+     * the internal heap stays available for WiFi/DAP/OTA. */
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+    created = xTaskCreatePinnedToCoreWithCaps(
+        tf_worker_task, "tf_worker", TF_WORKER_STACK, NULL,
+        6 /* above httpd (5), below tcp_server/DAP */, &s_worker, TF_WORKER_CORE,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        ESP_LOGW(TF_TAG, "tf_worker PSRAM stack unavailable, using internal RAM");
+        created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", TF_WORKER_STACK,
+                                          NULL, 6, &s_worker, TF_WORKER_CORE);
+    }
+#else
     created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", TF_WORKER_STACK, NULL,
                                       6 /* above httpd (5), below tcp_server/DAP */,
                                       &s_worker, TF_WORKER_CORE);
+#endif
     if (created != pdPASS) {
         s_worker = NULL;
         return ESP_FAIL;

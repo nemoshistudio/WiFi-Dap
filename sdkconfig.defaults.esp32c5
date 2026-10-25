@@ -68,6 +68,17 @@ CONFIG_BIRDIEBOT_BOARD_GENERIC_C5=y
 CONFIG_BIRDIEBOT_WIFI_BAND_MODE_AUTO=y
 
 #
+# Default SoftAP on 5 GHz (channel 36 = 5180 MHz, non-DFS) with the CN
+# regulatory domain. The C5 single radio cannot serve a 5 GHz AP and a
+# 2.4 GHz STA association at the same time; the fallback AP is stopped ~2 s
+# after a successful STA connection (smart APSTA), so the AP band only matters
+# when there is no STA (first boot / no saved credentials / lab AP).
+# See docs/esp32-c5-port.md §11.3 and §11.9.
+#
+CONFIG_BIRDIEBOT_C5_AP_CHANNEL=36
+CONFIG_BIRDIEBOT_C5_COUNTRY_CODE="CN"
+
+#
 # First-boot STA provisioning: empty in the committed defaults. For local
 # real-device bring-up use an *untracked* sdkconfig overlay (never commit real
 # credentials), see project_components/wifi_manager/Kconfig:
