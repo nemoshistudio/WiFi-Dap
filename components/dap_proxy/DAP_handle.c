@@ -84,7 +84,10 @@
 #if DAP_PACKET_SIZE > 2048U
 #define DAP_BUFFER_NUM 5
 #elif DAP_PACKET_SIZE > 1024U
-#define DAP_BUFFER_NUM 16
+/* ESP-IDF v5.5.6 + NCM leaves a largest free block of only ~11 KiB and
+ * the two rings must be allocated sequentially: 4 slots (5,120 B request,
+ * 5,192 B response) fit two blocks.  Host keeps <=3 URBs in flight. */
+#define DAP_BUFFER_NUM 4
 #else
 #define DAP_BUFFER_NUM 20
 #endif
@@ -216,6 +219,8 @@ static SemaphoreHandle_t dap_reset_done = NULL;
  * stack + upload path need that ~41 KiB; the rings come back on RESTORE_HANDLE
  * or at the next boot. */
 static volatile bool s_data_path_detached = false;
+static volatile bool s_task_started = false;
+static char s_ring_error[96];
 
 /* "Released" ring buffers (task-66b).
  *
@@ -666,6 +671,7 @@ bool dap_take_response(uint8_t *buf, uint32_t buf_size, uint32_t *length)
 void DAP_Thread(void *argument)
 {
     size_t packetSize;
+    s_task_started = true;
     int resLength;
     uint8_t *item;
 
@@ -685,7 +691,19 @@ void DAP_Thread(void *argument)
         (void)dap_handle_prealloc_ringbuffers();
     }
 #endif
-    malloc_dap_ringbuf();
+    /* The unified NCM+WiFi image can be very short of contiguous heap in
+     * the first moments of boot (IDF 5.5.6 NCM allocates earlier than the
+     * old baseline).  Do not kill the DAP task on the first failed
+     * allocation: retry for up to ~2 s while Wi-Fi/NCM finish init. */
+    for (int attempt = 0; attempt < 20 && (dap_dataIN_handle == NULL ||
+                                           dap_dataOUT_handle == NULL); attempt++) {
+        malloc_dap_ringbuf();
+        if (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL) {
+            break;
+        }
+        free_dap_ringbuf();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
     kDAPTaskHandle = xTaskGetCurrentTaskHandle();
 
     /* A 2025: initialize the CMSIS-DAP status LEDs (board pins, no-op when the
@@ -695,9 +713,18 @@ void DAP_Thread(void *argument)
     if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL ||
         data_response_mux == NULL)
     {
-        printf("Can not create DAP ringbuf/mux!\r\n");
+        snprintf(s_ring_error, sizeof(s_ring_error),
+                 "ring/mux fail req=%u resp=%u free=%u largest=%u",
+                 (unsigned)DAP_REQUEST_RING_SIZE,
+                 (unsigned)DAP_RESPONSE_RING_SIZE,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT |
+                                                   MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+                                                            MALLOC_CAP_INTERNAL));
+        printf("Can not create DAP ringbuf/mux! %s\r\n", s_ring_error);
         vTaskDelete(NULL);
     }
+    s_ring_error[0] = '\0';
     for (;;)
     {
 
@@ -945,4 +972,27 @@ void handle_dap_unlink()
             vRingbufferReturnItem(dap_dataOUT_handle, item);
         }
     }
+}
+
+bool dap_handle_task_started(void)
+{
+    return s_task_started;
+}
+
+void dap_handle_note_task_create(bool ok)
+{
+    if (!ok) {
+        snprintf(s_ring_error, sizeof(s_ring_error),
+                 "xTaskCreate(DAP_Task) failed free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT |
+                                                   MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
+                                                            MALLOC_CAP_INTERNAL));
+        printf("DAP: %s\r\n", s_ring_error);
+    }
+}
+
+const char *dap_handle_ring_error(void)
+{
+    return s_ring_error;
 }

@@ -232,8 +232,11 @@ void app_main()
                             CONFIG_BIRDIEBOT_USBIP_TCP_PRIORITY, NULL, TCP_TASK_AFFINITY);
     /* 3072: with B1 (BIRDIEBOT_USBIP_PIPELINE) the DAP task also builds/sends
      * the USBIP RET_SUBMIT for a parked IN URB, so it needs lwIP send stack. */
-    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 3072, NULL,
-                            CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY, NULL, DAP_TASK_AFFINITY);
+    if (xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 4096, NULL,
+                            CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY, NULL,
+                            DAP_TASK_AFFINITY) != pdPASS) {
+        dap_handle_note_task_create(false);
+    }
 
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 

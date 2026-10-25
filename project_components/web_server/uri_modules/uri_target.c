@@ -45,6 +45,15 @@
  *                    transaction)
  *   dap_ring_preallocated / dap_ring_active / dap_ring_request_bytes /
  *   dap_ring_response_bytes  P0-2 early DAP ring reservation state
+ *   dap_task_started / dap_ring_error  IDF 5.5 DAP-task/ring-buffer bring-up
+ *                    diagnostics (see components/dap_proxy/DAP_handle.h)
+ *   ota_upload_active / ota_upload_stage / ota_upload_task_stack /
+ *   ota_upload_heap_free / ota_upload_heap_largest /
+ *   ota_upload_body_expected / ota_upload_body_received /
+ *   ota_upload_stack_free_min / ota_upload_last_error  module 5 upload
+ *                    transport diagnostics (IDF 5.5 async hand-off ordering;
+ *                    see include/ota_upload_diag.h); stage is the numeric
+ *                    ota_upload_stage_t enum, last_error is "" when clean
  *   last_error       flash engine status message while err != 0; omitted
  *                    when the last operation had no error
  *   Fields that could not be measured are OMITTED (never fabricated/null).
@@ -83,6 +92,8 @@
 #if defined(CONFIG_BIRDIEBOT_WIRED_TRANSPORT_NCM) && defined(CONFIG_IDF_TARGET_ESP32S3)
 #include "birdiebot_wired_dap.h"
 #endif
+#include "DAP_handle.h"
+#include "ota_upload_diag.h"
 #include "tcp_server.h"
 
 #include <sdkconfig.h>
@@ -554,6 +565,29 @@ static esp_err_t target_status_handler(httpd_req_t *req)
 		                        (double) link.dap_ring_request_bytes);
 		cJSON_AddNumberToObject(root, "dap_ring_response_bytes",
 		                        (double) link.dap_ring_response_bytes);
+		cJSON_AddBoolToObject(root, "dap_task_started", dap_handle_task_started());
+		cJSON_AddStringToObject(root, "dap_ring_error", dap_handle_ring_error());
+		/* OTA upload transport diagnostics (module 5 POST /api/ota/upload).
+		 * Read-only: stage/body accounting/worker stack/heap make the IDF
+		 * v5.5.6 async-request hand-off ordering visible without a console.
+		 * See project_components/web_server/include/ota_upload_diag.h. */
+		ota_upload_diag_t ota_diag;
+		ota_upload_get_diag(&ota_diag);
+		cJSON_AddBoolToObject(root, "ota_upload_active", ota_diag.active);
+		cJSON_AddNumberToObject(root, "ota_upload_stage", (double) ota_diag.stage);
+		cJSON_AddNumberToObject(root, "ota_upload_task_stack",
+		                        (double) ota_diag.task_stack);
+		cJSON_AddNumberToObject(root, "ota_upload_heap_free",
+		                        (double) ota_diag.heap_free);
+		cJSON_AddNumberToObject(root, "ota_upload_heap_largest",
+		                        (double) ota_diag.heap_largest);
+		cJSON_AddNumberToObject(root, "ota_upload_body_expected",
+		                        (double) ota_diag.body_expected);
+		cJSON_AddNumberToObject(root, "ota_upload_body_received",
+		                        (double) ota_diag.body_received);
+		cJSON_AddNumberToObject(root, "ota_upload_stack_free_min",
+		                        (double) ota_diag.stack_free_min);
+		cJSON_AddStringToObject(root, "ota_upload_last_error", ota_diag.last_error);
 		/* Reuse existing engine status: expose the last failure text without
 		 * changing the numeric "err" contract. */
 		if (status.err != 0) {

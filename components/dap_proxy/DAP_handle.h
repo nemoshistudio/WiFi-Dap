@@ -164,6 +164,11 @@ typedef struct {
 /** Snapshot the ring buffer diagnostics (never blocks on the DAP task). */
 void dap_handle_get_ring_info(dap_ring_info_t *out);
 
+/** Diagnostics for the IDF 5.5 boot-time ring allocation path. */
+bool dap_handle_task_started(void);
+void dap_handle_note_task_create(bool ok);
+const char *dap_handle_ring_error(void);
+
 /* ------------------------------------------------------------------------- */
 /* A3: USBIP<->DAP transaction latency statistics (read-only diagnostics)    */
 /* ------------------------------------------------------------------------- */
