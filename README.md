@@ -36,6 +36,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 - **Debug transports**: USBIP/WinUSB (CMSIS-DAP v2), elaphureLink (driver-free Keil), and WebSocket-DAP (browser tools) — all on **TCP 3240**.
 - **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**, covering Wi-Fi setup, UART terminal, OTA upload, **Web-side STM32 target flashing**, version info and credits.
 - **Release target**: **ESP32-S3 8 MB** (default board `BOARD_ZXR_DAP_S3`, dual OTA slots). ESP32-C3 / ESP32 (4 MB) are **compile-only**: no OTA, not hardware-validated.
+- **ESP32-C5 variant**: **compile-only, Wi-Fi-only** on ESP-IDF **v5.5.6** (`BOARD_GENERIC_C5`, 8 MB dual OTA slots). The C5 has **no USB-OTG**, so USB-NCM / wired DAP is physically impossible; this variant keeps Wi-Fi USBIP + Web/OTA/curve. See [docs/esp32-c5-port.md](docs/esp32-c5-port.md).
 - **Removed**: ESP8266 support, experimental KCP transport, corsacOTA (port 3241).
 
 ---
@@ -46,6 +47,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 |---|---|---|---|
 | SoC | ESP32-S3 | ✅ hardware target | 8 MB flash, default board `BOARD_ZXR_DAP_S3`, dual OTA slots |
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA, not hardware-validated |
+| SoC | ESP32-C5 | 🧪 compile-only, Wi-Fi-only | ESP-IDF **v5.5.6**, 8 MB dual OTA, **no USB-OTG/NCM**; Wi-Fi USBIP + Web/OTA/curve; not hardware-validated |
 | Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
 | Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`/`.elf`/`.hex`/`.srec` (front-end converts to a raw image); ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); F4 and H7 flash are real-hardware verified; see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
@@ -76,6 +78,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | `esp32s3` | `BOARD_ZXR_DAP_S3` | Default board, WiFi Dap hardware, 8 MB |
 | `esp32s3` | `BOARD_GENERIC_S3` | Generic S3 wiring, no status LEDs, compile/reference only |
 | `esp32c3` | `BOARD_GENERIC_C3` | Compile-only |
+| `esp32c5` | `BOARD_GENERIC_C5` | Compile-only, Wi-Fi-only (IDF v5.5.6; no USB-OTG/NCM) |
 | `esp32` | `BOARD_GENERIC_ESP32` | Compile-only |
 
 Key pins of the default `BOARD_ZXR_DAP_S3`:
@@ -91,7 +94,7 @@ Key pins of the default `BOARD_ZXR_DAP_S3`:
 | Wi-Fi status LED | GPIO4 | |
 | UART bridge TX / RX | GPIO10 / GPIO9 | UART1; the console stays on UART0 (S3: GPIO43/44) |
 
-> Generic C3/ESP32 pinouts and the "no LED" board convention (`_` macros) are documented in [docs/board-pins.md §4](docs/board-pins.md). Never hard-code `#ifdef CONFIG_IDF_TARGET_*` pin branches elsewhere.
+> Generic C3/ESP32/C5 pinouts and the "no LED" board convention (`_` macros) are documented in [docs/board-pins.md §4](docs/board-pins.md). Never hard-code `#ifdef CONFIG_IDF_TARGET_*` pin branches elsewhere.
 
 **Power**: tie 3V3/GND to the target board; probe GPIOs are 3.3 V.
 
@@ -107,6 +110,7 @@ Key pins of the default `BOARD_ZXR_DAP_S3`:
 
 ```bash
 docker pull espressif/idf:v5.2.1
+docker pull espressif/idf:v5.5.6   # only needed for the ESP32-C5 target
 ```
 
 ### 4.2 One-shot build (Docker)
@@ -118,6 +122,9 @@ scripts/build_all.sh
 # release target only / clean rebuild
 scripts/build_all.sh -t esp32s3
 scripts/build_all.sh --clean -t esp32s3
+
+# ESP32-C5 (Wi-Fi-only, IDF v5.5.6 image; C5 is opt-in, not in the default matrix)
+IDF_DOCKER_IMAGE_C5=espressif/idf:v5.5.6 scripts/build_all.sh -t esp32c5
 ```
 
 - Each target has its own build dir and SDKCONFIG: `build/<target>/`, `build/<target>/sdkconfig`; logs in `build/logs/<target>.log`.
@@ -141,6 +148,7 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 |---|---|---|---|
 | ESP32-S3 (8 MB, release) | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | bootloader + ptable@0x8000 + nvs 24K + phy 4K + otadata 8K + `ota_0` 3M@0x20000 + `ota_1` 3M@0x320000 + wt_nvs 64K + coredump 64K | ✅ dual slot + rollback |
 | ESP32-C3 / ESP32 (4 MB) | [`partitions/partitions_4mb_single.csv`](partitions/partitions_4mb_single.csv) | nvs + phy + `factory` 3.75M + wt_nvs + coredump | ❌ no OTA |
+| ESP32-C5 (8 MB, Wi-Fi-only) | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | same 8 MB dual OTA layout as S3 | ✅ dual slot + rollback (compile-only today) |
 
 App-size limits, otadata rules and rollback semantics: [docs/ota-local-upload.md §1](docs/ota-local-upload.md).
 
