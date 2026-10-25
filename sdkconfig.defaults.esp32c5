@@ -1,14 +1,14 @@
 # WiFi Dap -- ESP32-C5 (Wi-Fi-only) default configuration.
 #
-# Target: ESP32-C5 DevKitC-1-N8R8 / WROOM-1-N8R8 (8 MB flash, 8 MB PSRAM but
-# PSRAM is left disabled here), compile-only in this branch: no C5 hardware
-# validation yet. See docs/esp32-c5-port.md for the port status, limitations
-# and the build command.
+# Target: ESP32-C5 v1.2 DevKitC-1-N8R8 / WROOM-1-N8R8 (8 MB flash, 8 MB PSRAM).
+# Real-hardware validated on 2026-10-25 (branch c5/hw): boot, 2.4/5 GHz STA,
+# Web/API, OTA, USBIP CMSIS-DAP; see docs/esp32-c5-port.md §11 for the measured
+# results and the remaining limitations.
 #
-# Why a separate ESP-IDF version for this target:
-#   ESP32-C5 (v1.0/v1.2) requires ESP-IDF >= v5.5.2. Build C5 with
-#   `IDF_DOCKER_IMAGE_C5=espressif/idf:v5.5.6 scripts/build_all.sh -t esp32c5`
-#   while S3/C3/ESP32 stay on the pinned v5.5.6 image.
+# ESP-IDF: unified v5.5.6 baseline for every target (the C5 needs >= v5.5.2).
+# Build with:
+#   scripts/build_all.sh -t esp32c5          # image comes from idf-docker.sh
+#   IDF_DOCKER_IMAGE_C5=espressif/idf:v5.5.6 scripts/build_all.sh -t esp32c5
 #
 # ESP32-C5 has NO USB-OTG (USB Serial/JTAG only), therefore this variant is
 # Wi-Fi-only: no USB-NCM/TinyUSB, no wired-DAP transport. The USB port is used
@@ -80,6 +80,49 @@ CONFIG_BIRDIEBOT_WIFI_STA_PROV_PASSWORD=""
 # Single-core target: never pin the USBIP tcp_server task to core 1
 #
 CONFIG_BIRDIEBOT_USBIP_TCP_CORE=0
+
+#
+# Internal-RAM budget (real C5 hardware, 2026-10-25)
+#
+# The single-core ESP32-C5 has 384 KiB HP SRAM but only ~146 KiB ends up in the
+# dynamic heap (IDF+Wi-Fi static data takes the rest), far less than the S3.
+# Measured on the N8R8 DevKit: after the web server + URI modules the internal
+# heap was down to ~3 KiB, so the USBIP DAP task could not be created and
+# OpenOCD failed with "CMSIS-DAP command CMD_INFO failed" - even though the
+# device enumerated through USBIP.  These Wi-Fi buffer reductions keep enough
+# internal RAM for the DAP task and its ring buffers.
+#
+# Static RX buffers: ~1.6 KiB each, allocated up front by esp_wifi_init().
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+# Dynamic RX/TX buffers are allocated on demand; the DAP/Web traffic does not
+# need the default 32-slot budget.
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# Management buffers (small; also allocated up front).
+CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=3
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
+
+#
+# 8 MB PSRAM on the WROOM-1-N8R8 / DevKitC-1-N8R8 module.
+#
+# Real C5 hardware: even after the Wi-Fi/stack reductions above, the internal
+# heap cannot hold [web server + target-flash worker + DAP task + DAP rings +
+# OTA upload buffer] at the same time.  PSRAM is used for the big CPU-only
+# buffers (DAP ring storage via xRingbufferCreateWithCaps, HTTP/cJSON/curve
+# buffers via the 8 KiB internal threshold); task stacks, DMA buffers, Wi-Fi
+# and flash-write buffers stay in internal RAM.
+#
+# Measured on hardware: "Found 8MB PSRAM device", "Adding pool of 8192K",
+# boot + Wi-Fi + Web + USBIP + OTA verified (docs/esp32-c5-port.md §11).
+# Without PSRAM the DAP task cannot be created (USBIP enumerates but OpenOCD
+# gets "CMSIS-DAP command CMD_INFO failed").
+#
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Only allocations smaller than 8 KiB are forced into internal RAM.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
 
 #
 # Wi-Fi-only variant: no USB-OTG/NCM/TinyUSB (option not even visible on C5)

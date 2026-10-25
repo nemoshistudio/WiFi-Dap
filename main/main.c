@@ -137,6 +137,15 @@ static void ota_confirm_schedule(void)
 #define TCP_TASK_AFFINITY 0
 #endif
 
+/* Internal-RAM budget: the single-core ESP32-C5 heap is much smaller than the
+ * S3's, so keep the USBIP front-end task stack at the measured minimum there
+ * (it is a network-only task; the DAP bit-banging stack is separate). */
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#define BIRDIEBOT_TCP_TASK_STACK 3072
+#else
+#define BIRDIEBOT_TCP_TASK_STACK 4096
+#endif
+
 void app_main()
 {
 	/* docs/versioning.md §2.4: first log line, before WiFi/mDNS can flood it. */
@@ -214,9 +223,27 @@ void app_main()
 	                                                    MALLOC_CAP_INTERNAL));
     DAP_Setup();
 
+	/* Bring-up memory accounting (single-core C5 has a tight internal heap):
+	 * the stage that eats the internal RAM must be visible, because a later
+	 * xTaskCreate/ring allocation failure is silent otherwise. */
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#define BIRDIEBOT_LOG_INTERNAL_HEAP(stage)                                   \
+	ESP_LOGI("BIRDIEBOT", "internal heap %-18s free=%u largest=%u",         \
+	         stage,                                                          \
+	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |         \
+	                                           MALLOC_CAP_8BIT),             \
+	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |\
+	                                                    MALLOC_CAP_8BIT))
+	BIRDIEBOT_LOG_INTERNAL_HEAP("after DAP_Setup");
+#else
+#define BIRDIEBOT_LOG_INTERNAL_HEAP(stage) ((void)0)
+#endif
+
 	global_module_init();
+	BIRDIEBOT_LOG_INTERNAL_HEAP("after modules");
 
 	start_webserver();
+	BIRDIEBOT_LOG_INTERNAL_HEAP("after webserver");
 
     /*
      * A3 task tuning (ESP32-S3):
@@ -228,12 +255,27 @@ void app_main()
      *  - both stay pinned to core 1 because the SWD/JTAG bit-banging uses
      *    dedicated GPIO with a hard core affinity requirement.
      */
-    xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL,
+    xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", BIRDIEBOT_TCP_TASK_STACK, NULL,
                             CONFIG_BIRDIEBOT_USBIP_TCP_PRIORITY, NULL, TCP_TASK_AFFINITY);
     /* 3072: with B1 (BIRDIEBOT_USBIP_PIPELINE) the DAP task also builds/sends
      * the USBIP RET_SUBMIT for a parked IN URB, so it needs lwIP send stack. */
-    xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 3072, NULL,
-                            CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY, NULL, DAP_TASK_AFFINITY);
+    {
+        /* Bring-up diagnostics: on the single-core C5 the internal heap is much
+         * smaller than on the S3; a failed task create must be visible instead
+         * of silently leaving the device without a DAP data path. */
+        BaseType_t dap_task_ret =
+            xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 3072, NULL,
+                                    CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY, NULL,
+                                    DAP_TASK_AFFINITY);
+        ESP_LOGI("BIRDIEBOT", "DAP task create: %s (internal free=%u largest=%u)",
+                 dap_task_ret == pdPASS ? "ok" : "FAILED",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                           MALLOC_CAP_8BIT));
+        if (dap_task_ret != pdPASS) {
+            ESP_LOGE("BIRDIEBOT", "DAP task creation failed: no internal RAM");
+        }
+    }
 
 	xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 

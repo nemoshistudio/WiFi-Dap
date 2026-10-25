@@ -85,6 +85,18 @@
 #define DAP_BUFFER_NUM 5
 #elif DAP_PACKET_SIZE > 1024U
 #define DAP_BUFFER_NUM 16
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+/* ESP32-C5 real hardware (2026-10-25): the post-Wi-Fi internal heap of the
+ * single-core C5 is much smaller than the S3's.  With the historical 20-slot
+ * rings (20,480 B request + 20,704 B response) the lazy xRingbufferCreate()
+ * in DAP_Thread failed and the DAP task deleted itself: USBIP enumerated the
+ * CMSIS-DAP device but OpenOCD failed with "CMSIS-DAP command CMD_INFO
+ * failed".  6 slots (6 KiB + ~6.3 KiB) are still 2x the USBIP pipeline depth
+ * (3 parked IN URBs, see BIRDIEBOT_USBIP_PIPELINE) and leave enough internal
+ * RAM for the web server/OTA paths (see the internal-heap budget in
+ * sdkconfig.defaults.esp32c5).  The B1 pipeline only parks up to
+ * MAX_PENDING_REQUESTS (3) blocks, so 6 slots do not throttle OpenOCD. */
+#define DAP_BUFFER_NUM 6
 #else
 #define DAP_BUFFER_NUM 20
 #endif
@@ -93,6 +105,24 @@
 /* 8 bytes item header + 8 bytes wrap/dummy slack per slot (see
  * prvCheckItemFitsDefault/prvGetItemDefault in esp_ringbuf/ringbuf.c). */
 #define DAP_RESPONSE_RING_SIZE (((size_t)DAP_PACKET_SIZE + 8U) * DAP_BUFFER_NUM + 64U)
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+/* ESP32-C5 real hardware: the internal heap that is left after Wi-Fi + the web
+ * server is not large enough for the two ring storages (see the internal-heap
+ * budget in sdkconfig.defaults.esp32c5).  The N8R8 module has 8 MB PSRAM, and
+ * the rings are pure CPU payload buffers (copied by memcpy, never DMA'd or
+ * bit-banged), so they can live in PSRAM.  The DAP task stack stays internal
+ * (FreeRTOS requirement by default).
+ *
+ * The ring handles remember which allocator was used: XRingbufferCreateWithCaps
+ * rings must be released with vRingbufferDeleteWithCaps (IDF ringbuf API). */
+#define DAP_RING_USE_PSRAM 1
+#define DAP_RING_PSRAM_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+static bool s_req_ring_psram;
+static bool s_resp_ring_psram;
+#else
+#define DAP_RING_USE_PSRAM 0
+#endif
 
 /* Bounded wait used when pushing a response into the OUT ring buffer, so that a
  * reset request (ring buffer ownership change) is always observed. */
@@ -296,15 +326,35 @@ void dap_handle_get_ring_info(dap_ring_info_t *out)
     out->active = (dap_dataIN_handle != NULL && dap_dataOUT_handle != NULL);
 }
 
-/** Create one ring: static storage when reserved early, heap otherwise. */
+/** Create one ring: static storage when reserved early, PSRAM on the C5,
+ *  internal heap otherwise.  @p from_psram is set when the caps allocator was
+ *  used (the matching delete call differs). */
 static RingbufHandle_t dap_ring_create(size_t bytes, RingbufferType_t type,
                                        uint8_t *static_storage,
-                                       StaticRingbuffer_t *static_struct)
+                                       StaticRingbuffer_t *static_struct,
+                                       bool *from_psram)
 {
+    if (from_psram != NULL) {
+        *from_psram = false;
+    }
     if (static_storage != NULL && static_struct != NULL) {
         return xRingbufferCreateStatic(bytes, type, static_storage,
                                        static_struct);
     }
+#if DAP_RING_USE_PSRAM
+    /* Try PSRAM first on the C5; fall back to the internal heap if PSRAM is not
+     * available at runtime (external RAM disabled / not detected). */
+    {
+        RingbufHandle_t rb = xRingbufferCreateWithCaps(bytes, type,
+                                                       DAP_RING_PSRAM_CAPS);
+        if (rb != NULL) {
+            if (from_psram != NULL) {
+                *from_psram = true;
+            }
+            return rb;
+        }
+    }
+#endif
     return xRingbufferCreate(bytes, type);
 }
 
@@ -314,17 +364,35 @@ void malloc_dap_ringbuf(void) {
         if (dap_dataIN_handle == NULL) {
             /* Request ring: fixed DAP_PACKET_SIZE payload items (no split, the
              * ring size is an exact multiple of the item size). */
+#if DAP_RING_USE_PSRAM
+            s_req_ring_psram = false;
+#endif
             dap_dataIN_handle = dap_ring_create(
                 DAP_REQUEST_RING_SIZE, RINGBUF_TYPE_BYTEBUF,
                 s_prealloc_ready ? s_prealloc_req_storage : NULL,
-                s_prealloc_ready ? &s_prealloc_req_struct : NULL);
+                s_prealloc_ready ? &s_prealloc_req_struct : NULL,
+#if DAP_RING_USE_PSRAM
+                &s_req_ring_psram
+#else
+                NULL
+#endif
+                );
         }
         if (dap_dataOUT_handle == NULL) {
             /* Response ring: variable-size payload items, each one contiguous. */
+#if DAP_RING_USE_PSRAM
+            s_resp_ring_psram = false;
+#endif
             dap_dataOUT_handle = dap_ring_create(
                 DAP_RESPONSE_RING_SIZE, RINGBUF_TYPE_NOSPLIT,
                 s_prealloc_ready ? s_prealloc_resp_storage : NULL,
-                s_prealloc_ready ? &s_prealloc_resp_struct : NULL);
+                s_prealloc_ready ? &s_prealloc_resp_struct : NULL,
+#if DAP_RING_USE_PSRAM
+                &s_resp_ring_psram
+#else
+                NULL
+#endif
+                );
         }
 
         xSemaphoreGive(data_response_mux);
@@ -388,12 +456,31 @@ static void dap_reset_pending_frames(void)
 
 void free_dap_ringbuf(void) {
     if (data_response_mux && xSemaphoreTake(data_response_mux, portMAX_DELAY) == pdTRUE) {
+#if DAP_RING_USE_PSRAM
+        if (dap_dataIN_handle) {
+            if (s_req_ring_psram) {
+                vRingbufferDeleteWithCaps(dap_dataIN_handle);
+            } else {
+                vRingbufferDelete(dap_dataIN_handle);
+            }
+            s_req_ring_psram = false;
+        }
+        if (dap_dataOUT_handle) {
+            if (s_resp_ring_psram) {
+                vRingbufferDeleteWithCaps(dap_dataOUT_handle);
+            } else {
+                vRingbufferDelete(dap_dataOUT_handle);
+            }
+            s_resp_ring_psram = false;
+        }
+#else
         if (dap_dataIN_handle) {
             vRingbufferDelete(dap_dataIN_handle);
         }
         if (dap_dataOUT_handle) {
             vRingbufferDelete(dap_dataOUT_handle);
         }
+#endif
 
         dap_dataIN_handle = dap_dataOUT_handle = NULL;
         xSemaphoreGive(data_response_mux);
@@ -685,6 +772,15 @@ void DAP_Thread(void *argument)
         (void)dap_handle_prealloc_ringbuffers();
     }
 #endif
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    /* Internal-RAM diagnostics: on the C5 the ring allocation competes with the
+     * web server/Wi-Fi for a much smaller heap; without this the only symptom
+     * of a starved boot is OpenOCD's "CMSIS-DAP command CMD_INFO failed". */
+    printf("DAP: task running (internal free=%u largest=%u)\r\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                      MALLOC_CAP_8BIT));
+#endif
     malloc_dap_ringbuf();
     kDAPTaskHandle = xTaskGetCurrentTaskHandle();
 
@@ -695,9 +791,32 @@ void DAP_Thread(void *argument)
     if (dap_dataIN_handle == NULL || dap_dataOUT_handle == NULL ||
         data_response_mux == NULL)
     {
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+        printf("Can not create DAP ringbuf/mux! (internal free=%u largest=%u)\r\n",
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                          MALLOC_CAP_8BIT));
+#else
         printf("Can not create DAP ringbuf/mux!\r\n");
+#endif
         vTaskDelete(NULL);
     }
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#if DAP_RING_USE_PSRAM
+    printf("DAP: rings ready req=%u B resp=%u B (psram=%d/%d, internal free=%u largest=%u)\r\n",
+           (unsigned)DAP_REQUEST_RING_SIZE, (unsigned)DAP_RESPONSE_RING_SIZE,
+           s_req_ring_psram ? 1 : 0, s_resp_ring_psram ? 1 : 0,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                      MALLOC_CAP_8BIT));
+#else
+    printf("DAP: rings ready req=%u B resp=%u B (internal free=%u largest=%u)\r\n",
+           (unsigned)DAP_REQUEST_RING_SIZE, (unsigned)DAP_RESPONSE_RING_SIZE,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                      MALLOC_CAP_8BIT));
+#endif
+#endif
     for (;;)
     {
 

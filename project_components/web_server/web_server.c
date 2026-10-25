@@ -6,6 +6,7 @@
 
 #include <esp_http_server.h>
 #include <esp_event.h>
+#include <esp_heap_caps.h>
 
 #include <esp_system.h>
 #include <esp_log.h>
@@ -14,6 +15,20 @@
 #define TAG "web server"
 
 #define WEB_WS_URI "/ws"
+
+/* Bring-up memory accounting: on the single-core ESP32-C5 the internal heap is
+ * tight enough that the web server footprint decides whether the DAP task can
+ * be created.  Keep the per-stage numbers in the boot log. */
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#define WEB_SERVER_LOG_INTERNAL_HEAP(stage)                                   \
+	ESP_LOGI(TAG, "internal heap %-14s free=%u largest=%u", stage,            \
+	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |          \
+	                                           MALLOC_CAP_8BIT),              \
+	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | \
+	                                                    MALLOC_CAP_8BIT))
+#else
+#define WEB_SERVER_LOG_INTERNAL_HEAP(stage) ((void)0)
+#endif
 
 static httpd_handle_t http_server = NULL;
 
@@ -114,11 +129,13 @@ void start_webserver(void)
 	 * registration (WS/SPA) now that /api/discover exists. */
 	config.max_uri_handlers = 20;
 
+	WEB_SERVER_LOG_INTERNAL_HEAP("pre-httpd_start");
 	ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
 	if ((err = httpd_start(&http_server, &config)) != ESP_OK) {
 		ESP_LOGE(TAG, "Error starting server!");
 		ESP_ERROR_CHECK(err);
 	}
+	WEB_SERVER_LOG_INTERNAL_HEAP("post-httpd_start");
 
 	/* Target-flash endpoints must be registered BEFORE the URI modules: the
 	 * "/" SPA fallback matches every GET path, so /api/target/info would be
@@ -128,9 +145,11 @@ void start_webserver(void)
 	ESP_LOGI(TAG, "Registering target flash URI handlers");
 	uri_target_register(http_server);
 #endif
+	WEB_SERVER_LOG_INTERNAL_HEAP("post-uri_target");
 
 	ESP_LOGI(TAG, "Registering URI handlers");
 	uri_module_init(http_server);
+	WEB_SERVER_LOG_INTERNAL_HEAP("post-uri_modules");
 }
 
 int server_is_running()

@@ -292,10 +292,22 @@ void wifi_manager_init(void)
 	ctx.try_connect_count = 0;
 	ctx.pending_valid = false;
 	ctx.pending_persist = false;
-	/* Smart APSTA defaults: AP off 30 s after STA connect, AP on 10 s after a
-	 * disconnect (contract §5.6; tunable through WIFI cmd 7). */
+	/* Smart APSTA defaults (contract §5.6; tunable through WIFI cmd 7):
+	 * AP off after STA connect, AP on 10 s after a disconnect. */
 	ctx.ap_on_delay_tick = pdMS_TO_TICKS(10000);
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* ESP32-C5 has a single dual-band Wi-Fi radio: keeping the fallback SoftAP
+	 * alive while the STA is already associated makes large HTTP/OTA transfers
+	 * stall (measured on real hardware 2026-10-25: the first Web page request
+	 * after boot sent only ~6.7 KiB, then httpd reported "error in send : 11"
+	 * (EAGAIN) after its 10 s send timeout; later requests succeeded once the
+	 * AP had been stopped by the 30 s timer).  The AP is only a fallback for
+	 * "no STA connection", so on the C5 stop it 2 s after the STA connects;
+	 * it still comes back 10 s after a disconnect. */
+	ctx.ap_off_delay_tick = pdMS_TO_TICKS(2000);
+#else
 	ctx.ap_off_delay_tick = pdMS_TO_TICKS(30000);
+#endif
 
 	/* Load/migrate the multi credential table before touching any STA/AP
 	 * credential (docs/wifi-credential-memory.md §2/§7). */

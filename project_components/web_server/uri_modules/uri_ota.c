@@ -72,7 +72,17 @@
 #define OTA_UPLOAD_URI         "/api/ota/upload"
 #define OTA_UPLOAD_BUF_SIZE    CONFIG_BIRDIEBOT_OTA_BUF_SIZE
 #define OTA_UPLOAD_BUF_COUNT   2
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+/* ESP32-C5 real hardware: the internal heap is much smaller than the S3's.
+ * After ota_dap_release_rings() + httpd_req_async_handler_begin() the largest
+ * internal block was 4096 B, so xTaskCreate(OTA_UPLOAD_TASK_STACK=5120) failed
+ * and every upload answered 503 "ota service unavailable" (measured
+ * 2026-10-25).  3584 B is enough for recv + esp_ota_write + SHA-256 + JSON
+ * and fits the 4096 B block.  Keep 5120 on the S3/S3-class targets. */
+#define OTA_UPLOAD_TASK_STACK  3584
+#else
 #define OTA_UPLOAD_TASK_STACK  5120
+#endif
 #define OTA_UPLOAD_TASK_PRIO   5
 #define OTA_REBOOT_DELAY_MS    1000
 #define OTA_JSON_RESP_MAX      640
@@ -395,6 +405,8 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 	}
 
 	if (s_free_queue == NULL || s_work_queue == NULL) {
+		ESP_LOGE(TAG, "ota unavailable: queues free=%p work=%p",
+		         (void *)s_free_queue, (void *)s_work_queue);
 		ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
 		return ESP_OK;
 	}
@@ -420,35 +432,36 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 		s_ctx.sha256[sha_len] = '\0';
 	}
 
-	/* task-66b: give the ~41 KiB of the DAP ring buffers back BEFORE the async
-	 * request copy and the 5120-byte OTA task stack are allocated (with the
-	 * rings resident heap_largest is ~4.6 KiB -> xTaskCreate failed -> every
-	 * upload answered 503 "ota service unavailable").  A failed upload restores
-	 * them in ota_upload_task(); a successful one reboots the device. */
+	/* task-66b: give the ~41 KiB of the DAP ring buffers back BEFORE the OTA
+	 * task stack is allocated (with the rings resident heap_largest is too
+	 * small -> xTaskCreate fails -> every upload answered 503 "ota service
+	 * unavailable").  A failed upload restores them in ota_upload_task(); a
+	 * successful one reboots the device. */
 	ota_dap_release_rings();
 
-	/* Deferred response: the OTA task sends the final JSON and completes the
-	 * async request (or the handler does it when the body transfer aborts). */
-	esp_err_t err = httpd_req_async_handler_begin(req, &s_ctx.async_req);
-	if (err != ESP_OK) {
-		s_upload_active = false;
-		ota_dap_restore_rings();
-		ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
-		return ESP_OK;
-	}
-
+	/* The worker first, so it drains the static chunk queue while this handler
+	 * receives the body.  The async request copy is created only AFTER the body
+	 * transfer: ESP-IDF v5.5's httpd_req_async_handler_begin() zeroes
+	 * req->aux->remaining_len ("prevent the main thread from reading the rest
+	 * of the request"), so calling it before httpd_req_recv() makes the recv
+	 * return 0 immediately (real C5 finding 2026-10-25: upload stalled at
+	 * "session error: client disconnected", HTTP 400 from the leftover body).
+	 * IDF v5.2.1 did not do that, hence the old order worked before the
+	 * unified v5.5.6 upgrade. */
 	if (xTaskCreate(ota_upload_task, "ota_upload", OTA_UPLOAD_TASK_STACK, NULL,
 	                OTA_UPLOAD_TASK_PRIO, NULL) != pdPASS) {
-		httpd_req_async_handler_complete(s_ctx.async_req);
-		s_ctx.async_req = NULL;
+		ESP_LOGE(TAG, "ota upload task create failed (stack=%u heap free=%u "
+		         "largest=%u)", (unsigned)OTA_UPLOAD_TASK_STACK,
+		         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+		         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+		                                                    MALLOC_CAP_8BIT));
 		s_upload_active = false;
 		ota_dap_restore_rings();
 		ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
 		return ESP_OK;
 	}
 
-	/* Receive the declared body (see file header for why this runs here) and
-	 * hand the chunks to the OTA task through the static buffers. */
+	/* Receive the declared body and hand the chunks to the OTA task. */
 	uint32_t remaining = req->content_len;
 	while (remaining > 0) {
 		ota_rx_item_t slot_item;
@@ -465,6 +478,10 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 			break;
 		}
 		if (received <= 0) {
+			ESP_LOGW(TAG, "ota recv failed: %d (remaining=%u heap_largest=%u)",
+			         received, (unsigned)remaining,
+			         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+			                                                    MALLOC_CAP_8BIT));
 			ota_free_slot(slot);
 			s_ctx.recv_result = OTA_RECV_DISCONNECTED;
 			break;
@@ -482,16 +499,24 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 		remaining -= (uint32_t) received;
 	}
 
-	/* On an aborted transfer the handler owns the request from now on: report
-	 * a timeout (408) when the socket is still alive, then complete the async
-	 * request. The OTA task must not touch async_req in this case. */
 	if (s_ctx.recv_result != OTA_RECV_OK) {
+		/* Body transfer aborted: reply synchronously (no async copy exists) and
+		 * let the OTA task only unwind / restore the DAP rings. */
 		s_ctx.req_handled_by_handler = true;
 		if (s_ctx.recv_result == OTA_RECV_TIMEOUT) {
 			ota_respond_error(req, 408, OTA_JSON_CODE_BUSY, OTA_ERR_TIMEOUT);
 		}
-		httpd_req_async_handler_complete(s_ctx.async_req);
-		s_ctx.async_req = NULL;
+	} else {
+		esp_err_t begin_err = httpd_req_async_handler_begin(req, &s_ctx.async_req);
+		if (begin_err != ESP_OK) {
+			ESP_LOGE(TAG, "ota async handler begin failed: %s (heap free=%u "
+			         "largest=%u)", esp_err_to_name(begin_err),
+			         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+			         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+			                                                    MALLOC_CAP_8BIT));
+			s_ctx.req_handled_by_handler = true;
+			ota_respond_error(req, 503, OTA_JSON_CODE_BUSY, OTA_ERR_UNAVAILABLE);
+		}
 	}
 
 	/* End-of-stream marker: the OTA task performs the slow part from here. */
@@ -512,7 +537,11 @@ static void ota_upload_task(void *arg)
 {
 	(void) arg;
 
-	httpd_req_t *async_req = s_ctx.async_req; /* NULL when handled by handler */
+	/* The async request copy is created by the httpd handler only after the
+	 * body has been received (IDF v5.5 zeroes remaining_len in
+	 * httpd_req_async_handler_begin), which happens before the EOS marker is
+	 * queued.  Fetch it after the drain loop instead of at task start. */
+	httpd_req_t *async_req = NULL;
 	esp_err_t err = wt_ota_upload_begin(s_ctx.content_len);
 	uint32_t written = 0;
 
@@ -541,6 +570,10 @@ static void ota_upload_task(void *arg)
 		}
 		ota_free_slot(item.slot);
 	}
+
+	/* Set by the httpd handler before it queued the EOS marker (normal path),
+	 * NULL when the body transfer aborted and the handler replied itself. */
+	async_req = s_ctx.async_req;
 
 	if (s_ctx.req_handled_by_handler) {
 		/* Body transfer aborted; the handler already replied (408) or the
