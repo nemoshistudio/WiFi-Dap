@@ -532,6 +532,13 @@ class ExtendedModeTests(unittest.TestCase):
         self.assertGreater(soak["frames_total"], 0)
         self.assertIsNotNone(soak["heap_free_start"])
         self.assertFalse(soak["aborted_early"])
+        # Instrumented diagnostics: per-cycle records + classified counters.
+        self.assertEqual(len(soak["cycles"]), soak["iterations"])
+        self.assertEqual(soak["failed_cycles"], [])
+        self.assertEqual(soak["tick_errors_total"], 0)
+        self.assertEqual(soak["sampler_stops"], 0)
+        self.assertEqual(soak["transport_errors"], 0)
+        self.assertEqual(soak["stop_failures"], 0)
 
     def test_swd_clock_matrix_disabled_by_default(self) -> None:
         report = self._run_offline([])
