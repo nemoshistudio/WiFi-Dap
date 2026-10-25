@@ -24,7 +24,8 @@ for _ in $(seq 1 240); do
     for tty in /dev/ttyACM*; do
       [[ -e "$tty" ]] || continue
       echo "[recover] found $tty"
-      docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+      docker run --rm --user "$(id -u):$(id -g)" \
+        --group-add "$(getent group plugdev | cut -d: -f3)" -e HOME=/tmp \
         --device="$tty" -v "$ROOT:/project" -w /project "$IMAGE" \
         bash -c "python -m esptool --chip esp32s3 -p '$tty' erase_flash && \
           python -m esptool --chip esp32s3 -p '$tty' -b 460800 \
