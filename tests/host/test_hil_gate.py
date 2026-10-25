@@ -285,6 +285,10 @@ class ExtendedModeTests(unittest.TestCase):
         self.assertIsNone(args.ota_image)
         self.assertFalse(args.ota_interrupt)
         self.assertEqual(args.soak_seconds, 0)
+        self.assertFalse(args.swd_clock_matrix)
+        self.assertEqual(args.swd_clock_steps, "auto,500k,1M,2M,4M,10M")
+        self.assertEqual(args.swd_clock_expect_ok, "")
+        self.assertAlmostEqual(args.swd_clock_settle, 0.3)
         self.assertTrue(args.openocd_path.endswith("openocd"))
         self.assertTrue(args.openocd_scripts.endswith("scripts"))
 
@@ -300,6 +304,8 @@ class ExtendedModeTests(unittest.TestCase):
             self._parse(["--ota-image", "/tmp/x.bin", "--ota-allow"])))
         self.assertTrue(hil._extended_enabled(
             self._parse(["--soak-seconds", "60"])))
+        self.assertTrue(hil._extended_enabled(
+            self._parse(["--swd-clock-matrix"])))
 
     def test_write_modes_need_second_switch(self) -> None:
         parser = hil.build_parser()
@@ -416,6 +422,92 @@ class ExtendedModeTests(unittest.TestCase):
             self.assertEqual(errors, [])
         finally:
             os.unlink(path)
+
+    # -- SWD clock matrix (pure helpers + offline gate integration) --------
+    def test_swd_clock_steps_parse(self) -> None:
+        self.assertEqual(
+            hil.parse_swd_clock_steps("auto,500k,1M,2M,4M,10M"),
+            [0, 500000, 1000000, 2000000, 4000000, 10000000])
+        self.assertEqual(hil.parse_swd_clock_steps("0 100000 0x100000"),
+                         [0, 100000, 0x100000])
+        self.assertEqual(hil.parse_swd_clock_steps("0.5M, 1900k"),
+                         [500000, 1900000])
+        self.assertEqual(hil.parse_swd_clock_steps("1000000"), [1000000])
+        for bad in ("", "abc", "50k", "20M", "1M,bad"):
+            with self.assertRaises(ValueError):
+                hil.parse_swd_clock_steps(bad)
+
+    def test_swd_clock_label_and_result(self) -> None:
+        self.assertEqual(hil.swd_clock_label(0), "auto")
+        self.assertEqual(hil.swd_clock_label(500000), "500k")
+        self.assertEqual(hil.swd_clock_label(1000000), "1m")
+        self.assertEqual(hil.swd_clock_label(1048576), "1048576hz")
+        self.assertTrue(hil.swd_clock_result_ok(1000000, 200, True, True))
+        self.assertFalse(hil.swd_clock_result_ok(1000000, 400, False, True))
+        self.assertFalse(hil.swd_clock_result_ok(1000000, 200, True, False))
+        self.assertTrue(hil.swd_clock_result_ok(0, 500, False, True))
+
+    def _run_offline(self, argv, device=None, **overrides):
+        args = self._parse(argv)
+        args.host = "dry-run"
+        args.port = 0
+        args.duration = 0.3
+        args.one_series_duration = 0.15
+        args.poll_interval = 0.02
+        args.playwright = "off"
+        args.verbose = False
+        args.allow_legacy_firmware = False
+        args.allow_dap_session = False
+        args.swd_clock_settle = 0.0
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return hil.run_gate(args, transport=device or hil.FakeDevice())
+
+    def test_swd_clock_matrix_offline_pass(self) -> None:
+        report = self._run_offline(
+            ["--swd-clock-matrix",
+             "--swd-clock-expect-ok", "auto,500k,1M"])
+        self.assertEqual(report["exit_code"], hil.EXIT_PASS,
+                         msg=json.dumps(report["warnings"]))
+        self.assertTrue(report["modes"]["swd_clock_matrix"])
+        matrix = report["extended"]["extended_swd_matrix"]
+        self.assertEqual(matrix["status"], "pass")
+        self.assertEqual(matrix["required_failures"], 0)
+        self.assertEqual(len(matrix["steps"]), 6)
+        self.assertEqual(matrix["steps_requested_hz"],
+                         [0, 500000, 1000000, 2000000, 4000000, 10000000])
+        self.assertEqual(matrix["steps"][3]["detected"], False)
+        self.assertEqual(matrix["final_restore"]["detected"], True)
+        ids = {check["id"] for check in report["checks"]}
+        self.assertIn("extended.swd_matrix.step.auto", ids)
+        self.assertIn("extended.swd_matrix.restore.10m", ids)
+        self.assertIn("extended.swd_matrix.final_auto", ids)
+
+    def test_swd_clock_matrix_expected_failure_fails_gate(self) -> None:
+        report = self._run_offline(
+            ["--swd-clock-matrix",
+             "--swd-clock-expect-ok", "auto,10M"])
+        self.assertEqual(report["exit_code"], hil.EXIT_FAIL)
+        matrix = report["extended"]["extended_swd_matrix"]
+        self.assertEqual(matrix["status"], "fail")
+        self.assertGreaterEqual(matrix["required_failures"], 1)
+
+    def test_swd_clock_matrix_cli_validation(self) -> None:
+        parser = hil.build_parser()
+        for argv in (["--swd-clock-steps", "50k"],
+                     ["--swd-clock-steps", ""],
+                     ["--swd-clock-expect-ok", "nope"],
+                     ["--swd-clock-settle", "-1"],
+                     ["--swd-clock-settle", "99"]):
+            args = parser.parse_args(argv)
+            with self.assertRaises(SystemExit):
+                hil.validate_args(parser, args)
+
+    def test_swd_clock_matrix_disabled_by_default(self) -> None:
+        report = self._run_offline([])
+        self.assertFalse(report["modes"]["swd_clock_matrix"])
+        self.assertEqual(report["extended"], {"enabled": False})
+
 
     # -- offline gate integration -----------------------------------------
     def test_extended_mode_skips_offline(self) -> None:

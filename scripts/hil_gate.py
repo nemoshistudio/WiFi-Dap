@@ -20,8 +20,9 @@ when a check fails.
 
 Extended (opt-in, OFF by default) modes under ``--usbip-smoke``,
 ``--reboot-recovery``, ``--flash-image ... --flash-allow``,
-``--ota-image ... --ota-allow`` / ``--ota-interrupt`` and
-``--soak-seconds N`` add host-side USBIP/OpenOCD sessions, a Web Flash write of
+``--ota-image ... --ota-allow`` / ``--ota-interrupt``,
+``--swd-clock-matrix`` and ``--soak-seconds N`` add host-side USBIP/OpenOCD
+sessions, an SWD clock ladder sweep, a Web Flash write of
 an explicitly named test image, OTA upload/interrupt tests and a stability soak.
 Those modes are documented in docs/hil-gate.md ("HIL 扩展模式"); every write
 mode needs a second safety switch plus a concrete image file, and environment
@@ -1314,6 +1315,8 @@ def _report(gate: Gate, args: argparse.Namespace, started_at: str,
             "usbip_sessions": getattr(args, "usbip_sessions", 0),
             "openocd_timeout_s": getattr(args, "openocd_timeout", 0.0),
             "soak_seconds": getattr(args, "soak_seconds", 0),
+            "swd_clock_steps": getattr(args, "swd_clock_steps", ""),
+            "swd_clock_expect_ok": getattr(args, "swd_clock_expect_ok", ""),
         },
         "modes": {
             "extended": _extended_enabled(args),
@@ -1322,6 +1325,7 @@ def _report(gate: Gate, args: argparse.Namespace, started_at: str,
             "target_flash_write": bool(getattr(args, "flash_image", None)),
             "ota": bool(getattr(args, "ota_image", None)
                         or getattr(args, "ota_interrupt", False)),
+            "swd_clock_matrix": bool(getattr(args, "swd_clock_matrix", False)),
             "soak": bool(getattr(args, "soak_seconds", 0)),
         },
         "extended": {
@@ -1388,7 +1392,7 @@ def _human_report(report: Dict[str, Any], stream: Any = sys.stdout) -> None:
     extended = report.get("extended") or {}
     if (report.get("modes") or {}).get("extended"):
         for key in ("extended_usbip", "extended_recovery", "extended_flash",
-                    "extended_ota", "extended_soak"):
+                    "extended_ota", "extended_swd_matrix", "extended_soak"):
             section = extended.get(key)
             if not section:
                 continue
@@ -1410,6 +1414,14 @@ def _human_report(report: Dict[str, Any], stream: Any = sys.stdout) -> None:
             if key == "extended_ota" and section.get("upload"):
                 detail += " upload_http=%r" % (
                     section["upload"].get("status"),)
+            if key == "extended_swd_matrix" and section.get("steps"):
+                good = sum(1 for step in section["steps"]
+                           if step.get("ok"))
+                detail += (" steps=%d/%d expected_failures=%r auto=%r"
+                           % (good, len(section["steps"]),
+                              section.get("required_failures"),
+                              (section.get("final_restore") or {}).get(
+                                  "detected")))
             print("extended %-20s %s" % (key.replace("extended_", ""), detail),
                   file=stream)
     for warning in report["warnings"]:
@@ -1569,7 +1581,8 @@ class FakeDevice:
 
     def __init__(self, detected: bool = True, diagnostics: bool = True,
                  frame_format: str = "cvf2-pc", effective_fps: float = 50.0,
-                 port: int = 0) -> None:
+                 port: int = 0,
+                 swd_clock_fail_hz: Optional[Any] = None) -> None:
         self.detected = detected
         self.diagnostics = diagnostics
         self.frame_format = frame_format
@@ -1581,6 +1594,11 @@ class FakeDevice:
         self.heap_free = 120000
         self.heap_largest = 40000
         self.swd_clock_hz = 1000000
+        #: Manual clock steps where the fake target stops answering (the lab H7
+        #: answers up to 1 MHz, so 2/4/10 MHz fail by default).
+        self.swd_clock_fail_hz = (frozenset({2000000, 4000000, 10000000})
+                                  if swd_clock_fail_hz is None
+                                  else frozenset(swd_clock_fail_hz))
 
     # -- helpers -----------------------------------------------------------
     def _json(self, data: Dict[str, Any], status: int = 200) -> Response:
@@ -1684,10 +1702,27 @@ class FakeDevice:
                     or path.startswith(forbidden + "/"):
                 raise AssertionError("gate attempted forbidden write: %s %s"
                                      % (method, path))
+        if path == SWD_CLOCK_PATH and method == "POST":
+            hz = int((body or {}).get("hz", 0) or 0)
+            if hz != 0 and not 100000 <= hz <= 10000000:
+                return self._json({"module": 6, "cmd": 5, "ok": False,
+                                   "hz": hz, "mode": "manual"}, 400)
+            self.swd_clock_hz = 1000000 if hz == 0 else hz
+            return self._json({"module": 6, "cmd": 5, "ok": True, "hz": hz,
+                               "mode": "auto" if hz == 0 else "manual"})
+        if path == SWD_CLOCK_PATH and method == "GET":
+            return self._json({"module": 6, "cmd": 5, "ok": True,
+                               "hz": self.swd_clock_hz,
+                               "mode": "auto" if self.swd_clock_hz == 1000000
+                               else "manual"})
         if path == TARGET_INFO_PATH and method == "GET":
             if not self.detected:
                 return self._json({"module": 6, "cmd": 1, "ok": False,
                                    "err": "target not detected", "code": 5,
+                                   "detected": False})
+            if self.swd_clock_hz in self.swd_clock_fail_hz:
+                return self._json({"module": 6, "cmd": 1, "ok": False,
+                                   "err": "ESP_FAIL", "code": 5,
                                    "detected": False})
             return self._json({
                 "module": 6, "cmd": 1, "ok": True, "detected": True,
@@ -1890,7 +1925,82 @@ def _extended_enabled(args: argparse.Namespace) -> bool:
                 or getattr(args, "flash_image", None)
                 or getattr(args, "ota_image", None)
                 or getattr(args, "ota_interrupt", False)
+                or getattr(args, "swd_clock_matrix", False)
                 or (getattr(args, "soak_seconds", 0) or 0) > 0)
+
+
+#: Default SWD clock ladder for --swd-clock-matrix.  0 = the firmware's auto
+#: probe ladder (2 MHz -> 1 MHz -> 500 kHz); the rest are manual forced clocks.
+DEFAULT_SWD_CLOCK_STEPS = "auto,500k,1M,2M,4M,10M"
+
+
+def parse_swd_clock_steps(text: str) -> List[int]:
+    """Parse a comma/space separated SWD clock ladder into Hz values.
+
+    Accepted forms: ``auto``/``0`` (firmware auto ladder), suffix forms such as
+    ``500k``/``1M``/``1900k`` and plain integer Hz (decimal or ``0x`` hex).
+    Pure function: unit-tested offline, no I/O.
+    """
+    tokens = [token for token in
+              text.replace(",", " ").replace(";", " ").split() if token]
+    steps: List[int] = []
+    for token in tokens:
+        raw = token.strip()
+        lowered = raw.lower()
+        if lowered in ("auto", "default", "0"):
+            hz = 0
+        else:
+            multiplier = 1
+            number = lowered
+            for candidate, factor in (("khz", 1000), ("mhz", 1000000),
+                                      ("hz", 1), ("k", 1000), ("m", 1000000)):
+                if lowered.endswith(candidate) \
+                        and len(lowered) > len(candidate):
+                    number = lowered[: -len(candidate)]
+                    multiplier = factor
+                    break
+            try:
+                if number.startswith("0x"):
+                    hz = int(number, 0)
+                elif multiplier == 1:
+                    hz = int(number, 0)
+                else:
+                    hz = int(float(number) * multiplier)
+            except ValueError:
+                raise ValueError("invalid SWD clock step: %r" % (raw,))
+        if hz != 0 and not (100000 <= hz <= 10000000):
+            raise ValueError(
+                "SWD clock step %r out of range (auto/0 or 100000..10000000 Hz)"
+                % (raw,))
+        steps.append(hz)
+    if not steps:
+        raise ValueError("empty SWD clock step list")
+    if len(steps) > 16:
+        raise ValueError("too many SWD clock steps (%d > 16)" % len(steps))
+    return steps
+
+
+def swd_clock_label(hz: int) -> str:
+    """Stable check-id suffix for one SWD clock step (auto/500k/1m/...)."""
+    if hz == 0:
+        return "auto"
+    if hz % 1000000 == 0:
+        return "%dm" % (hz // 1000000)
+    if hz % 1000 == 0:
+        return "%dk" % (hz // 1000)
+    return "%dhz" % hz
+
+
+def swd_clock_result_ok(step_hz: int, set_http: int, set_ok: bool,
+                        detected: bool) -> bool:
+    """True when one matrix step reached and identified the target.
+
+    A manual step needs the POST to be accepted *and* the follow-up probe to
+    detect the target; the auto step (0) only needs the probe to recover.
+    """
+    if step_hz != 0 and not (set_http == 200 and set_ok):
+        return False
+    return bool(detected)
 
 
 def sha256_file(path: str) -> str:
@@ -2573,7 +2683,16 @@ def _ota_upload(http_conn: HttpTransport, image: str, sha256: str,
     data = open(image, "rb").read()
     headers = {"Content-Type": "application/octet-stream",
                "X-SHA256": sha256}
-    body = data[:partial_bytes] if partial_bytes else data
+    if partial_bytes:
+        # True mid-stream interrupt: the declared Content-Length is the FULL
+        # image but only `partial_bytes` are sent before the TCP connection is
+        # dropped.  The device therefore waits for the rest, sees EOF and
+        # aborts the session ("client disconnected") - it must not switch the
+        # boot slot (docs/ota-local-upload.md §10 acceptance bullet).
+        headers["Content-Length"] = str(len(data))
+        body = data[:partial_bytes]
+    else:
+        body = data
     try:
         response = http_conn.request_bytes("POST", OTA_UPLOAD_PATH, data=body,
                                            headers=headers, timeout=timeout,
@@ -2584,7 +2703,7 @@ def _ota_upload(http_conn: HttpTransport, image: str, sha256: str,
         except ProtocolError:
             pass
         return {"status": response.status, "seconds": response.elapsed_ms,
-                "payload": payload, "aborted": False}
+                "payload": payload, "aborted": bool(partial_bytes)}
     except DeviceUnreachable as exc:
         if partial_bytes:
             return {"status": 0, "aborted": True,
@@ -2875,6 +2994,152 @@ def phase_extended_soak(gate: Gate, args: argparse.Namespace,
               values=section)
 
 
+def phase_extended_swd_clock(gate: Gate, args: argparse.Namespace,
+                             http: HttpTransport) -> None:
+    """Manual SWD clock matrix: POST /api/target/swd-clock + target probe.
+
+    For every ladder step: force the clock, probe `/api/target/info`, record the
+    actual `swd_clock_hz`/detect result, then restore `auto` (hz=0) and confirm
+    the target is still detectable.  The auto step (0) is the baseline of the
+    firmware's own 2 MHz -> 1 MHz -> 500 kHz fallback ladder.
+
+    Expectations are opt-in (`--swd-clock-expect-ok`): a step listed there must
+    detect the target or the gate FAILS; every other step is recorded as
+    information/warning only (the lab H7 only answers up to 1 MHz, so a
+    hard-coded "2 MHz must work" assertion would be wrong for the hardware).
+    The auto restore after *each* step is always required: the gate must never
+    leave the DAP clock in a state that makes the target undetectable.
+    """
+    section: Dict[str, Any] = {"status": "skipped", "steps": []}
+    gate.metric("extended_swd_matrix", section)
+    try:
+        steps = parse_swd_clock_steps(args.swd_clock_steps)
+        expect_ok = set(parse_swd_clock_steps(args.swd_clock_expect_ok)) \
+            if args.swd_clock_expect_ok else set()
+    except ValueError as exc:
+        gate.require("extended.swd_matrix.args", False, str(exc))
+        return
+    section["steps_requested_hz"] = steps
+    section["expect_ok_hz"] = sorted(expect_ok)
+    required_failures = 0
+    matrix_started = time.monotonic()
+
+    def _probe() -> Dict[str, Any]:
+        response = http.request("GET", TARGET_INFO_PATH, timeout=args.timeout,
+                                retries=1)
+        try:
+            return response.json()
+        except ProtocolError:
+            return {}
+
+    def _restore_auto() -> Dict[str, Any]:
+        result: Dict[str, Any] = {"http": 0, "ok": False, "detected": False}
+        try:
+            response = http.request("POST", SWD_CLOCK_PATH, body={"hz": 0},
+                                    timeout=args.timeout, retries=1)
+            result["http"] = response.status
+            try:
+                result["ok"] = response.json().get("ok") is True
+            except ProtocolError:
+                result["ok"] = False
+        except DeviceUnreachable as exc:
+            result["error"] = str(exc)
+            return result
+        info = _probe()
+        result["detected"] = info.get("detected") is True
+        result["actual_hz"] = integer(info.get("swd_clock_hz"))
+        return result
+
+    try:
+        for hz in steps:
+            label = swd_clock_label(hz)
+            try:
+                response = http.request("POST", SWD_CLOCK_PATH,
+                                        body={"hz": hz},
+                                        timeout=args.timeout, retries=1)
+                set_http = response.status
+                set_data = response.json()
+            except ProtocolError as exc:
+                gate.check("extended.swd_matrix.step.%s" % label, False,
+                           "invalid JSON from POST %s: %s"
+                           % (SWD_CLOCK_PATH, exc))
+                required_failures += 1
+                continue
+            set_ok = set_data.get("ok") is True
+            time.sleep(max(0.0, args.swd_clock_settle))
+            info = _probe()
+            detected = info.get("detected") is True
+            actual_hz = integer(info.get("swd_clock_hz"))
+            record = {
+                "requested_hz": hz,
+                "label": label,
+                "set_http": set_http,
+                "set_ok": set_ok,
+                "mode": set_data.get("mode"),
+                "reported_hz": integer(set_data.get("hz")),
+                "detected": detected,
+                "actual_hz": actual_hz,
+                "err": info.get("err"),
+                "message": info.get("message"),
+            }
+            step_ok = swd_clock_result_ok(hz, set_http, set_ok, detected)
+            required = hz in expect_ok
+            record["expected_ok"] = required
+            record["ok"] = step_ok
+            if not step_ok and required:
+                required_failures += 1
+            gate.check(
+                "extended.swd_matrix.step.%s" % label, step_ok,
+                "hz=%s set: HTTP %d ok=%r mode=%r -> detected=%r actual=%r "
+                "err=%r" % (label, set_http, set_ok, set_data.get("mode"),
+                            detected, actual_hz, info.get("err")),
+                severity="required" if required else "warn",
+                values=record,
+                ok_detail="hz=%s: detected=%r actual=%r (auto ladder %r)"
+                          % (label, detected, actual_hz,
+                             info.get("swd_clock_actual_hz")),
+            )
+            # Safety: always return to auto and confirm the target is visible.
+            restore = _restore_auto()
+            record["restore_auto"] = restore
+            restore_ok = bool(restore.get("ok")) and restore.get("detected") is True
+            if not restore_ok:
+                required_failures += 1
+            gate.check("extended.swd_matrix.restore.%s" % label, restore_ok,
+                       "restore auto after hz=%s: POST ok=%r detected=%r "
+                       "actual=%r" % (label, restore.get("ok"),
+                                      restore.get("detected"),
+                                      restore.get("actual_hz")),
+                       severity="required", values=restore,
+                       ok_detail="auto restored after hz=%s, target detected"
+                                 % label)
+            section["steps"].append(record)
+    except (DeviceUnreachable, ProtocolError) as exc:
+        gate.check("extended.swd_matrix.transport", False,
+                   "transport error during the matrix: %s" % exc)
+        required_failures += 1
+    finally:
+        # Unconditional best-effort restore, even after an aborted run.
+        final = _restore_auto()
+        section["final_restore"] = final
+        gate.require("extended.swd_matrix.final_auto",
+                     bool(final.get("ok")) and final.get("detected") is True,
+                     "final auto restore failed (detected=%r actual=%r)"
+                     % (final.get("detected"), final.get("actual_hz")),
+                     ok_detail="SWD clock restored to auto, target detected "
+                               "(actual=%r)" % (final.get("actual_hz"),))
+    section["seconds"] = round(time.monotonic() - matrix_started, 2)
+    section["required_failures"] = required_failures
+    section["status"] = "pass" if required_failures == 0 else "fail"
+    ok_steps = [step for step in section["steps"] if step.get("ok")]
+    gate.info("extended.swd_matrix.summary",
+              "%d/%d steps detected, expect-ok=%r, restored auto at the end"
+              % (len(ok_steps), len(section["steps"]),
+                 args.swd_clock_expect_ok or "(none)"),
+              values={"seconds": section["seconds"],
+                      "required_failures": required_failures})
+
+
 def phase_extended(gate: Gate, args: argparse.Namespace,
                    http: HttpTransport) -> None:
     """Run every enabled extended mode, isolated so one failure cannot skip the
@@ -2887,6 +3152,7 @@ def phase_extended(gate: Gate, args: argparse.Namespace,
                        ("reboot-recovery", args.reboot_recovery),
                        ("flash", bool(args.flash_image)),
                        ("ota", bool(args.ota_image or args.ota_interrupt)),
+                       ("swd-clock-matrix", args.swd_clock_matrix),
                        ("soak", bool(args.soak_seconds)),
                    ) if on),
                severity="info")
@@ -2899,6 +3165,9 @@ def phase_extended(gate: Gate, args: argparse.Namespace,
         phases.append(("flash", phase_extended_flash, (gate, args)))
     if args.ota_image or args.ota_interrupt:
         phases.append(("ota", phase_extended_ota, (gate, args)))
+    if args.swd_clock_matrix:
+        phases.append(("swd-clock", phase_extended_swd_clock,
+                       (gate, args, http)))
     if args.soak_seconds:
         phases.append(("soak", phase_extended_soak, (gate, args, http)))
     for name, function, call_args in phases:
@@ -2936,6 +3205,9 @@ def extended_cleanup(gate: Gate, args: argparse.Namespace) -> None:
         except Exception as exc:  # noqa: BLE001
             gate.check("extended.cleanup.usbip", False,
                        "usbip detach failed: %s" % exc, severity="warn")
+        # The identify probe ends with `reset halt`; never leave the target
+        # halted after the extended modes.
+        _safe_target_reset(gate, args, run=True)
     try:
         status = HttpTransport(args.host, args.port, timeout=args.timeout) \
             .request("GET", CURVE_STATUS_PATH, retries=0)
@@ -3086,6 +3358,22 @@ def build_parser() -> argparse.ArgumentParser:
     extended.add_argument("--ota-settle", type=float, default=4.0,
                           help="wait after the interrupted upload before "
                                "checking OTA state")
+    extended.add_argument("--swd-clock-matrix", action="store_true",
+                          help="sweep POST /api/target/swd-clock over the clock "
+                               "ladder, probe /api/target/info per step and "
+                               "restore auto after each step (read-only w.r.t. "
+                               "target flash)")
+    extended.add_argument("--swd-clock-steps", default=DEFAULT_SWD_CLOCK_STEPS,
+                          help="comma-separated SWD clock ladder: auto/0, "
+                               "500k, 1M, ... or plain Hz "
+                               "(default: %(default)s)")
+    extended.add_argument("--swd-clock-expect-ok", default="",
+                          help="ladder steps that MUST detect the target "
+                               "(default: none - all steps informational; lab "
+                               "H7 expectation: auto,500k,1M)")
+    extended.add_argument("--swd-clock-settle", type=float, default=0.3,
+                          help="settle time in seconds between forcing a clock "
+                               "and the follow-up probe")
     extended.add_argument("--soak-seconds", type=int, default=0,
                           help="opt-in stability soak length in seconds "
                                "(0=off; 30..3600; task baseline 300)")
@@ -3148,6 +3436,17 @@ def validate_args(parser: argparse.ArgumentParser,
                      % args.soak_seconds)
     if 0 < args.soak_seconds < 30:
         parser.error("--soak-seconds must be 0 (off) or >= 30 s")
+    try:
+        parse_swd_clock_steps(args.swd_clock_steps)
+        if args.swd_clock_expect_ok:
+            expect = parse_swd_clock_steps(args.swd_clock_expect_ok)
+            if len(set(expect)) != len(expect):
+                parser.error("--swd-clock-expect-ok contains duplicates")
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not 0.0 <= args.swd_clock_settle <= 10.0:
+        parser.error("--swd-clock-settle out of range (0..10 s): %g"
+                     % args.swd_clock_settle)
     if not 1 <= args.usbip_sessions <= 5:
         parser.error("--usbip-sessions out of range (1..5): %d"
                      % args.usbip_sessions)
