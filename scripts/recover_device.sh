@@ -8,7 +8,7 @@
 # Usage: scripts/recover_device.sh --yes
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
+IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.6}"
 BIN="$ROOT/build/esp32s3/birdiebot_wifi_dap.bin"
 YES=0
 [[ "${1:-}" == "--yes" ]] && YES=1

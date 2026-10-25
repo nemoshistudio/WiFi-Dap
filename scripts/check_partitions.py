@@ -21,7 +21,7 @@ Usage:
   python3 scripts/check_partitions.py --require-bin       # fail if no image found
   python3 scripts/check_partitions.py --bin build/esp32s3/birdiebot_wifi_dap.bin
   python3 scripts/check_partitions.py --no-docker         # only if gen tool unavailable
-  IDF_DOCKER_IMAGE=espressif/idf:v5.2.1 python3 scripts/check_partitions.py
+  IDF_DOCKER_IMAGE=espressif/idf:v5.5.6 python3 scripts/check_partitions.py
 
 Exit status: 0 = all checks pass, 1 = validation failure, 2 = usage error.
 This script only reads files; it never builds, flashes or touches git.
@@ -40,7 +40,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
-DEFAULT_IMAGE = os.environ.get("IDF_DOCKER_IMAGE", "espressif/idf:v5.2.1")
+DEFAULT_IMAGE = os.environ.get("IDF_DOCKER_IMAGE", "espressif/idf:v5.5.6")
 APP_MARGIN = 128 * 1024  # docs/ota-local-upload.md §1.2.4
 
 PTABLE_OFFSET = 0x8000

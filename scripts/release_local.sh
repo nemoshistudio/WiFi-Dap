@@ -24,7 +24,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 readonly SCRIPT_NAME="${0##*/}"
-readonly IDF_IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
+readonly IDF_IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.6}"
 
 TARGET="esp32s3"
 VERSION=""

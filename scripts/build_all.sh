@@ -3,14 +3,14 @@
 #
 # build_all.sh -- one-shot local build for all WiFi Dap targets.
 #
-# Builds the three Wave-1 targets with the Dockerized ESP-IDF 5.2.1 toolchain
+# Builds the Wave-1 targets with the Dockerized ESP-IDF 5.5.6 toolchain
 # (scripts/idf-docker.sh) under the flock build semaphore (scripts/build-lock.sh):
 #
 #   esp32s3 : 8MB flash + partitions/partitions_8mb_ota.csv   (release target)
 #   esp32c3 : 4MB flash + partitions/partitions_4mb_single.csv (compile-only)
 #   esp32   : 4MB flash + partitions/partitions_4mb_single.csv (compile-only)
 #   esp32c5 : 8MB flash + partitions/partitions_8mb_ota.csv    (compile-only,
-#             Wi-Fi-only: no USB OTG/NCM; needs ESP-IDF >= v5.5.2, default image
+#             Wi-Fi-only: no USB OTG/NCM; unified ESP-IDF v5.5.6 baseline, image
 #             espressif/idf:v5.5.6 via IDF_DOCKER_IMAGE_C5). Not in the default
 #             target list: pass `-t esp32c5` explicitly.
 #
@@ -30,9 +30,8 @@
 #   scripts/build_all.sh --no-lock -t esp32       # skip the flock semaphore
 #   scripts/build_all.sh --fw-version v1.0.0      # explicit PROJECT_VER override
 #
-# Environment: IDF_DOCKER_IMAGE (default espressif/idf:v5.2.1) for
-#              esp32s3/esp32c3/esp32; IDF_DOCKER_IMAGE_C5 (default
-#              espressif/idf:v5.5.6) for esp32c5;
+# Environment: IDF_DOCKER_IMAGE (default espressif/idf:v5.5.6) for every target;
+#              IDF_DOCKER_IMAGE_C5 (default espressif/idf:v5.5.6) for esp32c5;
 #              BUILD_LOCK_SLOTS / BUILD_LOCK_TIMEOUT (see build-lock.sh).
 set -euo pipefail
 
@@ -167,23 +166,21 @@ defaults_file() {
     printf 'sdkconfig.defaults.%s' "$1"
 }
 
-# ESP32-C5 needs ESP-IDF >= v5.5.2 (Wi-Fi 6/dual-band support and the C5 soc
-# layer). Keep every other target on the pinned v5.2.1 image so the existing
-# release builds are untouched. IDF_DOCKER_IMAGE_C5 / IDF_DOCKER_IMAGE can
-# override both defaults.
+# Unified ESP-IDF v5.5.6 baseline: every target (S3/C3/ESP32/C5) builds with
+# espressif/idf:v5.5.6. IDF_DOCKER_IMAGE_C5 / IDF_DOCKER_IMAGE remain as
+# override points (e.g. to pin a different patch image per target).
 image_for_target() {
     case "$1" in
         esp32c5) printf '%s' "${IDF_DOCKER_IMAGE_C5:-espressif/idf:v5.5.6}" ;;
-        *)       printf '%s' "${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}" ;;
+        *)       printf '%s' "${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.6}" ;;
     esac
 }
 
-# Component-manager "managed_components/" is a single project-level directory,
-# but ESP-IDF v5.2.1 and v5.5.x write incompatible .component_hash metadata
-# (the v5.2.1 manager refuses to reuse a directory populated by v5.5). Because
-# this project builds S3/C3/ESP32 with the pinned v5.2.1 image and ESP32-C5
-# with v5.5.6, reset that (gitignored, re-downloadable) directory whenever the
-# IDF family changes between targets/runs.
+# Component-manager "managed_components/" is a single project-level directory.
+# The project now uses one IDF family (v5.5.x), but the reset logic is kept so
+# that a mixed/pinned-image invocation (e.g. IDF_DOCKER_IMAGE=v5.2.1 for one
+# target) cannot leave incompatible .component_hash metadata behind: ESP-IDF
+# v5.2.1 and v5.5.x write incompatible metadata formats.
 idf_family_for_image() {
     case "$1" in
         *:v5.5*) printf 'v55' ;;

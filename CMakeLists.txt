@@ -18,11 +18,13 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # One component-manager lock file per IDF target.
 #
-# The ESP32-C5 build uses a newer ESP-IDF (v5.5.x, lock format v2) while the
-# ESP32-S3/C3/ESP32 builds stay on the pinned v5.2.1 (lock format v1); a shared
-# "dependencies.lock" makes the other toolchain fail to parse the lock
-# ("Cannot parse components lock file"). IDF documents DEPENDENCIES_LOCK for
-# exactly this use case (build-system docs). The files are gitignored.
+# The unified baseline is ESP-IDF v5.5.6 for every target, but the per-target
+# lock (dependencies.lock.${IDF_TARGET}) is kept: IDF v5.5 writes lock format v2
+# while older v5.2/v5.3 images write format v1, and a shared "dependencies.lock"
+# makes the other toolchain fail to parse it ("Cannot parse components lock
+# file"). This keeps single-target image overrides/rollbacks working without
+# corrupting another target's lock. IDF documents DEPENDENCIES_LOCK for exactly
+# this use case (build-system docs). The files are gitignored.
 if(NOT DEFINED IDF_TARGET OR IDF_TARGET STREQUAL "")
     set(_birdiebot_lock_suffix "default")
 else()

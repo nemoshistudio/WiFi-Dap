@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# idf-docker.sh -- run ESP-IDF (v5.2.1) inside a Docker container.
+# idf-docker.sh -- run ESP-IDF (v5.5.6) inside a Docker container.
 #
 # Usage:
 #   scripts/idf-docker.sh [-C <project-dir>] [-B <build-dir>] <idf.py args...>
@@ -30,13 +30,13 @@
 # This script only builds locally; it never pushes, changes branches or touches
 # the git remotes.
 #
-# Parallel builds: ESP-IDF 5.2.1's idf.py has no -j/--jobs option; the build
+# Parallel builds: ESP-IDF 5.5.6's idf.py has no -j/--jobs option; the build
 # tool parallelism is controlled by the CMAKE_BUILD_PARALLEL_LEVEL environment
 # variable (honoured by `cmake --build`). This wrapper exposes that as `-j N`
 # so callers never pass an unsupported flag to idf.py.
 #
 # Environment variables:
-#   IDF_DOCKER_IMAGE             container image         (default espressif/idf:v5.2.1;
+#   IDF_DOCKER_IMAGE             container image         (default espressif/idf:v5.5.6;
 #                                overridden by the -I/--image option)
 #   IDF_CCACHE_DIR               host ccache directory   (default ~/.cache/birdiebot-ccache)
 #   IDF_DOCKER_EXTRA_ARGS        extra "docker run" args (e.g. "--device=/dev/ttyUSB0")
@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # Default image; can be overridden by IDF_DOCKER_IMAGE or the -I/--image option.
-IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
+IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.6}"
 readonly SCRIPT_NAME="${0##*/}"
 
 die() {
@@ -320,14 +320,14 @@ DOCKER_ARGS=(
 # non-root container user (this wrapper runs with the host uid/gid) cannot
 # create it and CMake fails with "PermissionError: ... /opt/esp/
 # root_managed_components". Mount a writable host directory over that path;
-# older IDF images (e.g. v5.2.1) never touch it, so this is harmless there.
+# older IDF images never touch it, so this is harmless there.
 IDF_ROOT_MANAGED_DIR="${IDF_ROOT_MANAGED_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/birdiebot-idf-root-managed}"
 mkdir -p "$IDF_ROOT_MANAGED_DIR" || die "cannot create $IDF_ROOT_MANAGED_DIR"
 DOCKER_ARGS+=(-v "$IDF_ROOT_MANAGED_DIR:/opt/esp/root_managed_components")
 
 # Parallel build level: -j N (or the host CMAKE_BUILD_PARALLEL_LEVEL) is passed
 # into the container as CMAKE_BUILD_PARALLEL_LEVEL, which `cmake --build` (used by
-# idf.py build) honours. Do not pass -j to idf.py - IDF 5.2.1 does not accept it.
+# idf.py build) honours. Do not pass -j to idf.py - IDF 5.5.6 does not accept it.
 PARALLEL_LEVEL=""
 if [ -n "$JOBS" ]; then
     PARALLEL_LEVEL="$JOBS"

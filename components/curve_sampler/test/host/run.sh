@@ -13,7 +13,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$HERE/../../../.." && pwd -P)"
-IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.2.1}"
+IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.6}"
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
