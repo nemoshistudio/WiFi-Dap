@@ -58,7 +58,30 @@ static esp_err_t send_gzip_asset(httpd_req_t *req, const char *content_type,
 	/* Always revalidate the UI after a firmware update; the bundle name is
 	 * stable ("/"), so a stale cache would mix old HTML with a new firmware. */
 	httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* C5 real hardware (2026-10-26): a single 522 KiB httpd_resp_send() to a
+	 * client that is slower than the Wi-Fi TX path blocked the whole response
+	 * until the httpd send timeout (EAGAIN: "error in send : 11") and the page
+	 * never loaded.  Sending the embedded UI in 16 KiB chunks keeps the socket
+	 * writes bounded so a slow client drains between chunks instead of timing
+	 * the whole transfer out.  Other targets keep the single-shot send. */
+	{
+		esp_err_t err = ESP_OK;
+		size_t off = 0;
+		const size_t chunk = 16 * 1024;
+		while (off < file_size) {
+			size_t n = (file_size - off > chunk) ? chunk : (file_size - off);
+			err = httpd_resp_send_chunk(req, (const char *) start + off, n);
+			if (err != ESP_OK) {
+				return err;
+			}
+			off += n;
+		}
+		return httpd_resp_send_chunk(req, NULL, 0);
+	}
+#else
 	return httpd_resp_send(req, (const char *) start, file_size);
+#endif
 }
 
 static esp_err_t ssdp_xml_handler(httpd_req_t *req)

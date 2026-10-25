@@ -164,3 +164,11 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3
 CONFIG_LOG_COLORS=y
+# C5 internal-RAM budget (real hardware 2026-10-26): the AP-only + phone
+# connected state runs out of contiguous internal RAM (largest block 3 KiB),
+# which breaks /api/target/info (SWD probe needs 4 KiB) and can stall large
+# HTTP responses.  Move the mDNS task stack and mDNS heap to PSRAM (background
+# service, no DMA / no flash writes); the same is done for the httpd and
+# curve_ws task stacks in their sources.
+CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
+CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y

@@ -128,6 +128,13 @@ void start_webserver(void)
 	 * => 15 in the default build.  The old limit of 14 would reject the last
 	 * registration (WS/SPA) now that /api/discover exists. */
 	config.max_uri_handlers = 20;
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+	/* C5 internal-RAM budget: the httpd task is a low-frequency background
+	 * task (web serving / OTA body receive); its 4 KiB stack can live in
+	 * PSRAM.  Flash writes happen in the OTA worker task (internal stack), not
+	 * here.  Keep the IDF default (internal) on every other target. */
+	config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#endif
 
 	WEB_SERVER_LOG_INTERNAL_HEAP("pre-httpd_start");
 	ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);

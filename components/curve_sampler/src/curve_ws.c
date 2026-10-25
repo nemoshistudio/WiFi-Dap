@@ -38,6 +38,7 @@
 #include <esp_err.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 
 #include <cJSON.h>
@@ -47,6 +48,7 @@
 
 #include "curve_priv.h"
 #include "curve_ws.h"
+#include "freertos/idf_additions.h"
 
 #define CURVE_WS_TAG "curve_ws"
 #define CURVE_WS_URI "/ws/curve"
@@ -80,6 +82,30 @@ static void curve_ws_init(void)
         return;
     }
     curve_ws_state_init(&s_ws);
+#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+    /* C5 internal-RAM budget: the WebSocket curve push task is a background,
+     * low-frequency task (no flash writes, no DMA); its stack lives in PSRAM.
+     * Fall back to internal RAM if the PSRAM allocation fails. */
+    {
+        BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+            curve_ws_push_task, "curve_ws", CURVE_WS_TASK_STACK, NULL,
+            CURVE_WS_TASK_PRIO, &s_ws_task, CURVE_WS_TASK_CORE,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created != pdPASS) {
+            ESP_LOGW(CURVE_WS_TAG, "init: PSRAM curve_ws stack unavailable, "
+                     "using internal RAM");
+            created = xTaskCreatePinnedToCore(curve_ws_push_task, "curve_ws",
+                                              CURVE_WS_TASK_STACK, NULL,
+                                              CURVE_WS_TASK_PRIO, &s_ws_task,
+                                              CURVE_WS_TASK_CORE);
+        }
+        if (created != pdPASS) {
+            ESP_LOGE(CURVE_WS_TAG, "init: push task creation failed");
+            s_ws_task = NULL;
+            return;
+        }
+    }
+#else
     if (xTaskCreatePinnedToCore(curve_ws_push_task, "curve_ws", CURVE_WS_TASK_STACK,
                                 NULL, CURVE_WS_TASK_PRIO, &s_ws_task,
                                 CURVE_WS_TASK_CORE) != pdPASS) {
@@ -87,6 +113,7 @@ static void curve_ws_init(void)
         s_ws_task = NULL;
         return;
     }
+#endif
     s_ws_inited = true;
     ESP_LOGI(CURVE_WS_TAG, "WebSocket curve push ready on %s", CURVE_WS_URI);
 }
