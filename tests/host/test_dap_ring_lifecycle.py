@@ -381,6 +381,11 @@ class TestSourceGuards(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 OTA_TASK_STACK_FALLBACK = 5120
+# ESP32-C5 real hardware (2026-10-25): the internal heap is much smaller.  After
+# ota_dap_release_rings() + httpd_req_async_handler_begin() the measured largest
+# internal block was 4096 B, so the C5 uses a smaller OTA upload task stack.
+OTA_TASK_STACK_C5 = 3584
+OTA_MEASURED_LARGEST_C5 = 4096
 # Measured on the device running the task-66 candidate firmware (rings resident):
 #   heap_free=17808 heap_largest=4608 dap_ring_active=true
 OTA_MEASURED_FREE_WITH_RINGS = 17_808
@@ -392,13 +397,19 @@ OTA_MEASURED_LARGEST_WITH_RINGS = 4_608
 OTA_URI_OTA_C = ROOT / "project_components/web_server/uri_modules/uri_ota.c"
 
 
-def ota_task_stack() -> int:
-    """OTA_UPLOAD_TASK_STACK from uri_ota.c."""
+def ota_task_stacks() -> list[int]:
+    """All OTA_UPLOAD_TASK_STACK values from uri_ota.c (S3 fallback + C5)."""
     src = read(OTA_URI_OTA_C)
-    match = re.search(r"#define\s+OTA_UPLOAD_TASK_STACK\s+(\d+)", src)
-    if match is None:
+    stacks = [int(m) for m in
+              re.findall(r"#define\s+OTA_UPLOAD_TASK_STACK\s+(\d+)", src)]
+    if not stacks:
         raise AssertionError("OTA_UPLOAD_TASK_STACK not found in uri_ota.c")
-    return int(match.group(1))
+    return stacks
+
+
+def ota_task_stack() -> int:
+    """S3/dual-core OTA_UPLOAD_TASK_STACK (the largest value in the file)."""
+    return max(ota_task_stacks())
 
 
 def model_ota_task_stack_fits(free_blocks: list[int], stack: int) -> bool:
@@ -419,11 +430,18 @@ class TestOtaRingRelease(unittest.TestCase):
         self.ota_c = strip_c_comments(read(OTA_URI_OTA_C))
 
     def test_ota_task_stack_comes_from_the_source(self) -> None:
-        stack = ota_task_stack()
-        self.assertEqual(stack, OTA_TASK_STACK_FALLBACK)
+        stacks = ota_task_stacks()
+        # The S3/dual-core value stays at the task-66b fallback; the C5 real
+        # hardware needs a smaller stack (measured largest internal block after
+        # releasing the DAP rings is 4096 B, see docs/esp32-c5-port.md §11.4).
+        self.assertIn(OTA_TASK_STACK_FALLBACK, stacks)
+        self.assertIn(OTA_TASK_STACK_C5, stacks)
+        self.assertLessEqual(OTA_TASK_STACK_C5, OTA_TASK_STACK_FALLBACK)
+        # The C5 stack must fit the measured largest internal block.
+        self.assertLess(OTA_TASK_STACK_C5, OTA_MEASURED_LARGEST_C5)
 
     def test_resident_rings_block_the_ota_task_stack(self) -> None:
-        stack = ota_task_stack()
+        stack = ota_task_stack()  # S3 contract: 5120
         # With the rings resident the measured largest block is 4.6 KiB, which
         # cannot satisfy the 5120-byte OTA task stack -> xTaskCreate fails ->
         # handler answers 503 "ota service unavailable".
