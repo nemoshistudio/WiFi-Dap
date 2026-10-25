@@ -267,6 +267,20 @@ void wifi_manager_init(void)
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
 	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler, NULL, NULL));
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+	/* ESP32-C5 is 2.4/5 GHz dual-band. This Wi-Fi-only DAP variant is
+	 * 2.4 GHz-only for now (5 GHz is a follow-up, docs/esp32-c5-port.md):
+	 * keep the existing AP/STA/credential behaviour identical to S3. */
+	{
+		esp_err_t band_err = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+		if (band_err != ESP_OK) {
+			ESP_LOGW(TAG, "2.4GHz-only band mode not applied: %s", esp_err_to_name(band_err));
+		} else {
+			ESP_LOGI(TAG, "Wi-Fi band mode: 2.4 GHz only (ESP32-C5)");
+		}
+	}
+#endif
+
 	ctx.permanent_mode = WIFI_AP_AUTO_STA_ON;
 	err = wifi_data_get_wifi_mode(&ctx.permanent_mode);
 	ESP_LOGI(TAG, "use wifi mode: %d", ctx.permanent_mode);

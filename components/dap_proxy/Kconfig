@@ -33,13 +33,17 @@ menu "WiFi Dap proxy (USBIP / WebSocket-DAP)"
     config BIRDIEBOT_USBIP_TCP_CORE
         int "Core affinity of the USBIP tcp_server task"
         range 0 1
-        default 1
+        default 1 if SOC_CPU_CORES_NUM > 1
+        default 0
         help
-            The DAP task must run on core 1 (dedicated-GPIO SWD bit-banging).
-            Keeping the USBIP tcp_server task on core 1 (default) minimizes the
-            hand-off latency to the DAP task; core 0 decouples the Wi-Fi/lwIP
-            handling from the DAP bit-banging CPU time.  Both placements are
-            measured in the B1 hardware window.
+            The DAP task must run on core 1 on the dual-core ESP32-S3
+            (dedicated-GPIO SWD bit-banging).  Keeping the USBIP tcp_server
+            task on core 1 minimizes the hand-off latency to the DAP task;
+            core 0 decouples the Wi-Fi/lwIP handling from the DAP bit-banging
+            CPU time.  Both placements are measured in the B1 hardware window.
+
+            On single-core targets (ESP32, ESP32-C3, ESP32-C5) this must be 0:
+            pinning a task to core 1 would trip the FreeRTOS core-id assert.
 
     config BIRDIEBOT_USBIP_TCP_PRIORITY
         int "Priority of the USBIP tcp_server task"

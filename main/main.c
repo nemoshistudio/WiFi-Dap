@@ -39,6 +39,8 @@
 #define BIRDIEBOT_BOARD_STR "BOARD_GENERIC_C3"
 #elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_ESP32)
 #define BIRDIEBOT_BOARD_STR "BOARD_GENERIC_ESP32"
+#elif defined(CONFIG_BIRDIEBOT_BOARD_GENERIC_C5)
+#define BIRDIEBOT_BOARD_STR "BOARD_GENERIC_C5"
 #else
 #define BIRDIEBOT_BOARD_STR "BOARD_UNKNOWN"
 #endif
@@ -105,7 +107,11 @@ static void ota_confirm_schedule(void)
 }
 #endif /* CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE && !CONFIG_BIRDIEBOT_OTA_AUTO_MARK_VALID */
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+/* The SWD bit-banging uses per-core dedicated-GPIO signals (S3: CORE1 GPIO,
+ * C3/C5: RISC-V CPU GPIO CSRs), so the DAP core must be 1 on dual-core S3 and
+ * 0 on the single-core targets. The ESP32 has no dedicated GPIO fast path and
+ * has always run the DAP task on core 0. */
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && (portNUM_PROCESSORS > 1)
 #define DAP_TASK_AFFINITY 1 /* dedicated GPIO bit-banging must stay on core 1 */
 #else
 #define DAP_TASK_AFFINITY 0
@@ -123,8 +129,12 @@ static void ota_confirm_schedule(void)
 #endif
 #if defined(CONFIG_BIRDIEBOT_USBIP_TCP_CORE) && (CONFIG_BIRDIEBOT_USBIP_TCP_CORE != 1)
 #define TCP_TASK_AFFINITY CONFIG_BIRDIEBOT_USBIP_TCP_CORE
-#else
+#elif (portNUM_PROCESSORS > 1)
 #define TCP_TASK_AFFINITY DAP_TASK_AFFINITY
+#else
+/* Single-core target (ESP32-C5): never pin above the only core, Kconfig
+ * default 1 would trip configASSERT(taskVALID_CORE_ID()) in FreeRTOS. */
+#define TCP_TASK_AFFINITY 0
 #endif
 
 void app_main()

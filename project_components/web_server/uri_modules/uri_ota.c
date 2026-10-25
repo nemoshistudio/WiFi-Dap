@@ -410,7 +410,14 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 	s_ctx.content_len = req->content_len;
 	s_ctx.recv_result = OTA_RECV_OK;
 	if (has_sha256) {
-		snprintf(s_ctx.sha256, sizeof(s_ctx.sha256), "%s", sha256_header);
+		/* ota_sha256_header_valid() above guarantees exactly
+		 * WT_OTA_SHA256_HEX_LEN characters; copy with an explicit bound so
+		 * GCC 14's -Werror=format-truncation (source buffer is deliberately
+		 * larger for the "sha256=" prefix) stays quiet, while still never
+		 * overflowing the destination. */
+		size_t sha_len = strnlen(sha256_header, sizeof(s_ctx.sha256) - 1U);
+		memcpy(s_ctx.sha256, sha256_header, sha_len);
+		s_ctx.sha256[sha_len] = '\0';
 	}
 
 	/* task-66b: give the ~41 KiB of the DAP ring buffers back BEFORE the async

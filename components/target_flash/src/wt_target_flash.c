@@ -122,6 +122,15 @@ static void tf_worker_task(void *arg)
     }
 }
 
+#if defined(portNUM_PROCESSORS) && (portNUM_PROCESSORS > 1)
+/* Core-1 dedicated-GPIO signals (S3) / CPU GPIO CSRs (C3) are per-core. */
+#define TF_WORKER_CORE 1
+#else
+/* Single-core targets (ESP32-C5, ESP32, ESP32-C3): core 1 does not exist and
+ * xTaskCreatePinnedToCore(..., 1) would trip the FreeRTOS core-id assert. */
+#define TF_WORKER_CORE 0
+#endif
+
 static esp_err_t tf_worker_start(void)
 {
     BaseType_t created;
@@ -131,13 +140,12 @@ static esp_err_t tf_worker_start(void)
     if (s_job_mutex == NULL || s_job_done == NULL) {
         return ESP_FAIL;
     }
-    /* The SWD bit-bang uses the CORE1 dedicated-GPIO signals
-     * (CORE1_GPIO_OUT0/1_IDX + ee.set_bit_gpio_out), so the DAP command path
-     * must run on core 1 - the same reason the DAP task and tcp_server (the
-     * working elaphureLink/OpenOCD data path) are pinned there. */
+    /* The SWD bit-bang uses per-core dedicated-GPIO signals, so the DAP
+     * command path must run on the DAP core - the same reason the DAP task
+     * and tcp_server are pinned there (core 1 on S3, core 0 on unicore). */
     created = xTaskCreatePinnedToCore(tf_worker_task, "tf_worker", 8192, NULL,
                                       6 /* above httpd (5), below tcp_server/DAP */,
-                                      &s_worker, 1 /* core1: dedicated GPIO */);
+                                      &s_worker, TF_WORKER_CORE);
     if (created != pdPASS) {
         s_worker = NULL;
         return ESP_FAIL;
@@ -158,7 +166,8 @@ esp_err_t wt_tf_init(void)
         return ESP_FAIL;
     }
     s_inited = true;
-    ESP_LOGI(TF_TAG, "target flash engine initialized (worker task, core 1, 8 KiB)");
+    ESP_LOGI(TF_TAG, "target flash engine initialized (worker task, core %d, 8 KiB)",
+             TF_WORKER_CORE);
     return ESP_OK;
 }
 
