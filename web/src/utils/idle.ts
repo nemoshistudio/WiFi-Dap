@@ -2,8 +2,8 @@
  * Startup helpers for non-first-screen work (P1-16).
  *
  * The Web UI is shipped as a single-file build, so route/module code splitting
- * is intentionally not used. Instead, non-critical *work* (device discovery
- * probes, ELF-index bridges, favicon fetch, ...) is deferred until after the
+ * is intentionally not used. Instead, non-critical *work* (ELF-index bridges,
+ * favicon fetch, ...) is deferred until after the first paint via
  * first paint via `requestIdleCallback`, with a timeout fallback for browsers
  * without it. This keeps the initial HTTP/WS burst limited to what the first
  * screen actually needs.

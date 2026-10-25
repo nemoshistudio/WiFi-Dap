@@ -2,9 +2,9 @@
  * Tiny same-document action bus shared by the command palette and the pages.
  *
  * The palette lives in the app shell (App.vue) but some of its actions belong
- * to a page (detect target / reset target / open the first-run guide).  Instead
- * of reaching into page internals, the palette navigates to the page and then
- * publishes an action here; the mounted page consumes it.  Actions requested
+ * to a page (detect target / reset target / open diagnostics). Instead of
+ * reaching into page internals, the palette navigates to the page and then
+ * publishes an action here; the mounted page consumes it. Actions requested
  * while no listener is mounted are queued and delivered to the next listener
  * registration (drained once).
  *
@@ -15,9 +15,7 @@
 export type BbAction =
     | 'target-detect'
     | 'target-reset'
-    | 'guided-open'
     | 'diagnostics-open'
-    | 'devices-open'
 
 type BbActionListener = (action: BbAction) => void;
 

@@ -13,7 +13,6 @@
           <svg class="bb-menu-btn__icon" viewBox="0 0 20 20" aria-hidden="true">
             <path d="M2 4.5h16M2 10h16M2 15.5h16" />
           </svg>
-          <el-badge v-if="updateStore.canUpdate" is-dot class="bb-menu-btn__badge"/>
         </button>
 
         <router-link to="/" class="bb-brand" :title="translate('navbar.getSomeFries')">
@@ -158,7 +157,6 @@
                 :class="['bb-drawer__link', item?.class]"
             >
               <span class="bb-drawer__link-text">{{ item.name }}</span>
-              <el-badge v-if="item?.badge?.value" is-dot/>
             </router-link>
           </li>
         </ul>
@@ -216,14 +214,12 @@
 
 <script lang="ts" setup>
 import InlineSvg from "@/components/InlineSvg.vue";
-import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { computed, ref, type ComputedRef } from "vue";
 import { useWsStore } from "@/stores/websocket";
 import { translate } from "@/locales";
 import { ControlEvent } from "@/api";
 import { useRoute } from "vue-router";
 import { useFullscreen } from '@vueuse/core'
-import { useUpdateStore } from "@/stores/useUpdateStore";
-import { isOTAEnabled } from "@/composables/buildMode";
 import { BRAND_NAME } from "@/constants/brand";
 import { BRAND_MARK_64 } from "@/assets/brand/brand-assets";
 import { locale, setLang } from "@/i18n"
@@ -235,7 +231,6 @@ type Theme = 'dark' | 'light'
 const THEME_STORAGE_KEY = 'birdiebot.theme'
 
 const wsStore = useWsStore();
-const updateStore = useUpdateStore();
 const { isFullscreen, toggle } = useFullscreen();
 const route = useRoute();
 const language = ref(locale);
@@ -323,12 +318,11 @@ type Item = {
   name: string;
   href: string;
   class?: string;
-  badge?: Ref<boolean>;
 };
 
 /**
  * Primary navigation order (P0): the home entry is the target flash page.
- * OTA is appended only when this build enables it (default: enabled).
+ * OTA/Update was removed by contract (docs/feature-flags.md, item A1).
  */
 const menuItems: ComputedRef<Item[]> = computed(() => {
   const items: Item[] = [
@@ -346,12 +340,6 @@ const menuItems: ComputedRef<Item[]> = computed(() => {
       href: "/wifi",
     },
   ];
-  if (isOTAEnabled()) {
-    items.push({
-      name: translate("page.update"),
-      href: "/update",
-    });
-  }
   return items;
 });
 
@@ -374,13 +362,6 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
       href: "/about",
     },
   ];
-  if (isOTAEnabled()) {
-    items.push({
-      name: translate("page.update"),
-      href: "/update",
-      badge: computed(() => updateStore.canUpdate),
-    })
-  }
   return items;
 });
 </script>
@@ -475,11 +456,6 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
   stroke-linecap: round;
 }
 
-.bb-menu-btn__badge {
-  position: absolute;
-  top: 2px;
-  right: 0;
-}
 
 /* Brand ------------------------------------------------------------------- */
 .bb-brand {

@@ -9,10 +9,9 @@
 #
 # Optional environment:
 #   SKIP_NPM_CI=1         reuse an existing node_modules (local iteration only)
-#   VITE_ENABLE_OTA=true  enable the OTA local-upload UI for this build (default: off).
-#                         scripts/gen-env.mjs passes VITE_* process env to Vite, so the
-#                         Update page / nav entry / OTA WS module follow this flag at
-#                         build time. Firmware must implement OTA(5) + POST /api/ota/upload.
+#
+# The OTA/Update page was removed by contract (docs/feature-flags.md, item A1):
+# the Update page, nav entry and OTA WS module no longer exist in this build.
 
 set -euo pipefail
 

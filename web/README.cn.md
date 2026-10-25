@@ -80,22 +80,15 @@
 3.  **部署到ESP32：**
     将压缩后的 `.gz` 文件复制到您的 `wireless-esp32-tools` ESP-IDF项目中的相应目录（例如 `project_components/html/`），然后将固件刷入您的设备。
 
-### OTA 固件更新构建开关（`VITE_ENABLE_OTA`）
+### Web OTA UI 已移除（精简构建）
 
-OTA 本地上传 UI（Update 页 + OTA(5) WS 模块）代码已内置，但**默认关闭**；
-构建开关由 `scripts/gen-env.mjs` 在构建时注入（无需修改 `.env`）：
+OTA 本地上传 UI（Update 页、导航项、OTA(5) WS 模块、`POST /api/ota/upload` 客户端）
+已按契约**删除**，见仓库根目录 `docs/feature-flags.md` 的 **A1** 条。`VITE_ENABLE_OTA`
+构建开关不再存在：精简固件关闭 OTA handler，Web 端仅保留固件/协议版本信息（About 页）。
 
-```sh
-# 默认（实验室安全构建）：无 Update 页面/导航项，不注册 OTA WS 模块
-bash build.sh
-
-# 启用 OTA 的构建：Update 页可用，上传走 POST /api/ota/upload
-VITE_ENABLE_OTA=true bash build.sh
-```
-
-Update 页会显示本次构建的实际状态；未启用时仅显示固件/协议只读信息。固件需实现
-OTA(5) `GET_INFO/GET_PROGRESS/ABORT` 与 `POST /api/ota/upload`；旧固件返回
-`code=4 Unsupported cmd` 时前端自动隐藏上传区块（见 `docs/ota-local-upload.md`）。
+如需恢复，可从 `backup/full-features-2026-10-26` tag 取回代码
+（`git checkout backup/full-features-2026-10-26 -- web/src/views/Update.vue ...`），并
+按 `docs/feature-flags.md` 恢复路由/导航/i18n key。
 
 ## 许可证
 

@@ -90,7 +90,6 @@ import { useRouter } from 'vue-router';
 import InlineSvg from '@/components/InlineSvg.vue';
 import { translate } from '@/locales';
 import { ControlEvent } from '@/api';
-import { isOTAEnabled } from '@/composables/buildMode';
 import { globalNotify } from '@/composables/notification';
 import { kickDapSession } from '@/api/apiDap';
 import { useWsStore } from '@/stores/websocket';
@@ -121,10 +120,8 @@ type PaletteAction =
     | 'curve-toggle'
     | 'kick'
     | 'copy-diag'
-    | 'guided'
     | 'diagnostics'
-    | 'refresh-wifi'
-    | 'devices';
+    | 'refresh-wifi';
 
 interface PaletteItem {
   id: string;
@@ -234,16 +231,6 @@ const allItems = computed<PaletteItem[]>(() => {
       route: '/about',
     },
   ];
-  if (isOTAEnabled()) {
-    pages.push({
-      id: 'page:update',
-      kind: 'page',
-      label: translate('page.update'),
-      hint: '',
-      keywords: ['ota', 'update', 'firmware', 'upload'],
-      route: '/update',
-    });
-  }
   const actions: PaletteItem[] = [
     {
       id: 'action:detect',
@@ -286,14 +273,6 @@ const allItems = computed<PaletteItem[]>(() => {
       action: 'copy-diag',
     },
     {
-      id: 'action:guided',
-      kind: 'action',
-      label: translate('palette.actionGuided'),
-      hint: translate('palette.actionGuidedHint'),
-      keywords: ['guide', 'wizard', 'first', 'help'],
-      action: 'guided',
-    },
-    {
       id: 'action:diagnostics',
       kind: 'action',
       label: translate('palette.actionDiagnostics'),
@@ -308,14 +287,6 @@ const allItems = computed<PaletteItem[]>(() => {
       hint: translate('palette.actionRefreshWifiHint'),
       keywords: ['wifi', 'refresh', 'ssid', 'rssi'],
       action: 'refresh-wifi',
-    },
-    {
-      id: 'action:devices',
-      kind: 'action',
-      label: translate('palette.actionDevices'),
-      hint: translate('palette.actionDevicesHint'),
-      keywords: ['device', 'discover', 'multi', 'ncm', 'mdns'],
-      action: 'devices',
     },
   ];
   return [...pages, ...actions];
@@ -532,14 +503,8 @@ function pageAction(action: PaletteAction): void {
     case 'reset':
       dispatchAction('target-reset');
       break;
-    case 'guided':
-      dispatchAction('guided-open');
-      break;
     case 'diagnostics':
       dispatchAction('diagnostics-open');
-      break;
-    case 'devices':
-      dispatchAction('devices-open');
       break;
     default:
       break;
@@ -603,9 +568,6 @@ async function runAction(action: PaletteAction): Promise<void> {
       }
       return;
     }
-    case 'guided':
-      await navigateThenRun('/target', 'guided');
-      return;
     case 'diagnostics':
       await navigateThenRun('/target', 'diagnostics');
       return;
@@ -616,9 +578,6 @@ async function runAction(action: PaletteAction): Promise<void> {
       }
       refreshWifi();
       globalNotify(translate('palette.refreshWifiSent'), 'info');
-      return;
-    case 'devices':
-      await navigateThenRun('/target', 'devices');
       return;
     default:
       return;

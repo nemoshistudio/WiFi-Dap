@@ -5,9 +5,7 @@ import DebugCurve from '@/views/DebugCurve.vue'
 import About from '@/views/About.vue'
 import Uart from '@/views/Uart.vue'
 import Page404 from '@/views/404.vue'
-import Update from '@/views/Update.vue'
 import {translate} from "@/locales";
-import {isOTAEnabled} from "@/composables/buildMode";
 import {reactive, watch} from "vue";
 import {getLang} from "@/i18n";
 import {BRAND_NAME} from "@/constants/brand";
@@ -41,8 +39,6 @@ function translateRouteTitle(name: unknown): string {
             return translate('target.title');
         case 'debugCurve':
             return translate('page.debugCurve');
-        case 'update':
-            return translate('page.update');
         default:
             // 404 / 未知路由回退品牌名（i18n 契约 §5：标题回退使用品牌常量）
             return BRAND_NAME;
@@ -103,13 +99,6 @@ const router = createRouter({
             meta: { titleKey: 'page.about' },
             name: 'about',
             component: About,
-        }, {
-            path: '/update:ext(.*)',
-            meta: { titleKey: 'page.update' },
-            name: 'update',
-            // OTA 上传页默认启用（buildMode.isOTAEnabled() 默认 true）；
-            // 显式 VITE_ENABLE_OTA=false 的精简构建里按不可达路由处理（404）。
-            component: isOTAEnabled() ? Update : Page404,
         }, {
             path: '/:catchAll(.*)', // Catch-all route for 404
             name: 'NotFound',
