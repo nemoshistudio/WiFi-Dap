@@ -1,7 +1,7 @@
 # WiFi Dap JSON / WebSocket 协议契约（v1）
 
 > 状态：**冻结草案 v1（2026-10-20，Wave 0）**。Wave 1/2 的前后端实现以本文为准；变更需 Lead 统一修改并广播。
-> 相关契约：`docs/ws-binary-router.md`（二进制路由 API）、`docs/ota-local-upload.md`（OTA 上传）、`docs/wifi-credential-memory.md`（多 WiFi 凭据）、`docs/versioning.md`（版本/握手）、`docs/i18n-keys.md`（前端文案 key）。
+> 相关契约：`docs/ws-binary-router.md`（二进制路由 API）、`docs/archive/removed-features/ota-local-upload.md`（OTA 上传）、`docs/wifi-credential-memory.md`（多 WiFi 凭据）、`docs/versioning.md`（版本/握手）、`docs/i18n-keys.md`（前端文案 key）。
 >
 > **精简构建（slim/fw，2026-10-26）**：本契约描述完整功能构建。精简构建默认移除
 > **module 5 OTA JSON 查询 + `POST /api/ota/upload`**（A1/A2）、**`GET /api/discover`**
@@ -108,7 +108,7 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 
 数据面：见 §3；UART 默认 115200-8N1，`sub_mod` = UART 序号（当前固定 0）。
 
-### 2.5 OTA(5)（浏览器本地上传方案；详见 docs/ota-local-upload.md）
+### 2.5 OTA(5)（浏览器本地上传方案；详见 docs/archive/removed-features/ota-local-upload.md）
 
 > **精简构建默认不注册本模块**（`CONFIG_BIRDIEBOT_OTA_ENABLE=n`，A2）且不提供
 > `POST /api/ota/upload`（`CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE=n`，A1）：

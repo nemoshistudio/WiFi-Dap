@@ -16,10 +16,10 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `check-version-string.sh` | 版本字符串校验（release 拒绝 `-dirty`/开发后缀） | WP-143 |
 | `check-release-versions.sh` | 固件 tag / Web version / protocol / 镜像内嵌版本交叉校验 | WP-143 |
 | `check-protocol-version.sh` | 协议版本三源一致性门禁：C 头 == `docs/protocol.md` == `web/src/api/index.ts` | WP-143/审计 B6 |
-| `device_smoke.sh` | 设备就绪**只读**冒烟：USBIP/HTTP/WS 握手 + WS ping + OTA GET_INFO，聚合 PASS/FAIL | WP-305 |
+| `device_smoke.sh` | 设备就绪**只读**冒烟：USBIP/HTTP/WS 握手 + WS ping（OTA GET_INFO 仅 full 构建；slim 预期 unsupported），聚合 PASS/FAIL | WP-305 |
 | `hil_gate.py` | 真机 **HIL 回归/性能门禁**：目标检测 → 本地采样 1/5 系列 → 帧率/丢帧/heap/诊断字段 → 页面 smoke；只读、JSON+退出码、内置 `--dry-run` | task-59 |
 | `hil_extended.py` | 真机 **opt-in HIL 扩展冒烟**（默认 dry-run）：只读 preflight / soak / Web Flash（`--yes-flash`）/ OTA（`--yes-ota`）/ USBIP-OpenOCD；复用 hil_gate 的 HTTP/CBS1/CVF2 逻辑，不改默认只读行为；JSON+退出码 | task-65 |
-| `ota_upload.py` | 真机 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库） | WP-205/305 |
+| `ota_upload.py` | 历史 full 构建 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库）；**final slim 无 Web OTA 端点，脚本仅适用于从 `backup/full-features-2026-10-26` 恢复的构建** | WP-205/305 |
 | `README.md` | 本文档 | — |
 
 ## 前置条件
@@ -128,7 +128,7 @@ python3 scripts/check_partitions.py --require-bin     # 额外要求已构建的
 python3 scripts/check_partitions.py --skip-layout     # 只查 app 大小/内嵌版本
 ```
 
-校验内容（契约 `docs/ota-local-upload.md` §1）：
+校验内容（历史契约 `docs/archive/removed-features/ota-local-upload.md` §1；final slim 保留双槽布局与回滚，但无 Web OTA 端点）：
 
 - `partitions/partitions_8mb_ota.csv`：nvs 24K / phy 4K / otadata 8K / ota_0 3M @0x20000 /
   ota_1 3M @0x320000 / wt_nvs 64K / coredump 64K，ptable @0x8000，末尾 0x640000~0x800000 预留；
@@ -222,7 +222,7 @@ scripts/device_smoke.sh --host 192.168.1.1 --skip-ws
 | --- | --- | --- |
 | `scripts/device_smoke.sh` | 设备就绪后的只读冒烟（握手/WS/OTA 信息），适合烧录后 1 分钟自检 | 否 |
 | `scripts/e2e_ws_client.py` | 深入单场景测试：`wifi-scan` / `uart-echo` / `dataflow-list` / `json`（按需） | 否（uart-echo 需回环跳线） |
-| `scripts/ota_upload.py` | OTA 写路径：HTTP 上传 app bin（设备会切槽并重启） | **是**（仅 OTA，见 `docs/hardware-test-ota.md`） |
+| `scripts/ota_upload.py` | 历史 full 构建 OTA 写路径：HTTP 上传 app bin（设备会切槽并重启）；slim 无端点 | **是**（仅 full 构建，见 `docs/archive/removed-features/hardware-test-ota.md`） |
 
 前置：设备已烧录当前固件并启动完成；PC 已连设备 AP/同 LAN；**DAP 代理端口 3240 是单连接串行**，
 dap_smoke 的 USBIP 探测会打断正在进行的调试会话——调试时请勿运行（或用 `--skip-dap`）。
@@ -234,8 +234,7 @@ dap_smoke 的 USBIP 探测会打断正在进行的调试会话——调试时请
 **只读**真机门禁（不写目标 Flash、不 OTA、不复位目标）：`GET /api/target/info`
 检测 → `target/status` 诊断字段 → `curve/start` 1 系列冒烟 → `curve/start`
 5 系列 10 s 性能窗口（计算有效帧率/丢帧/invalid）→ `curve/stop` → heap/无泄漏
-→ 页面 smoke（首页 + `/#/target`、`/#/debug-curve`、`/#/update`，Playwright
-可选）→ JSON/人体可读报告 + CI 退出码。文档：[`docs/hil-gate.md`](../docs/hil-gate.md)。
+→ 页面 smoke（slim：首页 + `/#/status`、`/#/target`、`/#/debug-curve`、`/#/uart`、`/#/wifi`、`/#/about`；full 旧版含 `/#/update`，Playwright 可选）→ JSON/人体可读报告 + CI 退出码。文档：[`docs/hil-gate.md`](../docs/hil-gate.md)。
 
 ```bash
 # 标准门禁（默认 <device-ip>:80；JSON 报告 + 退出码）
@@ -252,13 +251,16 @@ python3 scripts/hil_gate.py --dry-run
 关键阈值：有效帧率 ≥ 35 fps（名义 50 Hz 的 70%）、`invalid` ≤ 1%、
 `missing_seqs/gap = 0`、`heap_free` ≥ 32 KiB、`heap_largest` ≥ 8 KiB、
 采样前后 `heap_free` 下降 ≤ 16 KiB。阈值依据与实测 baseline 见 `docs/hil-gate.md` §5。
-与 `device_smoke.sh` 互补：后者覆盖 USBIP/WS/OTA 传输层，本门禁覆盖设备本地采样
-闭环 + 性能 + 新诊断字段。
+与 `device_smoke.sh` 互补：后者覆盖 USBIP/WS 传输层（OTA 信息仅 full 构建），本门禁覆盖设备本地采样
+闭环 + 性能 + 新诊断字段；`--profile auto|slim` 会断言 slim 的 OTA/discover 端点缺失（见 `docs/hil-gate.md` §11）。
 
-## OTA 真机上传/查询：ota_upload.py
+## OTA 真机上传/查询：ota_upload.py（历史 full 构建）
 
-Wave3 硬件验证工具（纯 Python 标准库，无需 pip）。文档见
-[`docs/hardware-test-ota.md`](../docs/hardware-test-ota.md)。
+> **final slim 无 Web OTA / `/api/ota/upload` / module 5；本工具仅适用于从
+> `backup/full-features-2026-10-26` 恢复的 full 构建。slim 固件更新走 USB-JTAG/UART0。**
+
+Wave3 硬件验证工具（纯 Python 标准库，无需 pip）。历史文档见
+[`docs/archive/removed-features/hardware-test-ota.md`](../docs/archive/removed-features/hardware-test-ota.md)。
 
 ```bash
 # 上传 app 镜像（默认自动计算 SHA-256 并作为 X-SHA256 发送）

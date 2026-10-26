@@ -1,6 +1,6 @@
 # components/wt_ota — OTA core (WP-205)
 
-固件侧 OTA 核心，实现 `docs/ota-local-upload.md` 的会话状态机/写入/校验/回滚部分，
+固件侧 OTA 核心，实现 `docs/archive/removed-features/ota-local-upload.md`（历史契约）的会话状态机/写入/校验/回滚部分。注意：final slim 默认关闭本组件（`CONFIG_BIRDIEBOT_OTA_ENABLE=n`），无 Web OTA 端点，代码保留以便从备份 tag 恢复；
 并自注册 JSON 模块 5（`docs/protocol.md` §2.5）。HTTP 上传端点
 `POST /api/ota/upload` 属 **WP-206（web-dev，`project_components/web_server/uri_modules/uri_ota.c`）**，
 本组件只提供线程安全的 C API。
@@ -12,7 +12,7 @@
 > helpers are still required by `main/`), and the unused upload code is removed
 > by `--gc-sections`.  Restore recipe: `docs/feature-flags.md` A1/A2.
 
-## 状态机（docs/ota-local-upload.md §5）
+## 状态机（历史契约 docs/archive/removed-features/ota-local-upload.md §5）
 
 ```text
 IDLE --begin--> RECEIVING --finish--> VERIFYING --esp_ota_end+sha--> READY --apply--> APPLYING --reboot--> IDLE
@@ -96,13 +96,13 @@ if (err == ESP_OK) {
 | 3 | GET_PROGRESS | `offset, total, status, err` + 可选 `slot, sha256` |
 | 4 | ABORT | 成功回显 `{module,cmd}`；非 RECEIVING 返回失败体 `{"module":5,"cmd":4,"err":"invalid state","code":5}`；WS 上 cmd 2 → code 4 |
 
-契约允许的增量可选字段（`docs/ota-local-upload.md` §4.1/§4.2）已使用，字段名不变。
+契约允许的增量可选字段（历史契约 `docs/archive/removed-features/ota-local-upload.md` §4.1/§4.2）已使用，字段名不变。
 模块 5 的失败响应统一为 `docs/protocol.md` §1.1 的失败体
 `{"module":5,"cmd":<cmd>,"err":"<msg>","code":<int>}`（HTTP/WS 同一 JSON，前端按 `err` 解析），
 不再经过 ws 路由层的旧 `{"error":...}` 模板；ABORT 非法状态即 code 5。
 `BIRDIEBOT_OTA_ENABLE=n` 时只关闭模块 5 注册，C API 仍可用。
 
-## 回滚（docs/ota-local-upload.md §2.3）
+## 回滚（历史契约 docs/archive/removed-features/ota-local-upload.md §2.3）
 
 - `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`（三目标默认已开启）时，OTA 新镜像首启为
   `ESP_OTA_IMG_PENDING_VERIFY`，必须由应用确认，否则下次复位回滚到旧槽。

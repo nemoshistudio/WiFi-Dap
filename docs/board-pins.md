@@ -214,7 +214,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | UART 桥端口 | **1346** | `BIRDIEBOT_UART_BRIDGE_PORT`（旧 A 的 1234 已废弃） |
 | UART 桥波特率 | **115200** | `UART_BRIDGE_BAUDRATE`（旧 A 的 74880 已废弃） |
 | 控制台 | UART0（S3：GPIO43/44） | 不被 UART 桥占用 |
-| 固件服务端口 | 3240（USBIP/DAP）、80（HTTP）、1346（UART TCP 桥）、1900/5353（SSDP/mDNS） | 集成计划 §1.4；本期**不启用** OTA 3241 |
+| 固件服务端口 | 3240（USBIP/DAP）、80（HTTP）、1346（UART TCP 桥）、5353（mDNS）；**1900（SSDP）已在 final slim 移除**（H1） | 集成计划 §1.4；本期**不启用** OTA 3241 |
 
 ---
 

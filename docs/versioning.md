@@ -1,7 +1,7 @@
 # WiFi Dap 版本与协议握手契约（v1）
 
 > 状态：**冻结草案 v1（2026-10-20，Wave 0）**。Wave 1/2 的固件、Web 前端与发布脚本以本文为准；变更需 Lead 统一修改并广播（每波最多 2 次契约变更）。
-> 相关契约：`docs/protocol.md`（命令/字段总表）、`docs/ws-binary-router.md`（二进制路由）、`docs/ota-local-upload.md`（OTA 上传流程）、`docs/i18n-keys.md`（版本/握手文案 key）。
+> 相关契约：`docs/protocol.md`（命令/字段总表）、`docs/ws-binary-router.md`（二进制路由）、`docs/archive/removed-features/ota-local-upload.md`（OTA 上传流程）、`docs/i18n-keys.md`（版本/握手文案 key）。
 > 本文只定义"版本如何产生、如何注入、如何在运行时核对"，不重复定义 JSON/WS 命令字段（以 `protocol.md` 为准）。
 
 ---
@@ -239,7 +239,7 @@ D 现有脚本只注入 `VITE_APP_GIT_TAG` / `VITE_APP_LAST_COMMIT`，且 `git d
 | `VITE_APP_LAST_COMMIT` | `git log -1 --format=%cd` | `unknown` |
 | `VITE_APP_PROTOCOL_VERSION` | 由 `check-protocol-version.sh` 校验后的常量（可选注入，供显示） | 构建失败 |
 | `VITE_APP_MODE` | 沿用 D：`.env.development`=`dev` / `.env.production`=`prod` | — |
-| `VITE_ENABLE_OTA` | 本项目固定 `true`（OTA 已纳入 Wave 2，见 INTEGRATION-PLAN §8.1） | — |
+| `VITE_ENABLE_OTA` | **已移除**：final slim 无 Web OTA（A1/A2）；旧 full 构建曾固定 `true`（历史契约） | — |
 
 实现要求：
 1. 所有 `execSync('git describe')` 包裹 try/catch，失败回退不抛异常。
@@ -266,10 +266,10 @@ window.__BIRDIEBOT_WEB__ = {
 | About 页"网页版上位机" | 网页版本 + 构建 tag/时间 | `VITE_APP_WEB_VERSION` / `VITE_APP_GIT_TAG` / `VITE_APP_LAST_COMMIT` |
 | About 页"调试器" | 固件版本 + 固件日期 + 协议版本 + SN + hw/mf | `GET_FM_INFO` / `GET_SYS_INFO` |
 | About 页底部 | 绿色对勾/红色叹号：协议版本是否匹配 | §5 |
-| Update 页 | 当前运行分区 + 运行版本 | `OTA/GET_INFO.running` / `.running_ver` |
+| Update 页（历史 full 构建；final slim 已移除） | 当前运行分区 + 运行版本 | `OTA/GET_INFO.running` / `.running_ver` |
 | 浏览器 console | 启动时打印 `__BIRDIEBOT_WEB__` 一次（dev 模式） | 同上 |
 
-文案 key 见 `docs/i18n-keys.md`（`protocol.*`、`common.*`、`ota.upload.*`），**禁止**在页面硬编码"版本/协议"中文。
+文案 key 见 `docs/i18n-keys.md`（`protocol.*`、`common.*`）；`ota.upload.*` 已随 Web OTA 移除（A1），**禁止**在页面硬编码"版本/协议"中文。
 
 ### 4.4 产物元数据 `project_components/html/web_version.txt`
 
@@ -338,7 +338,7 @@ function compareProtocol(fw: unknown): ProtocolState {
 }
 ```
 
-- 状态存 Pinia（例如 `systemStore.protocolState` 与 `systemStore.fwProtocolVersion`），About 页与 Update 页共享。
+- 状态存 Pinia（例如 `systemStore.protocolState` 与 `systemStore.fwProtocolVersion`），About 页共享（Update 页已随 A1 移除；历史 full 构建曾共享）。
 - 文案：`protocol.mismatchTitle` / `protocol.mismatchDetail`（带 `{web}`/`{fw}` 参数）/ `protocol.mismatchLegacy` / `protocol.mismatchOtaDisabled` / `protocol.refreshHint`（见 i18n 契约）。
 - 只提示一次（每个连接周期），避免心跳/重连刷屏；用户手动重连后允许再次提示。
 
@@ -347,24 +347,25 @@ function compareProtocol(fw: unknown): ProtocolState {
 | 状态 | 条件 | UI 行为 | 业务影响 |
 |---|---|---|---|
 | `ok` | `protocol_version === PROTOCOL_VERSION` | About 显示"协议 v1 ✓" | 全部功能可用 |
-| `mismatch` | 数字但不等 | `ElMessage.warning` 一次性提示 + About 红色标记 + 详情 | 基础功能可用；**OTA 上传按钮禁用**并显示 `protocol.mismatchOtaDisabled` |
-| `legacy` | 响应无 `protocol_version` | 提示"固件未上报协议版本，可能是旧固件"（`protocol.mismatchLegacy`） | 同上（OTA 禁用，避免旧固件/新前端上传协议不一致） |
-| `unknown` | 5 s 超时/请求失败 | 提示"无法确认固件协议版本"（可复用 `protocol.mismatchTitle` + 详情） | 基础功能可用；OTA 禁用 |
+| `mismatch` | 数字但不等 | `ElMessage.warning` 一次性提示 + About 红色标记 + 详情 | 基础功能可用（**历史 full 构建：OTA 上传按钮禁用**；final slim 无 OTA） |
+| `legacy` | 响应无 `protocol_version` | 提示"固件未上报协议版本，可能是旧固件"（`protocol.mismatchLegacy`） | 基础功能可用（历史 full 构建 OTA 禁用；final slim 无 OTA） |
+| `unknown` | 5 s 超时/请求失败 | 提示"无法确认固件协议版本"（可复用 `protocol.mismatchTitle` + 详情） | 基础功能可用（历史 full 构建 OTA 禁用；final slim 无 OTA） |
 | 重连后 | 任意 | 重新握手并按上表更新 | 同上 |
 
-**不阻塞**是硬性要求：禁止用弹窗/遮罩阻塞页面（`protocol.md:141`）。**OTA 门禁**是本契约唯一强约束，由 WP-207 在 Update 页实现。
+**不阻塞**是硬性要求：禁止用弹窗/遮罩阻塞页面（`protocol.md:141`）。**OTA 门禁**是历史 full 构建的契约约束（由 WP-207 在 Update 页实现）；final slim 已无 Web OTA。
 
-### 5.5 与 OTA 页面的联动
+### 5.5 与 OTA 页面/固件更新的联动（历史 full 构建）
 
 - 版本不匹配时：Update 页仍可查看"当前运行版本/分区"（只读），但**上传/更新按钮 disabled**，并展示 `protocol.mismatchOtaDisabled`。
-- 协议匹配后：按 `docs/ota-local-upload.md` 执行上传；上传结束后设备重启，页面重连 → 重新握手 → `GET_FM_INFO.fm_ver` 应为新版本（验证更新成功）。
+- **final slim 无 Web OTA**：不存在 Update 页面 / `POST /api/ota/upload` / OTA module 5，固件更新走 USB-JTAG/UART0/OpenOCD（历史 OTA 语义仅用于从备份 tag 恢复的 full 构建）。
+- （full 构建历史）协议匹配后：按 `docs/archive/removed-features/ota-local-upload.md` 执行上传；上传结束后设备重启，页面重连 → 重新握手 → `GET_FM_INFO.fm_ver` 应为新版本（验证更新成功）。
 - 前端判断"更新成功"的唯一依据 = 重启重连后 `fm_ver`/`running_ver` 变化 + `OTA/GET_INFO.status === "IDLE"`，**不能**仅凭上传进度 100%。
 
 ---
 
-## 6. OTA 版本与运行分区（模块 5）
+## 6. OTA 版本与运行分区（模块 5，历史 full 构建；slim 保留分区/回滚语义）
 
-> 字段/命令总表以 `protocol.md §2.5` 为准；上传分片/校验/回执细节以 `docs/ota-local-upload.md` 为准。本节只固定"版本/分区信息"的语义与来源。
+> 字段/命令总表以 `protocol.md §2.5` 为准；上传分片/校验/回执细节以 `docs/archive/removed-features/ota-local-upload.md` 为准。本节只固定"版本/分区信息"的语义与来源。
 
 ### 6.1 `OTA/GET_INFO`（cmd 1）字段语义
 
@@ -504,7 +505,7 @@ ws.onmessage = (e) => {
 - [ ] 启动串口第一条日志符合 §2.4 格式，`proto=1`。
 - [ ] 烧录后 WS 冒烟：`fm_ver` == tag、`protocol_version` == 1（§8.4）。
 - [ ] `project_components/html/index.html.gz` / `ws.sharedworker.js.gz` / `web_version.txt` 三者 hash/版本一致（§4.4）。
-- [ ] About 页显示：网页版本 == 固件版本 == tag；协议 v1 ✓；OTA 页 `running`/`running_ver` 正确。
+- [ ] About 页显示：网页版本 == 固件版本 == tag；协议 v1 ✓；（历史 full 构建）OTA 页 `running`/`running_ver` 正确。
 - [ ] release tag 提交 gz + web_version.txt（开发分支不提交），并记录 tag 与三个版本到发布说明。
 
 ---
@@ -529,7 +530,7 @@ ws.onmessage = (e) => {
 ## 11. 与其他契约的关系 / 待 Lead 确认项
 
 1. **`docs/protocol.md` 字段为准**：本文 §5.2/§6.1 的字段名与 `protocol.md:46,109,110` 完全一致；若两者冲突，以 `protocol.md` 为准并回头修本文（Lead 裁决）。
-2. **OTA 上传细节**不在本文：分片大小、HTTP 端点、校验/回执、鉴权头以 `docs/ota-local-upload.md` 为准；本文固定"版本/分区信息"与"更新成功判定"。
+2. **OTA 上传细节**不在本文：分片大小、HTTP 端点、校验/回执、鉴权头以 `docs/archive/removed-features/ota-local-upload.md` 为准；本文固定"版本/分区信息"与"更新成功判定"。
 3. ~~鉴权首帧~~：登录/鉴权已按需求移除（无 token/AUTH 首帧/`Authorization`），此不一致项关闭；握手在连接建立后由普通 WS 业务消息完成。
 4. **INTEGRATION-PLAN 冲突**：`§0.2/§4` 旧文写"本期不做 OTA"，`§8.1` 改为"OTA 固件侧实现"；本文按 **§8.1** 与 `protocol.md §2.5` 执行。`§5.3` 旧文写"保留 zh/en/fr、trial"与 `§8.3`"仅中英双语"冲突；i18n 契约按 **§8.3**，trial 功能删除（`VITE_TRIAL_*` 与中文默认文案一并移除）。
 5. **`upd_date` 格式**：统一 `YYYY-MM-DD`（`FW_UPD_DATE` 当前输出即此格式，`protocol.md:46` 同）；若未来改为完整 ISO8601，需协议升版。
@@ -565,4 +566,4 @@ I (3200) WS_REQ: ws open: 3
 | 运行分区/版本 | `OTA/GET_INFO` | 仅 Update 页；需 OTA 契约就绪 |
 | OTA 进度 | `OTA/GET_PROGRESS` | 轮询 1s（D 现状）或 OTA 契约规定 |
 
-*契约版本：v1，2026-10-20，Wave 0 冻结；维护：Lead；本文与 `protocol.md`、`ota-local-upload.md`、`i18n-keys.md` 同步变更。*
+*契约版本：v1，2026-10-20，Wave 0 冻结；维护：Lead；本文与 `protocol.md`、`i18n-keys.md` 同步变更。OTA 契约已随 A1/A2 归档到 `docs/archive/removed-features/ota-local-upload.md`。*

@@ -2,20 +2,24 @@
 
 [English](README.md) | **中文**
 
-基于 **ESP32-S3** 的无线 CMSIS-DAP 调试器，并内嵌一套完整的 Web 管理面板：一根 USB 线烧好固件后，即可通过 Wi-Fi 完成 SWD/JTAG 调试、串口转发、设备管理与浏览器本地 OTA。
+基于 **ESP32-S3** 的无线 CMSIS-DAP 调试器，并内嵌一套 Web 管理面板：一根 USB 线烧好固件后，即可通过 Wi-Fi 完成 SWD/JTAG 调试、串口转发、设备状态查看与网页端目标烧录。**final slim 构建已无 Web OTA**——固件更新走 USB-JTAG / OpenOCD / UART0。
 
 项目由 [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap)（MIT）与 [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools)（Apache-2.0 平台层）合并重构而来，升级到 **ESP-IDF 5.5.6**，并加入 Web UI 与 JSON/WebSocket 协议。完整文档见 **[docs/README.md](docs/README.md)**。
 
-> 🧪 **精简构建说明（分支 `slim/fw`，2026-10-26）**：本分支是**功能精简固件**。相对
-> 完整功能固件（tag `backup/full-features-2026-10-26`）默认关闭：浏览器本地 OTA 上传
-> 与 OTA JSON module 5（A1/A2，OTA 分区+回滚确认保留）、SSDP/UPnP（H1）、
-> `GET /api/discover`（H3）、Ozone 兼容工具（J1）；浏览器 Host/Origin 校验默认关闭
-> （M1，**安全风险**，见 [docs/security.md](docs/security.md)）；曲线系列上限
-> **256 → 64**（C4）。USBIP/DAP、Web UI 基础、Web 目标烧录、曲线、UART、WiFi、mDNS
-> 均保留。逐项开关/恢复方式/资源收益见 **[docs/feature-flags.md](docs/feature-flags.md)**。
-> 下文功能描述对应完整功能固件；精简构建可在同一代码树上按项恢复。
+> ✅ **final slim（当前树，2026-10-26）**：本树即已发布的**最终精简**固件/Web UI。
+> 相对完整功能树（tag `backup/full-features-2026-10-26`）：浏览器本地 OTA 上传与 OTA
+> JSON module 5 **已移除**（A1/A2；OTA 分区与 10 s 回滚确认保留）、SSDP/UPnP
+> **已移除**（H1）、`GET /api/discover` + Web 设备发现卡 **已移除**（H3/B2）、
+> 首次使用引导（B3）、在线手册入口（B5）、Ozone 兼容工具（J1）**已移除**；
+> 浏览器 Host/Origin 校验**默认关闭**（M1，用户已接受实验室局域网风险，见 [§9](#9-安全默认与加固)）；
+> 曲线系列上限 **256 → 64**（C4）。**新增**：独立 `/#/status` 设备状态页 + 全站
+> compact 状态条（见 [docs/web-status-ui.md](docs/web-status-ui.md)）。
+> USBIP/DAP、目标烧录、变量曲线、UART、WiFi、mDNS（TXT `name=WiFi-Dap-XXXX`）
+> 与 About 保留。逐项 Kconfig 开关/恢复方式/资源收益/归档路径见
+> **[docs/feature-flags.md](docs/feature-flags.md)**；已移除功能的历史文档见
+> **[docs/archive/removed-features/](docs/archive/removed-features/README.md)**。
 
-> ⚠️ **安全默认**：Web/JSON API、WebSocket-DAP、UART TCP 桥、OTA 上传默认**均无鉴权**，且 HTTP 为明文。请仅部署在**可信局域网**，并阅读 [§9 安全默认与加固](#9-安全默认与加固)。
+> ⚠️ **安全默认**：Web/JSON API、WebSocket-DAP、UART TCP 桥默认**均无鉴权**，HTTP 明文，且 slim 构建的浏览器 Host/Origin 校验**默认关闭**。请仅部署在**可信局域网**，并阅读 [§9 安全默认与加固](#9-安全默认与加固)。
 
 ---
 
@@ -43,9 +47,10 @@
 
 - **定位**：把一块 ESP32-S3（8 MB Flash）变成无线 CMSIS-DAP 调试探针 + 自带 Web UI 的调试小盒子。
 - **调试链路**：USBIP/WinUSB（CMSIS-DAP v2）、elaphureLink（Keil 免驱）、WebSocket-DAP（浏览器工具）三种传输，均走 **TCP 3240**。
-- **管理链路**：内嵌单页 Web UI（Vue 3 + Vite 构建，gzip 后嵌入固件），通过 **HTTP 80** 提供 Wi-Fi 配置、UART 终端、OTA 上传、版本信息与反馈页。
-- **发布目标**：**ESP32-S3 8 MB**（默认板 `BOARD_ZXR_DAP_S3`，双 OTA 槽）。ESP32-C3 / ESP32（4 MB）仅做**编译验收**，不支持 OTA、未做硬件验证。
-- **已移除**：ESP8266 支持、KCP 实验传输、corsacOTA（3241 端口）。
+- **管理链路**：内嵌单页 Web UI（Vue 3 + Vite 构建，gzip 后嵌入固件），通过 **HTTP 80** 提供设备状态、Wi-Fi 配置、UART 终端、目标检测/烧录、变量曲线与版本信息。**final slim 构建无 Web OTA / Update 页**，固件更新走 USB-JTAG / OpenOCD / UART0 ROM 下载（见 [§4.5](#45-首次烧录esp32-s3-8-mb) 与 [§6](#6-web-管理面板)）。
+- **发布目标**：**ESP32-S3 8 MB**（默认板 `BOARD_ZXR_DAP_S3`，双槽分区布局）。ESP32-C3 / ESP32（4 MB）仅做**编译验收**（单 app 分区、未做硬件验证）。
+- **ESP32-C5 变体**：IDF **v5.5.6**、**仅编译验收、Wi-Fi-only**（`BOARD_GENERIC_C5`，8 MB 双槽分区布局）。C5 **无 USB-OTG**，物理上不可能做 USB-NCM/有线 DAP；保留 Wi-Fi USBIP + Web/曲线/UART，通过内置 USB Serial/JTAG + OpenOCD 刷写/调试；UART1 桥引脚为 **TX=GPIO25 / RX=GPIO26**（115200 回环实测通过）。见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)。
+- **final slim（2026-10-26）移除**：Web OTA/Update 页与端点、设备发现卡 + `GET /api/discover`、SSDP/UPnP、首次使用引导、在线手册入口、Ozone 兼容 PoC。分区表、回滚确认与 OTA 组件源码保留；恢复方式：tag `backup/full-features-2026-10-26` + [docs/feature-flags.md](docs/feature-flags.md)。更早移除：ESP8266 支持、KCP 实验传输、corsacOTA（3241）、Widget 仪表盘。
 
 ---
 
@@ -53,25 +58,27 @@
 
 | 类别 | 功能 | 状态 | 说明 |
 |---|---|---|---|
-| 目标芯片 | ESP32-S3 | ✅ 硬件验证目标 | 8 MB Flash，默认板 `BOARD_ZXR_DAP_S3`，双 OTA 槽 |
-| 目标芯片 | ESP32-C3 / ESP32 | 🧪 仅编译 | 4 MB 单 app 分区，无 OTA，未做硬件验证 |
-| 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，SWD/JTAG 引脚见 [docs/board-pins.md](docs/board-pins.md) |
+| 目标芯片 | ESP32-S3 | ✅ 硬件验证目标 | 8 MB Flash，默认板 `BOARD_ZXR_DAP_S3`，双槽分区布局（slim 不暴露 Web OTA） |
+| 目标芯片 | ESP32-C3 / ESP32 | 🧪 仅编译 | 4 MB 单 app 分区，无 OTA 分区，未做硬件验证 |
+| 目标芯片 | ESP32-C5 | 🧪 仅编译、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；未做硬件验证（除实验室 bring-up 记录） |
+| 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，引脚见 [docs/board-pins.md](docs/board-pins.md)，默认 SWD 时钟 **2 MHz** |
+| 目标烧录 | Web 直接烧录 / STM32 识别 | ✅ F4/H7 实板验证 | 浏览器上传 `.bin`/`.elf`/`.hex`/`.srec`（前端转裸镜像），ESP32 经 SWD 流式写入（扇区擦除、x64/x32、SHA-256 校验 + SWD 复位）；**全 STM32 系列识别**（DEV_ID 表）；见 [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
+| 传输性能 | USBIP/DAP 调优 | ✅ | A3：Wi-Fi 下 64 KB 读约 43 KiB/s（延迟受限）；目标烧录时暂停 UART 桥，Wi-Fi/HTTP 保持在线 |
 | USB 传输 | USBIP / WinUSB | ✅ | CMSIS-DAP v2，TCP **3240**；Windows 推荐 usbip-win 0.3.0 `attach_ude` |
-| 工具链 | OpenOCD / pyOCD / Keil | ✅ | 通过 CMSIS-DAP v2 使用（上游能力，DAP 核心未改协议） |
+| 工具链 | OpenOCD / pyOCD / Keil | ✅ | 通过 CMSIS-DAP v2（上游能力）；建议 OpenOCD master 以获得 2.4× 读速（[docs/openocd-master.md](docs/openocd-master.md)） |
 | 免驱传输 | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil 插件或 OpenOCD 直连，TCP **3240**，无需 USBIP 驱动 |
 | 浏览器传输 | WebSocket-DAP（legacy） | ✅（可关） | TCP **3240**，二进制帧 = CMSIS-DAP 命令包；`CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
-| Web UI | 内嵌管理面板（zh/en） | ✅ | HTTP **80**，SharedWorker 单 WS 连接；Wi-Fi / UART / Update / About / Feedback |
-| Wi-Fi | AP + STA（Smart APSTA） | ✅ | 默认 AP `WiFi-Dap-XXXX` / `12345678`；STA 连上 30 s 后关 AP、断开 10 s 后重开 |
+| Web UI | 内嵌管理面板（zh/en） | ✅ | HTTP **80**，SharedWorker 单 WS 连接；页面：**目标烧录 / 设备状态 / 变量曲线 / UART / Wi-Fi / About**；除状态页外每页一条 compact 状态条；i18n 947 key |
+| Wi-Fi | AP + STA（Smart APSTA） | ✅ | 默认 AP `WiFi-Dap-XXXX` / `12345678`；STA 连上 30 s 后关 AP、断开 10 s 后重开；mDNS TXT `name=WiFi-Dap-XXXX` |
 | Wi-Fi | 多凭据记忆 | ✅ | 最多 8 个网络，自动记忆 + 上电/断线轮换（[契约](docs/wifi-credential-memory.md)） |
 | 串口 | Web UART 终端 + WS 二进制 | ✅ | 默认 115200-8N1，可配数据位/校验/停止位/流控 |
-| 串口 | UART TCP 桥 | ✅（可关） | TCP **1346**；首包文本可切换波特率；`CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE` |
-| 发现 | mDNS / SSDP | ✅ | mDNS `_http._tcp`；SSDP 1900/UDP + `GET /SSDP.xml` |
-| OTA | 浏览器本地上传（双槽 + 回滚） | ✅ 仅 S3 8 MB | `POST /api/ota/upload`，见 [契约](docs/ota-local-upload.md) |
+| 串口 | UART TCP 桥 | ✅（可关） | TCP **1346**；首包文本可切换波特率；`CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE`；C5 使用 UART1 GPIO25/26（回环实测） |
+| 发现 | 仅 mDNS | ✅（SSDP 已移除） | `_http._tcp` 服务 + TXT `name=WiFi-Dap-XXXX`；SSDP/UPnP（H1）与 `GET /api/discover`（H3）已在 slim 移除，见 [归档索引](docs/archive/removed-features/README.md) |
+| 固件更新 | USB-JTAG / OpenOCD / UART0 | ✅ | **slim 无 Web OTA**（A1/A2）；经 UART0 或内置 USB Serial/JTAG 重烧（S3：BOOT+RESET ROM 下载；C5：OpenOCD + USB-JTAG）；OTA 分区 + 10 s 回滚确认保留；完整 Web OTA 可从 `backup/full-features-2026-10-26` 恢复 |
+| 变量曲线 | Web 采样 | ✅ | 设备本地采样上限 **64 系列**（原 256，C4）；WS-DAP 模式 24 系列；协议分组格式不变 |
 | 诊断 | coredump 到 Flash | ✅ | 64 KB `coredump` 分区（`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`） |
-| 安全 | 无登录/鉴权（实验室模式）；Host/Origin 校验始终启用 | ✅ | 见 [§9](#9-安全默认与加固) |
+| 安全 | 无登录/鉴权（实验室模式）；**slim 默认关闭 Host/Origin 校验** | ⚠️ 实验室模式 | M1 风险已接受；可用 `CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y` 恢复；见 [§9](#9-安全默认与加固) |
 | 版本 | 固件 semver + 协议 v1 | ✅ | About 页 / `SYSTEM/GET_FM_INFO`，见 [docs/versioning.md](docs/versioning.md) |
-
----
 
 ## 3. 硬件与引脚
 
@@ -99,6 +106,8 @@
 | UART 桥 TX / RX | GPIO10 / GPIO9 | UART1；控制台仍在 UART0（S3：GPIO43/44） |
 
 > 通用 C3/ESP32 板的引脚、以及 LED 缺失板（宏为 `_`）的约定见 [docs/board-pins.md §4](docs/board-pins.md)，不要在其他代码里写死 `#ifdef CONFIG_IDF_TARGET_*` 引脚分支。
+
+**C5 UART 桥**：`UART_BRIDGE_TX_PIN=GPIO25` / `UART_BRIDGE_RX_PIN=GPIO26`（UART1 矩阵映射；115200-8N1 回环实测通过）。C5 细节见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)（由 C5 bring-up owner 维护）。
 
 **电源**：目标板 3V3 / GND 需与 DAP 共地；调试目标建议由目标板自供电，DAP 的 GPIO 电压为 3.3 V。
 
@@ -151,8 +160,9 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 |---|---|---|---|
 | ESP32-S3（8 MB，发布） | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | bootloader + ptable@0x8000 + nvs 24K + phy 4K + otadata 8K + `ota_0` 3M@0x20000 + `ota_1` 3M@0x320000 + wt_nvs 64K + coredump 64K | ✅ 双槽 + 回滚 |
 | ESP32-C3 / ESP32（4 MB） | [`partitions/partitions_4mb_single.csv`](partitions/partitions_4mb_single.csv) | nvs + phy + `factory` 3.75M + wt_nvs + coredump | ❌ 无 OTA |
+| ESP32-C5（8 MB，Wi-Fi-only） | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | 与 S3 相同的 8 MB 双槽布局 | ✅ 双槽 + 回滚布局（slim 无 Web OTA UI/端点；当前仅编译验收） |
 
-约束细节（app 上限、otadata、回滚语义）见 [docs/ota-local-upload.md §1](docs/ota-local-upload.md)。
+约束细节（app 上限、otadata、回滚语义）属完整功能构建历史契约，见 [归档 ota-local-upload.md §1](docs/archive/removed-features/ota-local-upload.md)；slim 的端点/UI 移除与恢复方式见 [docs/feature-flags.md](docs/feature-flags.md)。
 
 ### 4.5 首次烧录（ESP32-S3 8 MB）
 
@@ -170,7 +180,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 
 - ❌ **不要**写 `build/esp32s3/ota_data_initial.bin`，也**不要**用 `merge_bin` 全量包首烧（会初始化 otadata，掩盖首烧回退逻辑）。
 - 串口控制台：UART0，115200（S3：GPIO43/44）。
-- 之后升级请使用 Web UI 的 OTA 或 `scripts/ota_upload.py`，不要再整片重烧。
+- **之后的固件更新（final slim）**：**没有 Web OTA**。通过 UART0 或内置 USB Serial/JTAG 重烧 `ota_0`（S3：按住 BOOT + RESET 进入 ROM 下载模式；C5：OpenOCD + 内置 USB-JTAG，见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)）。历史 Web OTA 流程/`scripts/ota_upload.py` 仅适用于从 `backup/full-features-2026-10-26` 恢复的完整功能构建（[归档](docs/archive/removed-features/ota-local-upload.md)）。
 
 ### 4.6 发布包（可选）
 
@@ -179,7 +189,7 @@ scripts/release_local.sh                 # 严格模式：要求干净工作区 
 scripts/release_local.sh --allow-dirty   # 本机验证用
 ```
 
-产物在 `build/release/`：`birdiebot_wifi_dap.bin`（唯一可 OTA 上传的 app 镜像）、bootloader、分区表、`flash.sh`、Web gz 资源、`SHA256SUMS` 等，详见 [scripts/README.md](scripts/README.md)。
+产物在 `build/release/`：`birdiebot_wifi_dap.bin`（app 镜像；供完整功能 OTA 构建使用）、bootloader、分区表、`flash.sh`、Web gz 资源、`SHA256SUMS` 等，详见 [scripts/README.md](scripts/README.md)。
 
 ### 4.7 重新构建 Web UI（可选）
 
@@ -200,7 +210,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
    - 默认口令：`12345678`（**首次使用请立即在 Wi-Fi 页修改**，见 [§9](#9-安全默认与加固)）
 3. 浏览器打开 **<http://192.168.1.1/>**（AP 模式默认网关/设备地址）。
    - 若已通过 Wi-Fi 页把设备接入局域网，则改用路由器分配给它的 IP；
-   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap-XXXX.local`，**XXXX = STA MAC 最后两个字节的 4 位十六进制**（与默认 AP SSID `WiFi-Dap-XXXX` 同后缀；例如 MAC 末两字节 CA:60 → `http://wifi-dap-ca60.local/`）；若解析失败请直接使用设备 IP。
+   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap-XXXX.local`，TXT 记录 `name=WiFi-Dap-XXXX`，**XXXX = STA MAC 最后两个字节的 4 位十六进制**（与默认 AP SSID 同后缀；例如 MAC 末两字节 CA:60 → `http://wifi-dap-ca60.local/`）；若解析失败请直接使用设备 IP。slim 已移除 SSDP/UPnP 发现。
 4. 在 **Wi-Fi** 页填写并连接你的局域网（支持多网络记忆与自动切换），之后即可在局域网内访问 Web UI、调试器端口与 UART 桥。
 5. 打开 **UART** 页，选择波特率（默认 115200-8N1）即可看目标串口输出；或直接使用 USBIP/elaphureLink 开始调试（[§7](#7-调试工具接入)）。
 
@@ -210,32 +220,37 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 
 ## 6. Web 管理面板
 
-入口：`http://<设备IP>/`（默认 `/#/uart`）。前端与固件通过单条 WebSocket（`ws://<ip>/ws`）通信，文本帧为 JSON，二进制帧为 4 字节头 + payload；固件每 **1500 ms** 发送空 TEXT 帧心跳。协议细节见 [docs/protocol.md](docs/protocol.md) 与 [docs/ws-binary-router.md](docs/ws-binary-router.md)。
+入口：`http://<设备IP>/`（重定向到 `/#/target`）。前端与固件通过单条 WebSocket（`ws://<ip>/ws`）通信，文本帧为 JSON，二进制帧为 4 字节头 + payload；固件每 **1500 ms** 发送空 TEXT 帧心跳。协议细节见 [docs/protocol.md](docs/protocol.md) 与 [docs/ws-binary-router.md](docs/ws-binary-router.md)。
+
+**final slim** Web UI 保留调试工作流，移除了旧的 OTA/Update 页、设备发现卡、首次使用引导、在线手册入口与 Ozone 兼容（见 [docs/feature-flags.md](docs/feature-flags.md)）。除设备状态页外，每页顶部有一条 **compact 状态条**（WebSocket 状态 · Wi-Fi SSID+RSSI · 目标 detected+UID 摘要 · 最近烧录结果）；点击进入设备状态页。
 
 | 页面 | 路径 | 功能 |
 |---|---|---|
+| **目标烧录** | `/#/target` | 默认页：目标检测、SWD 时钟与网页端目标烧录（BIN/ELF/HEX/SREC → 裸镜像，SHA-256 + SWD 复位）。只有烧录流程 + compact 状态条，详细状态卡已迁到 `/#/status` |
+| **设备状态** | `/#/status` | 只读详情页：DAP 会话、Wi-Fi、目标检测、物理链路融合、链路健康（浏览器实测 RTT / SWD 时钟 / heap）、错误摘要，以及诊断/恢复（DAP kick、目标复位、刷新、复制 JSON）。唯一运行周期性链路轮询的页面 |
+| **变量曲线** | `/#/debug-curve` | 上传 ELF（解析 DWARF 类型：源变量名/类型/结构体成员/数组）选择变量，经 WS-DAP 最高 100 Hz 采样并实时画曲线，支持 CSV/PNG 导出（会接管 DAP 会话，见 [docs/web-variable-curve.md](docs/web-variable-curve.md)）。设备本地采样上限 **64 系列**（C4） |
 | **UART** | `/#/uart` | 串口终端（TX/RX）、波特率/数据位/校验/停止位/流控配置；数据走 WS 二进制 `RAW`/`RAW_BROADCAST` 帧 |
-| **变量曲线** | `/#/debug-curve` | 上传 ELF（解析 DWARF 类型：源变量名/类型/结构体成员/数组）选择变量，经 WS-DAP 最高 100 Hz 采样并实时画曲线，支持 CSV/PNG 导出（会接管 DAP 会话，见 [docs/web-variable-curve.md](docs/web-variable-curve.md)） |
 | **Wi-Fi** | `/#/wifi` | STA 扫描/连接、已保存网络（最多 8 个，可增删/自动保存）、AP 名称与口令、静态 IP/DNS、AP/STA 模式与 Smart APSTA 延迟 |
-| **Update** | `/#/update` | 浏览器本地 OTA：选择 app `.bin` 上传、实时进度、校验与回滚（仅 S3 8 MB；4 MB 目标显示不支持） |
 | **About** | `/#/about` | 固件版本 / 协议版本 / Web UI 版本 / 硬件版本 / SN / IDF 版本等信息 |
-| **Feedback** | `/#/feedback` | 反馈入口（作者主页/项目主页链接） |
 
-- 语言：中文 / English 可切换（i18n 382 个 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
+- 语言：中文 / English 可切换（i18n 947 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
+- 状态页/compact 状态条说明：[docs/web-status-ui.md](docs/web-status-ui.md)；final slim HIL 证据：[docs/hil-gate.md §11](docs/hil-gate.md)。
 - 安全：按需求**无登录/鉴权**；Web UI 仅可在可信局域网使用（见 [§9](#9-安全默认与加固)）。
 - 图片预览：[UART 终端](web/assets/uart.png)
-- 说明：原 Widget / `#/widget` 仪表盘页面已于 2026-10-21 移除；UART 页面保留数据显示器、宏命令等全部功能。
+- 更早移除：Widget / `#/widget` 仪表盘（2026-10-21），UART 保留数据显示器/宏命令等全部功能；slim 移除：`/#/update`（OTA）、首次引导、设备发现卡。
 
-### OTA（仅 ESP32-S3 8 MB）
+### 固件更新（final slim：无 Web OTA）
 
-1. `Update` 页选择 `build/esp32s3/birdiebot_wifi_dap.bin`（**只上传 app 镜像**，不要上传 merge/全量包/zip）。
-2. 上传过程中设备把镜像写入**空闲槽**（`ota_0` ↔ `ota_1`），状态：`IDLE → RECEIVING → VERIFYING → READY → APPLYING`，成功后约 1 s 重启。
-3. 新镜像首启为 `PENDING_VERIFY`，`main` 在 10 s 后确认；若 10 s 内崩溃/复位，bootloader 自动回滚旧槽。
-4. Update 页默认启用；只有显式 `VITE_ENABLE_OTA=false` 的精简构建才需要用等价的 HTTP/脚本方式上传：
-   - `python3 scripts/ota_upload.py --host <ip> --file <app.bin> --info`
-   - 或 `curl` 直传，见 [docs/hardware-test-ota.md §2/§3](docs/hardware-test-ota.md)。
+final slim 构建**没有浏览器 OTA / Update 页**（`POST /api/ota/upload` → 405，OTA JSON module 5 不注册；前端 Update 页与 OTA 客户端已删除）。
 
----
+| 方式 | 操作 |
+|---|---|
+| **USB-JTAG / esptool（S3）** | 按住 **BOOT(GPIO0) + RESET** 进入 ROM 下载模式，S3 内置 USB Serial/JTAG 会枚举串口，然后按 [§4.5](#45-首次烧录esp32-s3-8-mb) 用 `esptool.py`/`idf.py -p <port> flash`。NCM/Wi-Fi slim 固件同样可用（ROM 下载模式与应用 USB 配置无关） |
+| **UART0 ROM 下载** | BOOT+RESET + UART0（GPIO43/44）配合 esptool |
+| **OpenOCD + USB-JTAG（C5）** | C5 无 USB-OTG，经内置 USB Serial/JTAG 用 OpenOCD 刷写，见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md) |
+| **完整功能 OTA（历史）** | 仅在从 `backup/full-features-2026-10-26` 恢复的构建可用；契约归档 [docs/archive/removed-features/ota-local-upload.md](docs/archive/removed-features/ota-local-upload.md) |
+
+恢复/重开步骤见 [docs/feature-flags.md](docs/feature-flags.md)（A1/A2）与 [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md)。
 
 ## 7. 调试工具接入
 
@@ -291,10 +306,11 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 | 面 | 默认 | 风险 |
 |---|---|---|
-| Web UI / JSON API / WS 数据面 | 无鉴权 | 同网段任意主机可读配置、控制 UART、发起 OTA |
-| OTA 上传（`POST /api/ota/upload`） | 无鉴权 | 可写入任意固件（无签名校验） |
+| Web UI / JSON API / WS 数据面 | 无鉴权 | 同网段任意主机可读配置、控制 UART、操作探针 |
+| 固件更新 | **slim 无 Web OTA 端点**（405）；重烧需物理/网络访问（USB-JTAG/UART0） | 有本地/网络访问即可覆盖固件；完整构建的 OTA 无签名 |
 | USBIP / elaphureLink / WS-DAP（3240） | 无鉴权 | 可 attach 探针并读写目标芯片 |
 | UART TCP 桥（1346） | 无鉴权 | 可直连目标串口 |
+| Host/Origin 校验 | **slim 默认关闭**（M1）；任意 Host/Origin 放行 | 同网段浏览器可 CSWSH / DNS-rebinding |
 | 传输加密 | 无（HTTP/WS/TCP 均明文） | 可被同网段嗅探/篡改 |
 | Wi-Fi 凭据存储 | NVS 明文（无 flash encryption） | 物理读取可获取；`GET_AP_INFO`/`GET_STA_INFO` 会回传口令 |
 | AP 口令 | `12345678` | 请首次使用即修改 |
@@ -303,26 +319,26 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 ### 9.2 已知安全限制（Known security limitations，实验室模式）
 
-默认固件按“实验室模式”设计，以下限制在加固前**仍然存在**。完整分级、证据行号与修复建议见 **[docs/security-review-web.md](docs/security-review-web.md)**（P0 现状 0 / 条件性 P0 1 / P1 4 / P2 10）：
+默认固件按“实验室模式”设计，以下限制在加固前**仍然存在**。完整分级、证据行号与修复建议见 **[docs/security-review-web.md](docs/security-review-web.md)**（历史 full 构建审查：P0 现状 0 / 条件性 P0 1 / P1 4 / P2 10；slim 差异：OTA/discover 端点已移除，Host/Origin 校验**默认关闭**）：
 
 - **默认无鉴权**：HTTP **80**（`/`、`/ws`、`/api`）、TCP **3240**（USBIP / elaphureLink / WS-DAP）、TCP **1346**（UART TCP 桥）默认全部无鉴权，同一网络内即可完全控制设备与目标 MCU。
 - **默认 AP 口令 `12345678`**：物理邻近即可加入设备热点，进而获得上述全部能力；首次使用必须修改。
-- **完全无登录/鉴权（按需求移除）**：配对码/token 功能已删除；80/3240/1346 在可信内网开放。Host/Origin 校验保留（浏览器 CSWSH/DNS-rebinding 防护），但它不是身份认证。
-- **OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot；可信内网内可写入任意有效镜像。
+- **完全无登录/鉴权（按需求移除）**：配对码/token 功能已删除；80/3240/1346 在可信内网开放。
+- **slim 默认关闭 Host/Origin 校验（用户已接受）**：任意网页可 `new WebSocket("ws://<设备IP>/ws")` 跨源驱动设备（CSWSH），攻击者控制的 DNS 名可同源读写设备（DNS rebinding）。需要浏览器来源防护时设 `CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y`。
+- **完整构建的 OTA 无签名 / 无防降级**：`esp_ota_end()` 只做镜像格式校验，未启用 anti-rollback/Secure Boot。
 
-> 注：Origin/Host 校验现已**始终启用**（与 `auth` 解耦；默认仅接受 IP-literal Host + 同源 Origin），已关闭审查报告 §1.2 的 CSWSH/DNS-rebinding 风险。部署加固清单见 [docs/security.md](docs/security.md)。
+> 注：`M1`（Host/Origin guard）在 final slim 中**默认关闭**；见 [docs/feature-flags.md](docs/feature-flags.md) §7。加固部署请重新开启（`CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y`）并把实际来源加入白名单。部署加固清单见 [docs/security.md](docs/security.md)。
 
-**Accepted risks (studio LAN)**：设备按设计**无登录/鉴权**（80/3240/1346 开放）、默认 AP 口令 `12345678` 未改；这些风险在**可信实验室内网**下接受。Host/Origin 校验保留用于防浏览器跨源攻击。使用约束与 N1–N9 状态见 [docs/security.md](docs/security.md)。**勿把设备暴露到公网或不可信 Wi-Fi。**
+**Accepted risks (studio LAN)**：设备按设计**无登录/鉴权**（80/3240/1346 开放）、默认 AP 口令 `12345678` 未改，且 slim 默认关闭 Host/Origin 校验；这些风险在**可信实验室内网**下接受。使用约束与 N1–N9 状态见 [docs/security.md](docs/security.md)。**勿把设备暴露到公网或不可信 Wi-Fi。**
 
-### 9.3 Host/Origin 校验（无登录）
+### 9.3 Host/Origin 校验（无登录；slim 默认关闭）
 
-登录/配对码/token 鉴权已**全部移除**，仅保留始终启用的浏览器来源校验：
+登录/配对码/token 鉴权已**全部移除**。完整功能构建使用“始终启用”的浏览器来源校验；**final slim 默认关闭**（`CONFIG_BIRDIEBOT_WEB_HOST_GUARD=n`，用户已接受实验室风险，见 [docs/feature-flags.md](docs/feature-flags.md) §7）：
 
-- `Host` 必须是 IP literal、`CONFIG_LWIP_LOCAL_HOSTNAME` 或 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 名单（防 DNS rebinding）；
-- 浏览器带 `Origin` 时必须同源或命中名单（防 CSWSH）；
-- 非浏览器客户端（curl/OpenOCD/脚本）不带 Origin，仍可访问——**这不是身份认证**。
+- 开启时（`=y`）：`Host` 必须是 IP literal、`CONFIG_LWIP_LOCAL_HOSTNAME` 或 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 名单（防 DNS rebinding）；浏览器带 `Origin` 时必须同源或命中名单（防 CSWSH）；非浏览器客户端不带 Origin，仍可访问——**这不是身份认证**。
+- 关闭时（slim 默认）：完全没有 Host/Origin 校验，任意来源都可访问设备；仅在可信局域网使用。
 
-若通过主机名（mDNS/反向代理）访问，请在 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` 加入该来源（如 `http://wifi-dap-XXXX.local`，XXXX 用实际 MAC 后缀）。脚本不再需要/支持 `--token`。
+脚本不再需要/支持 `--token`。
 
 ### 9.4 关闭不需要的传输
 
@@ -347,11 +363,11 @@ USBIP 与 elaphureLink 没有单独开关（3240 端口保持监听）；如不�
 
 | 版本 | 来源 | 运行时可见 |
 |---|---|---|
-| 固件版本 `vMAJOR.MINOR.PATCH` | 本地 git tag（`git describe`，回退 `version.txt`/`v1.0.0`） | 启动日志、About 页、`SYSTEM/GET_FM_INFO.fm_ver`、`OTA/GET_INFO.running_ver` |
+| 固件版本 `vMAJOR.MINOR.PATCH` | 本地 git tag（`git describe`，回退 `version.txt`/`v1.0.0`） | 启动日志、About 页、`SYSTEM/GET_FM_INFO.fm_ver`（OTA `GET_INFO` 仅完整构建） |
 | 协议版本 `protocol_version = 1` | `project_components/wt_common/wt_protocol_version.h`（唯一来源） | 启动日志、`GET_FM_INFO.protocol_version`、About 页 |
 | Web UI 版本 `1.0.0` | `web/package.json`，构建时注入 | About 页、`build-info.json`、`web_version.txt` |
 
-- 连接后前端发送 `SYSTEM/GET_FM_INFO` 做版本握手；协议不匹配时提示“固件与网页版本不匹配”，并禁用危险操作（如 OTA）。
+- 连接后前端发送 `SYSTEM/GET_FM_INFO` 做版本握手；协议不匹配时提示“固件与网页版本不匹配”，提示刷新页面或升级固件（slim 无 Web OTA 可禁用）。
 - 发布一致性由 `scripts/check-release-versions.sh` 等门禁脚本校验，详见 [docs/versioning.md](docs/versioning.md) 与 [scripts/README.md](scripts/README.md)。
 
 ---
@@ -369,7 +385,7 @@ USBIP 与 elaphureLink 没有单独开关（3240 端口保持监听）；如不�
 本仓库（WiFi Dap）的主要变更：
 
 - 升级到 **ESP-IDF 5.5.6**，按组件拆分（`components/` + `project_components/`），板级引脚抽象为 `components/board`（`BOARD_*` + Kconfig，去掉按 target 写死的引脚分支）。
-- 新增 **Web UI + JSON/WS 协议 v1**（[docs/protocol.md](docs/protocol.md)）、Wi-Fi 多凭据记忆、浏览器本地 OTA（8 MB 双槽 + 回滚）、可选 Web 鉴权、SSDP/mDNS、coredump、UART service/DataFlow 数据面。
+- 新增 **Web UI + JSON/WS 协议 v1**（[docs/protocol.md](docs/protocol.md)）、Wi-Fi 多凭据记忆、浏览器本地 OTA（8 MB 双槽 + 回滚；**final slim 已移除**，见 [docs/feature-flags.md](docs/feature-flags.md)）、可选 Web 鉴权、SSDP/mDNS（SSDP **final slim 已移除**）、coredump、UART service/DataFlow 数据面。
 - 保留并修复上游 DAP 代理层（USBIP / elaphureLink / legacy WebSocket-DAP）：DAP ring buffer 生命周期归 DAP 任务、socket fd 泄漏修复、错误路径处理等。
 - 默认值调整：SWD 默认时钟 1 MHz、UART 桥 1346/115200、AP SSID `WiFi-Dap-XXXX`、移除 ESP8266/KCP/corsacOTA(3241)。
 - 默认板 `BOARD_ZXR_DAP_S3`；C3/ESP32 仅编译验收。
@@ -406,25 +422,25 @@ python3 scripts/check_board_pins.py          # 板文件 vs docs/board-pins.md �
 scripts/gen_web_assets.sh --check            # 入库 Web gz 是否与 web/ 构建一致
 ```
 
-### 13.2 WebSocket / UART / OTA 自动化（需设备）
+### 13.2 WebSocket / UART 自动化（需设备）
 
 ```bash
 # 连接 + 版本握手
 python3 scripts/e2e_ws_client.py --host <ip> ping
-# Wi-Fi 扫描 / UART 回环 / DataFlow / OTA 信息 / 任意 JSON
+# Wi-Fi 扫描 / UART 回环 / DataFlow / 任意 JSON
 python3 scripts/e2e_ws_client.py --host <ip> wifi-scan
 python3 scripts/e2e_ws_client.py --host <ip> uart-echo --payload 48656c6c6f --hex
 python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
-python3 scripts/e2e_ws_client.py --host <ip> ota-info
-# OTA 上传（也可 --info 轮询新版本）
-python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_dap.bin --info
 ```
 
-### 13.3 硬件验收清单
+> `e2e_ws_client.py ota-info` 与 `scripts/ota_upload.py` 仅适用于**完整功能构建**（从 `backup/full-features-2026-10-26` 恢复）；final slim 固件已移除 OTA 端点/module。脚本保留用于 full 构建回归。
 
-- **OTA**（8 MB S3）：[docs/hardware-test-ota.md](docs/hardware-test-ota.md) —— 首烧、Web/HTTP 上传、错误注入、回滚验证与记录模板。
-- **UART/DataFlow/WS 二进制**：[docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md) —— T1–T8 场景（连通/配置/回环/双客户端广播等）。
-- **DAP/USBIP 真机验证**：清单由 dap-dev 产出中，入库后补入 [docs/README.md](docs/README.md)。
+### 13.3 硬件验收清单与 final slim HIL
+
+- **final slim HIL（推荐）**：[docs/hil-gate.md §11](docs/hil-gate.md) —— `--profile auto` 自动识别 slim 固件、断言 OTA/discover 端点不存在、6 条 hash 路由（`/status`、`/target`、`/debug-curve`、`/uart`、`/wifi`、`/about`）、状态页 + compact 状态条、WS/mDNS（TXT `name=WiFi-Dap-XXXX`）。设备证据：`analysis/slim-hil/` —— **S3-F407 600 s soak clean**（110 cycles，0 failures）与 **C5-H7 180 s soak clean**（33 cycles，0 failures），USBIP ×2 与 SWD 时钟矩阵 PASS。
+- **UART/DataFlow/WS 二进制**：[docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md) —— T1–T8 场景。
+- **DAP/USBIP 真机验证**：[docs/hardware-test-dap.md](docs/hardware-test-dap.md)。
+- **OTA（历史，仅完整构建）**：[docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md)。
 
 ---
 
@@ -434,28 +450,28 @@ python3 scripts/ota_upload.py --host <ip> --file build/esp32s3/birdiebot_wifi_da
 |---|---|
 | 找不到 `WiFi-Dap-XXXX` 热点 | 是否已首次烧录；板卡 board 选择是否正确（`sdkconfig.defaults.*`）；串口日志是否有 Wi-Fi 初始化错误；STA 已连接时 AP 会在 30 s 后关闭（正常） |
 | 打开 `192.168.1.1` 无响应 | 手机/PC 是否连的是设备 AP；是否被 Smart APSTA 关闭了 AP；改连 STA 网段的设备 IP |
-| `wifi-dap-XXXX.local` 无法解析 | 设备/客户端 mDNS 支持；改用 IP 访问（主机名见 `wt_mdns_config.h`，格式 `wifi-dap-XXXX`，XXXX 为 MAC 后两字节） |
-| Web UI 提示在线但操作被拒（HTTP 403） | Host/Origin 校验：用 IP 访问，或把主机名加入 `BIRDIEBOT_WEB_ALLOWED_ORIGIN` |
+| `wifi-dap-XXXX.local` 无法解析 | 设备/客户端 mDNS 支持；检查 TXT `name=WiFi-Dap-XXXX`；改用 IP 访问（主机名见 `wt_mdns_config.h`，XXXX 为 MAC 后两字节）。slim 已移除 SSDP 发现 |
+| Web UI 提示在线但操作被拒（HTTP 403） | 只在重新开启 Host/Origin guard 的加固构建可能出现：用 IP 访问，或把主机名加入 `BIRDIEBOT_WEB_ALLOWED_ORIGIN`（slim 默认关闭 guard） |
+| `/#/update` 返回 404 | 预期：final slim 无 Web OTA/Update 页。用 USB-JTAG/UART0 重烧（见 §4.5），或恢复完整功能构建 |
+| `POST /api/ota/upload` 返回 405/404 | 预期：slim 已移除 OTA 端点。改用 USB-JTAG/OpenOCD/UART0 |
+| `GET /api/discover` 返回 HTML/404 | 预期：slim 已移除发现端点；mDNS 是唯一发现路径 |
 | `usbip.exe attach_ude` 失败 | usbip-win 版本是否 0.3.0+；设备 IP/网段是否可达；3240 是否被防火墙拦截；busid 固定为 `1-1` |
 | DAP 断连/很慢 | Wi-Fi 环境与距离；2.4 GHz 干扰；调试器时钟过高；同网段广播风暴 |
-| UART 页/桥无数据 | UART 页波特率与目标一致？引脚是否为板级 TX/RX（见 board-pins）？目标是否真的在输出？控制台 UART0 不经过桥 |
-| OTA 返回 404 | 当前固件是否包含 OTA 端点（旧固件/构建裁剪）；重新构建烧录 |
-| OTA 返回 409 | 已有上传会话（RECEIVING/VERIFYING/READY/APPLYING）；等待超时或发送 ABORT |
-| OTA 返回 413 / 422 | 文件超过槽大小（3 MB）；或上传的是 merge/zip 而非 app bin；检查文件与 SHA-256 |
-| OTA 后版本回退 | 新镜像 10 s 内崩溃/复位 → bootloader 回滚；看串口 reset reason/panic，修复后重传 |
-| 上传后无法启动 | 串口日志 + coredump：`idf.py coredump-info`（需与构建相同版本 IDF）；必要时 `esptool.py erase_flash` 后按 §4.5 重烧 |
+| UART 页/桥无数据 | UART 页波特率与目标一致？引脚是否为板级 TX/RX（S3 GPIO10/9；C5 GPIO25/26，见 [docs/board-pins.md](docs/board-pins.md)）？目标是否真的在输出？控制台 UART0 不经过桥 |
+| 重烧后无法启动 | 串口日志 + coredump：`idf.py coredump-info`（需与构建相同版本 IDF）；必要时 `esptool.py erase_flash` 后按 §4.5 重烧 |
 | 版本显示 `v1.0.0`/空 | 构建环境无 `vX.Y.Z` tag 且无 `version.txt`（开发构建回退属预期），见 [docs/versioning.md](docs/versioning.md) |
 
-更多 OTA 错误码与状态映射见 [docs/hardware-test-ota.md §5/§6](docs/hardware-test-ota.md)。
+完整构建的 OTA 错误码与回滚步骤属历史内容：[docs/archive/removed-features/hardware-test-ota.md §5/§6](docs/archive/removed-features/hardware-test-ota.md)。
 
 ---
 
 ## 15. 文档、反馈与许可证
 
-- **文档索引**：[docs/README.md](docs/README.md)（冻结契约、测试清单、待产出文档与维护规则）。
-- **关键契约**：[protocol.md](docs/protocol.md)（JSON/WS 协议）、[ota-local-upload.md](docs/ota-local-upload.md)、[wifi-credential-memory.md](docs/wifi-credential-memory.md)、[versioning.md](docs/versioning.md)、[board-pins.md](docs/board-pins.md)。
-- **安全**：[docs/security.md](docs/security.md)（部署加固指南）、[docs/security-review-web.md](docs/security-review-web.md)（Web/OTA/WiFi 面安全审查，P0/P1/P2 分级与证据）。
-- **反馈**：Web UI 的 Feedback 页；作者主页 <https://yunsi.studio/>；项目主页 <https://yunsi.studio/wireless-debugger>。
+- **文档索引**：[docs/README.md](docs/README.md)（当前文档地图、冻结契约、测试清单与维护规则）。
+- **当前功能状态**：[docs/feature-flags.md](docs/feature-flags.md)（final slim 移除项、Kconfig 开关、备份 tag、恢复步骤）；[docs/archive/README.md](docs/archive/README.md)（历史证据/已移除功能）。
+- **关键契约**：[protocol.md](docs/protocol.md)（JSON/WS 协议）、[wifi-credential-memory.md](docs/wifi-credential-memory.md)、[versioning.md](docs/versioning.md)、[board-pins.md](docs/board-pins.md)、[web-status-ui.md](docs/web-status-ui.md)（状态页 + compact 状态条）。
+- **安全**：[docs/security.md](docs/security.md)（部署加固指南）；[docs/security-review-web.md](docs/security-review-web.md)（历史 full 构建 Web/OTA/WiFi 安全审查——slim 已移除 OTA/discover 端点且默认关闭 Host/Origin guard）。
+- **反馈**：作者主页 <https://yunsi.studio/>；项目主页 <https://yunsi.studio/wireless-debugger>。
 - **许可证**（混合许可；完整声明见 [NOTICE](NOTICE)，全文见 [LICENSES/](LICENSES/)）：
   - **本项目原创部分**：**Apache License 2.0**（根目录 [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)）；个别文件头另行标注（如部分 `scripts/` 为 SPDX MIT）。
   - **第三方组件按各自原许可证**：

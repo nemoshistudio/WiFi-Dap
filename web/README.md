@@ -16,7 +16,10 @@ From this interface you can monitor and interact with your target device.
 
 *   **Wi-Fi Configuration**: Easily configure Wi-Fi settings including station mode (STA) and access point mode (AP), with support for static/dynamic IP addressing and DNS settings.
 *   **Real-time Data Visualization**: Includes a UART data viewer for monitoring serial communication from your target device.
-*   **Variable Curves (`#/debug-curve`)**: Upload an ELF, select RAM/Flash variables, sample at up to 100 Hz over WS-DAP and plot live curves (CSV/PNG export). See `docs/web-variable-curve.md`.
+*   **Target Flash (`#/target`)**: Browser-side STM32 detect + flash (BIN/ELF/HEX/SREC); compact status strip on top.
+*   **Device Status (`#/status`)**: Read-only detail page for DAP / Wi-Fi / target / link fusion / link health / errors + diagnostics/recovery. Every other page shows one clickable compact status strip.
+*   **Variable Curves (`#/debug-curve`)**: Upload an ELF, select RAM/Flash variables, sample at up to 100 Hz over WS-DAP and plot live curves (CSV/PNG export); device-local sampling is capped at **64 series** (C4). See `docs/web-variable-curve.md`.
+*   **Final slim**: no Web OTA/Update page, device-discovery card, first-run guide, online-manual entry or Ozone compatibility (see `docs/feature-flags.md` and the root README).
 *   **Embedded-First Design**: Deploy in single .html file to reduce the number of http connection.
 *   **Designed to be usable on small screen**: Responsive layout that adapts to mobile devices and tablets, with touch-friendly controls and optimized UI elements for small displays.
 
