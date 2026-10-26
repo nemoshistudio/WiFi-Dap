@@ -963,6 +963,12 @@ int wifi_cred_mem_note_success(const char *ssid, const char *password, bool may_
 		bool pass_changed = strncmp(cred.table[idx].password, password,
 		                            BIRDIEBOT_WIFI_PASS_MAX + 1) != 0;
 		bool idx_changed = cred.last_idx != (uint8_t)idx;
+		/* A boot with the same network only refreshes last_success_ts.  If the
+		 * previous timestamp was already persisted, keep this update in RAM:
+		 * writing it on every power-up is pointless flash wear and the previous
+		 * timestamp is still a valid rotation priority.  It is flushed by the
+		 * next real config change or by the normal 300 s debounce. */
+		bool ts_already_persisted = cred.table[idx].last_success_ts != 0;
 		bool flush_now;
 
 		if (pass_changed) {
@@ -984,8 +990,9 @@ int wifi_cred_mem_note_success(const char *ssid, const char *password, bool may_
 		 * If an earlier write failed (dirty), flush the whole table so no
 		 * pending change is lost. */
 		flush_now = pass_changed || idx_changed ||
-		            cred.last_flush_tick == 0 ||
-		            (now - cred.last_flush_tick) >= pdMS_TO_TICKS(BIRDIEBOT_WIFI_CRED_TS_DEBOUNCE_MS);
+		            (!ts_already_persisted && ts != 0) ||
+		            (cred.last_flush_tick != 0 &&
+		             (now - cred.last_flush_tick) >= pdMS_TO_TICKS(BIRDIEBOT_WIFI_CRED_TS_DEBOUNCE_MS));
 		if (flush_now) {
 			bool flush_all = cred.dirty;
 			err = cred_flush_locked(flush_all, flush_all ? -1 : idx);
@@ -996,7 +1003,9 @@ int wifi_cred_mem_note_success(const char *ssid, const char *password, bool may_
 				cred.dirty = true;
 			}
 		} else {
+			/* RAM-only update; no NVS write on this boot. */
 			cred.dirty = true;
+			ESP_LOGD(TAG, "credential ts-only update kept in RAM (flash-wear policy)");
 		}
 	} else if (may_persist) {
 		bool updated = false;
