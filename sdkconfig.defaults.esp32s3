@@ -1258,3 +1258,18 @@ CONFIG_TINYUSB_MODE_DMA=y
 # CONFIG_BIRDIEBOT_SSDP_ENABLE is not set
 # CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE is not set
 # CONFIG_BIRDIEBOT_WEB_HOST_GUARD is not set
+# ---------------------------------------------------------------------------
+# PSRAM (S3 N16R8: 16 MB flash + 8 MB octal PSRAM; Phase 1 keeps the 8 MB flash
+# partition layout and only enables the PSRAM + non-hot/non-DMA migrations.
+# Phase 2 will switch to the 16 MB flash / larger OTA slots.)
+# ---------------------------------------------------------------------------
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+# WiFi/lwIP buffers and DMA descriptors must stay in internal RAM.
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is not set
+# mDNS is a background service: task stack + heap in PSRAM.
+CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
+CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y

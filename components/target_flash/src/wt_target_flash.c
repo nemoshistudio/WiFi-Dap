@@ -29,7 +29,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
-#include "freertos/idf_additions.h" /* xTaskCreatePinnedToCoreWithCaps (C5 PSRAM stacks) */
+#include "freertos/idf_additions.h" /* xTaskCreate*WithCaps (C5/S3 PSRAM stacks) */
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -158,7 +158,8 @@ static esp_err_t tf_worker_start(void)
      * ESP32-C5: the target-flash worker only bit-bangs SWD towards the target
      * (it never writes the C5's own flash), so its stack may live in PSRAM and
      * the internal heap stays available for WiFi/DAP/OTA. */
-#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
     created = xTaskCreatePinnedToCoreWithCaps(
         tf_worker_task, "tf_worker", TF_WORKER_STACK, NULL,
         6 /* above httpd (5), below tcp_server/DAP */, &s_worker, TF_WORKER_CORE,

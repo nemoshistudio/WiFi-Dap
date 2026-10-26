@@ -18,7 +18,8 @@
 /* Bring-up memory accounting: on the single-core ESP32-C5 the internal heap is
  * tight enough that the web server footprint decides whether the DAP task can
  * be created.  Keep the per-stage numbers in the boot log. */
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
 #define WEB_SERVER_LOG_INTERNAL_HEAP(stage)                                   \
 	ESP_LOGI(TAG, "internal heap %-14s free=%u largest=%u", stage,            \
 	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |          \
@@ -133,11 +134,12 @@ void start_webserver(void)
 	 *   = 15.  Keep headroom (20) so re-enabling a switched-off endpoint does
 	 *   not silently drop the last registration (WS/SPA). */
 	config.max_uri_handlers = 20;
-#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
-	/* C5 internal-RAM budget: the httpd task is a low-frequency background
-	 * task (web serving / OTA body receive); its 4 KiB stack can live in
-	 * PSRAM.  Flash writes happen in the OTA worker task (internal stack), not
-	 * here.  Keep the IDF default (internal) on every other target. */
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
+	/* C5/S3 internal-RAM budget: the httpd task is a low-frequency background
+	 * task (web serving / request body receive); its 4 KiB stack can live in
+	 * PSRAM.  Flash writes happen in dedicated internal-stack workers, not
+	 * here.  Other targets keep the IDF default (internal) stack. */
 	config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 #endif
 

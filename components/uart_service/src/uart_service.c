@@ -23,7 +23,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "freertos/idf_additions.h" /* xTaskCreateWithCaps (C5 PSRAM task stacks) */
+#include "freertos/idf_additions.h" /* xTaskCreateWithCaps (C5/S3 PSRAM task stacks) */
 
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
@@ -74,7 +74,8 @@
 static bool s_rx_task_ext_stack;
 static bool s_tx_task_ext_stack;
 
-#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
 #define UART_SERVICE_EXT_STACK_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
 static BaseType_t uart_service_task_create(TaskFunction_t fn, const char *name,

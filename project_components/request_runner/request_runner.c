@@ -9,6 +9,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/idf_additions.h>
+#include <esp_heap_caps.h>
+#include <esp_log.h>
 
 #include <sys/cdefs.h>
 
@@ -47,6 +50,27 @@ _Noreturn void req_send_out_task(void *arg)
 	}
 }
 
+
+/* Web request workers are low-frequency tasks; on the S3 N16R8 PSRAM build
+ * their 4 KiB stacks live in PSRAM to relieve the internal heap.  The tasks are
+ * never deleted (they live for the whole app), so no delete counterpart is
+ * needed; keep the internal-RAM fallback.  C5 behaviour is unchanged (the C5
+ * build keeps its internal stacks for now). */
+static BaseType_t req_create_task(TaskFunction_t fn, const char *name,
+                                  uint32_t stack_depth, UBaseType_t prio)
+{
+#if defined(CONFIG_SPIRAM) && defined(CONFIG_IDF_TARGET_ESP32S3)
+	BaseType_t res = xTaskCreateWithCaps(fn, name, stack_depth, NULL, prio,
+	                                     NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	if (res == pdPASS) {
+		return res;
+	}
+	ESP_LOGW("request_runner", "%s: PSRAM stack unavailable, using internal RAM",
+	         name);
+#endif
+	return xTaskCreate(fn, name, stack_depth, NULL, prio, NULL);
+}
+
 int request_runner_init()
 {
 	BaseType_t res;
@@ -58,8 +82,8 @@ int request_runner_init()
 	send_out_queue = xQueueCreate(4, sizeof(req_task_cb_t *));
 	assert(long_run_queue != NULL && send_out_queue != NULL);
 
-	res = xTaskCreate(req_long_task, "Ltask", 4 * 1024, NULL, 8, NULL);
-	res &= xTaskCreate(req_send_out_task, "send out task", 4 * 1024, NULL, 9, NULL);
+	res = req_create_task(req_long_task, "Ltask", 4 * 1024, 8);
+	res &= req_create_task(req_send_out_task, "send out task", 4 * 1024, 9);
 	assert(res == pdPASS);
 	return 0;
 }

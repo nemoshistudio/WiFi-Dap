@@ -82,7 +82,8 @@ static void curve_ws_init(void)
         return;
     }
     curve_ws_state_init(&s_ws);
-#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
     /* C5 internal-RAM budget: the WebSocket curve push task is a background,
      * low-frequency task (no flash writes, no DMA); its stack lives in PSRAM.
      * Fall back to internal RAM if the PSRAM allocation fails. */

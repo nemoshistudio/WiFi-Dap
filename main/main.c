@@ -158,6 +158,22 @@ void app_main()
 		         esp_get_idf_version());
 	}
 
+	/* PSRAM bring-up diagnostics (C5/S3 PSRAM builds): one line at boot, no
+	 * per-request logging.  heap_largest stays internal-only so the DMA /
+	 * WiFi / lwIP budget is visible after the PSRAM migrations. */
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
+	ESP_LOGI("BIRDIEBOT",
+	         "PSRAM ready: total_free=%u internal_free=%u internal_largest=%u "
+	         "psram_free=%u psram_largest=%u",
+	         (unsigned)esp_get_free_heap_size(),
+	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+	                                                    MALLOC_CAP_8BIT),
+	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+#endif
+
 	assert(memory_pool_init() == 0); // static buffer
 	assert(request_runner_init() == 0);
 	wt_storage_init();
@@ -226,7 +242,8 @@ void app_main()
 	/* Bring-up memory accounting (single-core C5 has a tight internal heap):
 	 * the stage that eats the internal RAM must be visible, because a later
 	 * xTaskCreate/ring allocation failure is silent otherwise. */
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
 #define BIRDIEBOT_LOG_INTERNAL_HEAP(stage)                                   \
 	ESP_LOGI("BIRDIEBOT", "internal heap %-18s free=%u largest=%u",         \
 	         stage,                                                          \
@@ -285,12 +302,13 @@ void app_main()
     }
 #endif
 
-#if defined(CONFIG_IDF_TARGET_ESP32C5) && defined(CONFIG_SPIRAM)
+#if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
+                                defined(CONFIG_IDF_TARGET_ESP32S3))
 	/* UART bridge front task: background/low-frequency with a 4 KiB stack.
-	 * The C5 internal heap is tight (see sdkconfig.defaults.esp32c5), so the
-	 * stack goes to PSRAM (memory policy: only the stack, not the UART driver
-	 * DMA buffers; the task never writes flash).  Fall back to internal RAM if
-	 * the PSRAM allocation fails. */
+	 * On the single-core C5 and on the S3 N16R8 PSRAM build the stack goes to
+	 * PSRAM (memory policy: only the stack, not the UART driver DMA buffers;
+	 * the task never writes flash).  Fall back to internal RAM if the PSRAM
+	 * allocation fails. */
 	{
 		BaseType_t uart_task_ret =
 			xTaskCreateWithCaps(uart_bridge_task, "uart_server", 4096, NULL, 2,
