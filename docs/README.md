@@ -13,6 +13,7 @@
 
 | 读者/目的 | 文档 | 说明 |
 |---|---|---|
+| **新维护者 / 交接** | [PROJECT-HANDOFF.md](PROJECT-HANDOFF.md) | **先读这份**：项目现状、设备/固件、构建/烧录/HIL、已知问题、下一步与禁止事项 |
 | 新用户 / 烧录与使用 | [README_CN.md](../README_CN.md) / [README.md](../README.md) | 项目定位、功能矩阵、引脚、构建烧录、Web UI、调试接入、安全默认、故障排查（已按 final slim 更新） |
 | **当前功能状态 / 恢复** | [feature-flags.md](feature-flags.md) | final slim 移除项（A1/A2/H1/H3/J1/M1/C4、B2/B3/B5）、Kconfig 开关、备份 tag `backup/full-features-2026-10-26`、逐项恢复步骤、资源收益、验证记录 |
 | **Web UI 当前结构** | [web-status-ui.md](web-status-ui.md) | 页面地图（target/status/curve/uart/wifi/about）、`/#/status` 详情页、compact 状态条、数据来源与 HIL 断言 |
