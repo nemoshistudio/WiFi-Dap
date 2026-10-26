@@ -191,8 +191,8 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | host → TDI | `PIN_TDI` | GPIO9 |
 | nTRST | `PIN_nTRST` | GPIO3（C5 自身 JTAG MTDI；USB-JTAG 调试时释放） |
 | nRESET | `PIN_nRESET` | GPIO10（SPI2 FSPICS0，可作普通 GPIO） |
-| UART 桥 TX | `UART_BRIDGE_TX_PIN` | GPIO23（UART1） |
-| UART 桥 RX | `UART_BRIDGE_RX_PIN` | GPIO24（UART1） |
+| UART 桥 TX | `UART_BRIDGE_TX_PIN` | GPIO25（UART1） |
+| UART 桥 RX | `UART_BRIDGE_RX_PIN` | GPIO26（UART1） |
 | LED | — | 无：`HAS_STATUS_LEDS=0`、`HAS_WIFI_LED=0`（宏为 `_`） |
 
 > C5 引脚约束（datasheet §2.3/§2.4）：GPIO13/14 = USB Serial/JTAG（本变体只作
