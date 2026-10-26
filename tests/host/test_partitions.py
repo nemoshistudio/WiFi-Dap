@@ -1,7 +1,7 @@
 """Host tests for the frozen partition tables (Wave 3 / WP-302).
 
 Exercises the parse/assert helpers of ``scripts/check_partitions.py`` against
-the frozen contract ``docs/ota-local-upload.md`` §1 and both CSVs:
+the frozen contract ``docs/archive/removed-features/ota-local-upload.md`` §1 and both CSVs:
 
   * partitions/partitions_8mb_ota.csv   -- S3 8MB dual-OTA (frozen offsets)
   * partitions/partitions_4mb_single.csv -- C3/ESP32 4MB single app (no OTA)
@@ -25,10 +25,10 @@ from pathlib import Path
 import script_loader as sl
 
 cp = sl.load_script("check_partitions")
-OTA_DOC = sl.read_doc("ota-local-upload.md")
+OTA_DOC = sl.read_doc("archive/removed-features/ota-local-upload.md")
 ROOT = sl.ROOT
 
-# Hard-coded copy of the frozen contract (docs/ota-local-upload.md §1.1).
+# Hard-coded copy of the frozen contract (docs/archive/removed-features/ota-local-upload.md §1.1).
 # Kept independent from check_partitions.LAYOUT_* so that a silent change in
 # either the script or the CSV fails this test loudly.
 EXPECTED_8MB = [
@@ -63,7 +63,7 @@ def quiet():
 
 
 def parse_doc_8mb_layout() -> dict[str, tuple[str, str, int, int]]:
-    """Parse the markdown layout table of docs/ota-local-upload.md §1.1."""
+    """Parse the markdown layout table of docs/archive/removed-features/ota-local-upload.md §1.1."""
     row_re = re.compile(
         r"^\|\s*`([a-z0-9_]+)`\s*\|\s*([a-z]+)\s*\|\s*([a-z_0-9]+)\s*\|\s*"
         r"`0x([0-9A-Fa-f]+)`\s*\|\s*`0x([0-9A-Fa-f]+)`",
@@ -124,7 +124,7 @@ class TestFrozenLayouts(unittest.TestCase):
     def test_doc_table_matches_expected_8mb_layout(self) -> None:
         rows = parse_doc_8mb_layout()
         self.assertEqual(len(rows), len(EXPECTED_8MB),
-                         "docs/ota-local-upload.md §1.1 must list all 8MB partitions")
+                         "docs/archive/removed-features/ota-local-upload.md §1.1 must list all 8MB partitions")
         for name, ptype, subtype, offset, size in EXPECTED_8MB:
             self.assertIn(name, rows, f"{name} missing from the contract doc table")
             self.assertEqual(rows[name], (ptype, subtype, offset, size),
