@@ -8,9 +8,9 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | --- | --- | --- |
 | `idf-docker.sh` | 在 `espressif/idf:v5.5.6` 容器里运行 `idf.py`；整 worktree git 目录只读挂载；`--git-probe` 自检 | WP-002 |
 | `build-lock.sh` | `flock` 构建信号量，最多 3 个并发构建，超限自动排队 | WP-002 |
-| `build_all.sh` | 三目标（esp32s3/esp32c3/esp32）一键构建 + 版本/大小汇总 + 分区门禁 | WP-143 |
+| `build_all.sh` | 默认三目标（esp32s3/esp32c3/esp32）+ C5 opt-in（`-t esp32c5`）一键构建 + 版本/大小汇总 + 分区门禁 | WP-143 |
 | `check_partitions.py` | 分区表冻结校验（含 docker 内 `gen_esp32part.py`）+ app 大小/版本上限 | WP-142 |
-| `check_board_pins.py` | `components/board` 与 `docs/board-pins.md` 契约比对 + 4 板 host 语法检查 | WP-143 |
+| `check_board_pins.py` | `components/board` 与 `docs/board-pins.md` 契约比对 + 5 板 host 语法检查 | WP-143 |
 | `gen_web_assets.sh` | `web/dist-gz`/`web/dist` → 暂存 + hash + `web_version.txt`；`--install` 才显式写入 `project_components/html/` | WP-143 |
 | `release_local.sh` | 本地发布包（app/bootloader/ptable/合并 bin + gz + SHA256SUMS），**不推送** | WP-143 |
 | `check-version-string.sh` | 版本字符串校验（release 拒绝 `-dirty`/开发后缀） | WP-143 |
@@ -32,11 +32,14 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 docker pull espressif/idf:v5.5.6
 ```
 
-## 推荐入口：一键三目标构建
+## 推荐入口：一键构建（默认三目标 + C5 opt-in）
 
 ```bash
-# 全量（S3 8MB + C3 4MB + ESP32 4MB；set-target + build + 分区门禁）
+# 默认全量（S3 8MB + C3 4MB + ESP32 4MB；set-target + build + 分区门禁）
 scripts/build_all.sh
+
+# C5 opt-in（Wi-Fi-only；真机验证，但不在默认矩阵/发布目标中，需显式 -t esp32c5）
+scripts/build_all.sh -t esp32c5
 
 # 干净重建 / 只构建 S3 / 指定编译并发
 scripts/build_all.sh --clean
@@ -52,7 +55,7 @@ scripts/build_all.sh -t esp32s3 --release
 §2.2/§2.5），打印版本与 .bin 大小汇总，并跑一次 `check_partitions.py --require-bin`。
 
 > 注意：ESP-IDF 默认把每个 `-B` 目录的 sdkconfig 都写到工程根 `sdkconfig`，
-> 三目标连续构建会互相覆盖。`build_all.sh` 显式传
+> 默认三目标连续构建会互相覆盖。`build_all.sh` 显式传
 > `-D SDKCONFIG=build/<target>/sdkconfig` 隔离；手工构建也请照做。
 
 ## idf-docker.sh
@@ -144,13 +147,13 @@ python3 scripts/check_partitions.py --skip-layout     # 只查 app 大小/内嵌
 ## 板级契约校验：check_board_pins.py
 
 ```bash
-python3 scripts/check_board_pins.py          # 引脚/LED/UART/默认值 + 4 板 gcc 语法检查
+python3 scripts/check_board_pins.py          # 引脚/LED/UART/默认值 + 5 板 gcc 语法检查
 python3 scripts/check_board_pins.py -v       # 打印每个匹配到的宏
 ```
 
 解析 `docs/board-pins.md` §3/§4 的契约表，用 `gcc -E -dM` 取
 `components/board/boards/*.h` 实际宏值逐项比对（PIN_*、`BIRDIEBOT_BOARD_HAS_*_LED`、
-UART 实例号、board/target 身份、1346/115200/1MHz 默认值），并复跑文档 §8.1 的
+UART 实例号、board/target 身份、1346/115200/2MHz 默认值），并复跑文档 §8.1 的
 host 语法检查。只改 `components/board/**` 或文档表导致不一致时会失败。
 
 ## Web 资源：gen_web_assets.sh
@@ -403,7 +406,7 @@ python3 scripts/check_board_pins.py
 python3 scripts/check_partitions.py
 python3 scripts/check_partitions.py --skip-layout
 
-# 3) 一键三目标构建 + 版本/大小汇总 + 门禁
+# 3) 一键构建（默认三目标；C5 opt-in 用 -t esp32c5）+ 版本/大小汇总 + 门禁
 scripts/build_all.sh
 
 # 4) Web 资产（web/build.sh 之后）：暂存 -> 校验 ->（按需显式安装）

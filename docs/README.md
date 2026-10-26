@@ -15,6 +15,7 @@
 |---|---|---|
 | **新维护者 / 交接** | [PROJECT-HANDOFF.md](PROJECT-HANDOFF.md) | **先读这份**：项目现状、设备/固件、构建/烧录/HIL、已知问题、下一步与禁止事项 |
 | 新用户 / 烧录与使用 | [README_CN.md](../README_CN.md) / [README.md](../README.md) | 项目定位、功能矩阵、引脚、构建烧录、Web UI、调试接入、安全默认、故障排查（已按 final slim 更新） |
+| **离线 HTML 手册** | [manual/index.html](manual/index.html)（快速上手）/ [manual/manual.html](manual/manual.html)（完整手册）/ [manual/developer.html](manual/developer.html)（开发者附录） | 三本独立离线静态手册，浏览器直接打开；**不随固件发布、Web UI 无入口**（B5 已移除在线手册入口） |
 | **当前功能状态 / 恢复** | [feature-flags.md](feature-flags.md) | final slim 移除项（A1/A2/H1/H3/J1/M1/C4、B2/B3/B5）、Kconfig 开关、备份 tag `backup/full-features-2026-10-26`、逐项恢复步骤、资源收益、验证记录 |
 | **Web UI 当前结构** | [web-status-ui.md](web-status-ui.md) | 页面地图（target/status/curve/uart/wifi/about）、`/#/status` 详情页、compact 状态条、数据来源与 HIL 断言 |
 | **历史归档** | [archive/README.md](archive/README.md) / [archive/removed-features/README.md](archive/removed-features/README.md) | 已移除功能的历史契约/清单/旧任务简报（OTA、discover、SSDP、Ozone、引导等）与按日期归档的验证报告；**仅作证据，不是当前功能** |
@@ -44,7 +45,7 @@
 | [wifi-credential-memory.md](wifi-credential-memory.md) | Wi-Fi 多凭据记忆：NVS schema（`wt_nvs/wifi_cred`）、轮换算法、AP SSID 规则、JSON cmd 11–14 | `project_components/wifi_manager/`（`wifi_credential.*`、`wifi_api_json.c`）、`web/src/views/Wifi.vue` |
 | [versioning.md](versioning.md) | 固件 semver / 协议版本 / Web UI 版本的唯一来源、注入机制、运行时暴露、握手与发布门禁 | `cmake/version.cmake`、`project_components/wt_common/wt_protocol_version.h`、`web/scripts/gen-env.mjs`、`scripts/check-release-versions.sh` |
 | [i18n-keys.md](i18n-keys.md) | Web UI i18n key 契约（zh/en 当前 947 key）、命名规范、禁止硬编码文案、检查脚本 | `web/src/locales/**`、`web/scripts/check-i18n.mjs`、`web/build.sh` |
-| [board-pins.md](board-pins.md) | 板级引脚与硬件默认值唯一契约（4 块板、LED 缺失约定、UART 桥/默认时钟/端口、板选择方式；C5 UART1 TX=GPIO25/RX=GPIO26） | `components/board/`、`components/DAP/`、`components/uart_tcp_bridge/`、`scripts/check_board_pins.py` |
+| [board-pins.md](board-pins.md) | 板级引脚与硬件默认值唯一契约（5 块板、LED 缺失约定、UART 桥/默认时钟/端口、板选择方式；C5 UART1 TX=GPIO25/RX=GPIO26） | `components/board/`、`components/DAP/`、`components/uart_tcp_bridge/`、`scripts/check_board_pins.py` |
 | [merge-map.md](merge-map.md) | W0 参考快照清单、三方合并基准（base/A/C/D）、A→C 路径映射、关键差异与统计、合并/对比命令 | 合并审查与 Wave-1 任务拆分（历史依据；日常开发不需要读） |
 
 > **已移出冻结契约表**：[ota-local-upload.md](archive/removed-features/ota-local-upload.md)
@@ -133,6 +134,7 @@
 | 文档 | 负责人/来源 | 状态 |
 |---|---|---|
 | 根 `README.md` / `README_CN.md` | 文档 | ✅ final slim 已更新（功能矩阵/Web UI/安全/故障排查/链接） |
+| [manual/index.html](manual/index.html) / [manual/manual.html](manual/manual.html) / [manual/developer.html](manual/developer.html)（离线 HTML 手册） | 文档 | ✅ 已入库（三本独立静态手册；按 final slim 更新，Web UI 无入口） |
 | `docs/README.md`（本索引） | 文档 | ✅ 本次更新（归档/新文档/历史标记） |
 | [feature-flags.md](feature-flags.md) | 固件/前端/文档 | ✅ 本次补 final 状态、备份 tag、归档路径 |
 | [web-status-ui.md](web-status-ui.md) | 前端/文档 | ✅ 本次新增（/status + compact strip） |

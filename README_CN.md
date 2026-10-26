@@ -48,8 +48,8 @@
 - **定位**：把一块 ESP32-S3（8 MB Flash）变成无线 CMSIS-DAP 调试探针 + 自带 Web UI 的调试小盒子。
 - **调试链路**：USBIP/WinUSB（CMSIS-DAP v2）、elaphureLink（Keil 免驱）、WebSocket-DAP（浏览器工具）三种传输，均走 **TCP 3240**。
 - **管理链路**：内嵌单页 Web UI（Vue 3 + Vite 构建，gzip 后嵌入固件），通过 **HTTP 80** 提供设备状态、Wi-Fi 配置、UART 终端、目标检测/烧录、变量曲线与版本信息。**final slim 构建无 Web OTA / Update 页**，固件更新走 USB-JTAG / OpenOCD / UART0 ROM 下载（见 [§4.5](#45-首次烧录esp32-s3-8-mb) 与 [§6](#6-web-管理面板)）。
-- **发布目标**：**ESP32-S3 8 MB**（默认板 `BOARD_ZXR_DAP_S3`，双槽分区布局）。ESP32-C3 / ESP32（4 MB）仅做**编译验收**（单 app 分区、未做硬件验证）。
-- **ESP32-C5 变体**：IDF **v5.5.6**、**仅编译验收、Wi-Fi-only**（`BOARD_GENERIC_C5`，8 MB 双槽分区布局）。C5 **无 USB-OTG**，物理上不可能做 USB-NCM/有线 DAP；保留 Wi-Fi USBIP + Web/曲线/UART，通过内置 USB Serial/JTAG + OpenOCD 刷写/调试；UART1 桥引脚为 **TX=GPIO25 / RX=GPIO26**（115200 回环实测通过）。见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)。
+- **发布目标**：**ESP32-S3 8 MB**（默认板 `BOARD_WIFI_DAP_S3`，双槽分区布局）。ESP32-C3 / ESP32（4 MB）仅做**编译验收**（单 app 分区、未做硬件验证）。
+- **ESP32-C5 变体**：IDF **v5.5.6**、**真机验证（非发布目标）、Wi-Fi-only**（`BOARD_GENERIC_C5`，8 MB 双槽分区布局）。C5 **无 USB-OTG**，物理上不可能做 USB-NCM/有线 DAP；保留 Wi-Fi USBIP + Web/曲线/UART，通过内置 USB Serial/JTAG + OpenOCD 刷写/调试；UART1 桥引脚为 **TX=GPIO25 / RX=GPIO26**（115200 回环实测通过）。见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)。
 - **final slim（2026-10-26）移除**：Web OTA/Update 页与端点、设备发现卡 + `GET /api/discover`、SSDP/UPnP、首次使用引导、在线手册入口、Ozone 兼容 PoC。分区表、回滚确认与 OTA 组件源码保留；恢复方式：tag `backup/full-features-2026-10-26` + [docs/feature-flags.md](docs/feature-flags.md)。更早移除：ESP8266 支持、KCP 实验传输、corsacOTA（3241）、Widget 仪表盘。
 
 ---
@@ -58,13 +58,14 @@
 
 | 类别 | 功能 | 状态 | 说明 |
 |---|---|---|---|
-| 目标芯片 | ESP32-S3 | ✅ 硬件验证目标 | 8 MB Flash，默认板 `BOARD_ZXR_DAP_S3`，双槽分区布局（slim 不暴露 Web OTA） |
+| 目标芯片 | ESP32-S3 | ✅ 硬件验证目标 | 8 MB Flash，默认板 `BOARD_WIFI_DAP_S3`，双槽分区布局（slim 不暴露 Web OTA） |
 | 目标芯片 | ESP32-C3 / ESP32 | 🧪 仅编译 | 4 MB 单 app 分区，无 OTA 分区，未做硬件验证 |
-| 目标芯片 | ESP32-C5 | 🧪 仅编译、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；未做硬件验证（除实验室 bring-up 记录） |
+| 目标芯片 | ESP32-C5 | ✅ 真机验证（非发布目标）、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；实验室 bring-up + final slim HIL 有记录（非发布目标） |
 | 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，引脚见 [docs/board-pins.md](docs/board-pins.md)，默认 SWD 时钟 **2 MHz** |
 | 目标烧录 | Web 直接烧录 / STM32 识别 | ✅ F4/H7 实板验证 | 浏览器上传 `.bin`/`.elf`/`.hex`/`.srec`（前端转裸镜像），ESP32 经 SWD 流式写入（扇区擦除、x64/x32、SHA-256 校验 + SWD 复位）；**全 STM32 系列识别**（DEV_ID 表）；见 [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | 传输性能 | USBIP/DAP 调优 | ✅ | A3：Wi-Fi 下 64 KB 读约 43 KiB/s（延迟受限）；目标烧录时暂停 UART 桥，Wi-Fi/HTTP 保持在线 |
 | USB 传输 | USBIP / WinUSB | ✅ | CMSIS-DAP v2，TCP **3240**；Windows 推荐 usbip-win 0.3.0 `attach_ude` |
+| USB 传输 | USB-NCM（S3 有线） | ✅ | 设备固定 IP **192.168.7.1/24** + 内置 DHCP；主机：`usbip attach -r 192.168.7.1 -b 1-1`（TCP 3240 不变）；**与 USB-JTAG/USJ 互斥**（同一 USB-OTG PHY；S3 NCM 构建关闭 USJ 次级控制台、保留 UART0 控制台） |
 | 工具链 | OpenOCD / pyOCD / Keil | ✅ | 通过 CMSIS-DAP v2（上游能力）；建议 OpenOCD master 以获得 2.4× 读速（[docs/openocd-master.md](docs/openocd-master.md)） |
 | 免驱传输 | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil 插件或 OpenOCD 直连，TCP **3240**，无需 USBIP 驱动 |
 | 浏览器传输 | WebSocket-DAP（legacy） | ✅（可关） | TCP **3240**，二进制帧 = CMSIS-DAP 命令包；`CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
@@ -87,12 +88,13 @@
 
 | IDF target | 默认 board | 说明 |
 |---|---|---|
-| `esp32s3` | `BOARD_ZXR_DAP_S3` | 默认板，WiFi Dap 实机，8 MB |
+| `esp32s3` | `BOARD_WIFI_DAP_S3` | 默认板，WiFi DAP S3 实机，8 MB |
 | `esp32s3` | `BOARD_GENERIC_S3` | 通用 S3 接线，无状态灯，仅编译/参考 |
 | `esp32c3` | `BOARD_GENERIC_C3` | 仅编译 |
+| `esp32c5` | `BOARD_GENERIC_C5` | Wi-Fi-only，真机验证（非发布目标；IDF v5.5.6；无 USB-OTG/NCM） |
 | `esp32` | `BOARD_GENERIC_ESP32` | 仅编译 |
 
-默认板 `BOARD_ZXR_DAP_S3` 关键引脚：
+默认板 `BOARD_WIFI_DAP_S3` 关键引脚：
 
 | 功能 | 引脚 | 备注 |
 |---|---|---|
@@ -135,7 +137,7 @@ scripts/build_all.sh
 scripts/build_all.sh -t esp32s3
 scripts/build_all.sh --clean -t esp32s3
 
-# ESP32-C5（Wi-Fi-only、compile-only；C5 为 opt-in，不在默认矩阵）
+# ESP32-C5（Wi-Fi-only、真机验证/非发布目标；C5 为 opt-in，不在默认矩阵）
 scripts/build_all.sh -t esp32c5
 ```
 
@@ -160,7 +162,7 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 |---|---|---|---|
 | ESP32-S3（8 MB，发布） | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | bootloader + ptable@0x8000 + nvs 24K + phy 4K + otadata 8K + `ota_0` 3M@0x20000 + `ota_1` 3M@0x320000 + wt_nvs 64K + coredump 64K | ✅ 双槽 + 回滚 |
 | ESP32-C3 / ESP32（4 MB） | [`partitions/partitions_4mb_single.csv`](partitions/partitions_4mb_single.csv) | nvs + phy + `factory` 3.75M + wt_nvs + coredump | ❌ 无 OTA |
-| ESP32-C5（8 MB，Wi-Fi-only） | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | 与 S3 相同的 8 MB 双槽布局 | ✅ 双槽 + 回滚布局（slim 无 Web OTA UI/端点；当前仅编译验收） |
+| ESP32-C5（8 MB，Wi-Fi-only） | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | 与 S3 相同的 8 MB 双槽布局 | ✅ 双槽 + 回滚布局（slim 无 Web OTA UI/端点；真机验证，非发布目标） |
 
 约束细节（app 上限、otadata、回滚语义）属完整功能构建历史契约，见 [归档 ota-local-upload.md §1](docs/archive/removed-features/ota-local-upload.md)；slim 的端点/UI 移除与恢复方式见 [docs/feature-flags.md](docs/feature-flags.md)。
 
@@ -284,7 +286,7 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 ### 7.4 OpenOCD / pyOCD / Keil
 
-设备对主机表现为标准 **CMSIS-DAP v2** 探针（SWD/JTAG），OpenOCD、pyOCD、Keil 等按 CMSIS-DAP 选型即可。DAP 默认 SWD 时钟为 **1 MHz**（`BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ`，见 [docs/board-pins.md §5](docs/board-pins.md)），高时钟由调试器侧选择。
+设备对主机表现为标准 **CMSIS-DAP v2** 探针（SWD/JTAG），OpenOCD、pyOCD、Keil 等按 CMSIS-DAP 选型即可。DAP 默认 SWD 时钟为 **2 MHz**（`BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ`，见 [docs/board-pins.md §5](docs/board-pins.md)），高时钟由调试器侧选择。
 
 ---
 
@@ -387,8 +389,8 @@ USBIP 与 elaphureLink 没有单独开关（3240 端口保持监听）；如不�
 - 升级到 **ESP-IDF 5.5.6**，按组件拆分（`components/` + `project_components/`），板级引脚抽象为 `components/board`（`BOARD_*` + Kconfig，去掉按 target 写死的引脚分支）。
 - 新增 **Web UI + JSON/WS 协议 v1**（[docs/protocol.md](docs/protocol.md)）、Wi-Fi 多凭据记忆、浏览器本地 OTA（8 MB 双槽 + 回滚；**final slim 已移除**，见 [docs/feature-flags.md](docs/feature-flags.md)）、可选 Web 鉴权、SSDP/mDNS（SSDP **final slim 已移除**）、coredump、UART service/DataFlow 数据面。
 - 保留并修复上游 DAP 代理层（USBIP / elaphureLink / legacy WebSocket-DAP）：DAP ring buffer 生命周期归 DAP 任务、socket fd 泄漏修复、错误路径处理等。
-- 默认值调整：SWD 默认时钟 1 MHz、UART 桥 1346/115200、AP SSID `WiFi-Dap-XXXX`、移除 ESP8266/KCP/corsacOTA(3241)。
-- 默认板 `BOARD_ZXR_DAP_S3`；C3/ESP32 仅编译验收。
+- 默认值调整：SWD 默认时钟 **2 MHz**（v1.0.0 曾为 1 MHz）、UART 桥 1346/115200、AP SSID `WiFi-Dap-XXXX`、移除 ESP8266/KCP/corsacOTA(3241)。
+- 默认板 `BOARD_WIFI_DAP_S3`（"WiFi DAP S3"）；C3/ESP32 仅编译验收。
 
 ---
 

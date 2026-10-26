@@ -50,8 +50,8 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 - **What it is**: an ESP32-S3 (8 MB flash) turned into a wireless CMSIS-DAP probe plus a self-hosted Web dashboard.
 - **Debug transports**: USBIP/WinUSB (CMSIS-DAP v2), elaphureLink (driver-free Keil), and WebSocket-DAP (browser tools) — all on **TCP 3240**.
 - **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**: device status, Wi-Fi setup, UART terminal, target detection/flashing, variable curves and version info. **The final slim build has no Web OTA / Update page**; firmware updates use USB-JTAG, OpenOCD or UART0 ROM download (see [§4.5](#45-first-flash-esp32-s3-8-mb) and [§6](#6-web-ui)).
-- **Release target**: **ESP32-S3 8 MB** (default board `BOARD_ZXR_DAP_S3`, dual-slot partition layout). ESP32-C3 / ESP32 (4 MB) are **compile-only**: single-app partitions, not hardware-validated.
-- **ESP32-C5 variant**: **compile-only, Wi-Fi-only** on ESP-IDF **v5.5.6** (`BOARD_GENERIC_C5`, 8 MB dual-slot partition layout). The C5 has **no USB-OTG**, so USB-NCM / wired DAP is physically impossible; it keeps Wi-Fi USBIP + Web/curve/UART and is flashed/debugged through its built-in USB Serial/JTAG (OpenOCD). UART1 bridge pins are **TX=GPIO25 / RX=GPIO26**. See [docs/esp32-c5-port.md](docs/esp32-c5-port.md).
+- **Release target**: **ESP32-S3 8 MB** (default board `BOARD_WIFI_DAP_S3`, dual-slot partition layout). ESP32-C3 / ESP32 (4 MB) are **compile-only**: single-app partitions, not hardware-validated.
+- **ESP32-C5 variant**: **hardware-validated (non-release target), Wi-Fi-only** on ESP-IDF **v5.5.6** (`BOARD_GENERIC_C5`, 8 MB dual-slot partition layout). The C5 has **no USB-OTG**, so USB-NCM / wired DAP is physically impossible; it keeps Wi-Fi USBIP + Web/curve/UART and is flashed/debugged through its built-in USB Serial/JTAG (OpenOCD). UART1 bridge pins are **TX=GPIO25 / RX=GPIO26**. See [docs/esp32-c5-port.md](docs/esp32-c5-port.md).
 - **Removed in the final slim build (2026-10-26)**: Web OTA/Update page and endpoints, device discovery card + `GET /api/discover`, SSDP/UPnP, first-run guided flow, online-manual entry, Ozone compatibility PoC. Partition tables, rollback confirmation and the OTA component source are kept; restore path: tag `backup/full-features-2026-10-26` + [docs/feature-flags.md](docs/feature-flags.md). Also removed earlier: ESP8266 support, experimental KCP transport, corsacOTA (port 3241), Widget dashboard.
 
 ---
@@ -60,13 +60,14 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 
 | Category | Feature | Status | Notes |
 |---|---|---|---|
-| SoC | ESP32-S3 | ✅ hardware target | 8 MB flash, default board `BOARD_ZXR_DAP_S3`, dual-slot partition layout (Web OTA not exposed in slim) |
+| SoC | ESP32-S3 | ✅ hardware target | 8 MB flash, default board `BOARD_WIFI_DAP_S3`, dual-slot partition layout (Web OTA not exposed in slim) |
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA partitions, not hardware-validated |
-| SoC | ESP32-C5 | 🧪 compile-only, Wi-Fi-only | ESP-IDF **v5.5.6**, 8 MB dual-slot layout, **no USB-OTG/NCM**; Wi-Fi USBIP + Web/curve/UART; UART1 bridge GPIO25/26; no Web OTA in slim; flashed via built-in USB Serial/JTAG + OpenOCD; not hardware-validated (except the lab bring-up records) |
+| SoC | ESP32-C5 | ✅ hardware-validated (non-release target), Wi-Fi-only | ESP-IDF **v5.5.6**, 8 MB dual-slot layout, **no USB-OTG/NCM**; Wi-Fi USBIP + Web/curve/UART; UART1 bridge GPIO25/26; no Web OTA in slim; flashed via built-in USB Serial/JTAG + OpenOCD; lab bring-up + final-slim HIL recorded (not a release target) |
 | Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
 | Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`/`.elf`/`.hex`/`.srec` (front-end converts to a raw image); ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
 | USB transport | USBIP / WinUSB | ✅ | CMSIS-DAP v2 on TCP **3240**; Windows: usbip-win 0.3.0 `attach_ude` |
+| USB transport | USB-NCM (S3 wired) | ✅ | Fixed device IP **192.168.7.1/24** with built-in DHCP server; host: `usbip attach -r 192.168.7.1 -b 1-1` (TCP 3240 unchanged); **mutually exclusive with USB-JTAG/USJ** (same USB-OTG PHY; the S3 NCM build disables the USJ secondary console and keeps the UART0 console) |
 | Toolchains | OpenOCD / pyOCD / Keil | ✅ | Via CMSIS-DAP v2; **use OpenOCD master for 2.4× faster reads** (see [docs/openocd-master.md](docs/openocd-master.md)) |
 | Driver-free | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil plugin or OpenOCD, TCP **3240**, no USBIP driver required |
 | Browser transport | WebSocket-DAP (legacy) | ✅ (can disable) | TCP **3240**, binary frames = CMSIS-DAP command packets; `CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
@@ -89,13 +90,13 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 
 | IDF target | Default board | Notes |
 |---|---|---|
-| `esp32s3` | `BOARD_ZXR_DAP_S3` | Default board, WiFi Dap hardware, 8 MB |
+| `esp32s3` | `BOARD_WIFI_DAP_S3` | Default board, WiFi DAP S3 hardware, 8 MB |
 | `esp32s3` | `BOARD_GENERIC_S3` | Generic S3 wiring, no status LEDs, compile/reference only |
 | `esp32c3` | `BOARD_GENERIC_C3` | Compile-only |
-| `esp32c5` | `BOARD_GENERIC_C5` | Compile-only, Wi-Fi-only (IDF v5.5.6; no USB-OTG/NCM) |
+| `esp32c5` | `BOARD_GENERIC_C5` | Wi-Fi-only, hardware-validated (non-release target; IDF v5.5.6; no USB-OTG/NCM) |
 | `esp32` | `BOARD_GENERIC_ESP32` | Compile-only |
 
-Key pins of the default `BOARD_ZXR_DAP_S3`:
+Key pins of the default `BOARD_WIFI_DAP_S3`:
 
 | Function | Pin | Notes |
 |---|---|---|
@@ -138,7 +139,7 @@ scripts/build_all.sh
 scripts/build_all.sh -t esp32s3
 scripts/build_all.sh --clean -t esp32s3
 
-# ESP32-C5 (Wi-Fi-only, compile-only; C5 is opt-in, not in the default matrix)
+# ESP32-C5 (Wi-Fi-only, hardware-validated, non-release target; C5 is opt-in, not in the default matrix)
 scripts/build_all.sh -t esp32c5
 ```
 
@@ -163,7 +164,7 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 |---|---|---|---|
 | ESP32-S3 (8 MB, release) | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | bootloader + ptable@0x8000 + nvs 24K + phy 4K + otadata 8K + `ota_0` 3M@0x20000 + `ota_1` 3M@0x320000 + wt_nvs 64K + coredump 64K | ✅ dual slot + rollback |
 | ESP32-C3 / ESP32 (4 MB) | [`partitions/partitions_4mb_single.csv`](partitions/partitions_4mb_single.csv) | nvs + phy + `factory` 3.75M + wt_nvs + coredump | ❌ no OTA |
-| ESP32-C5 (8 MB, Wi-Fi-only) | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | same 8 MB dual-slot layout as S3 | ✅ dual slot + rollback layout (Web OTA UI/endpoint removed in slim; compile-only today) |
+| ESP32-C5 (8 MB, Wi-Fi-only) | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | same 8 MB dual-slot layout as S3 | ✅ dual slot + rollback layout (Web OTA UI/endpoint removed in slim; hardware-validated, non-release target) |
 
 App-size limits, otadata rules and rollback semantics are historical full-build contract details: [archived ota-local-upload.md §1](docs/archive/removed-features/ota-local-upload.md) (partitions/rollback code is retained in slim).
 
@@ -287,7 +288,7 @@ Windows binds WinUSB automatically through WCID / MS OS 2.0 descriptors; the pro
 
 ### 7.4 OpenOCD / pyOCD / Keil
 
-The device presents itself as a standard **CMSIS-DAP v2** probe (SWD/JTAG); select CMSIS-DAP in OpenOCD, pyOCD or Keil. The default SWD clock is **1 MHz** (`BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ`, see [docs/board-pins.md §5](docs/board-pins.md)); higher clocks are chosen by the host tool.
+The device presents itself as a standard **CMSIS-DAP v2** probe (SWD/JTAG); select CMSIS-DAP in OpenOCD, pyOCD or Keil. The default SWD clock is **2 MHz** (`BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ`, see [docs/board-pins.md §5](docs/board-pins.md)); higher clocks are chosen by the host tool.
 
 ---
 
@@ -390,8 +391,8 @@ What this repository (WiFi Dap) changes:
 - Upgraded to **ESP-IDF 5.5.6** and componentized (`components/` + `project_components/`); board pins abstracted into `components/board` (`BOARD_*` + Kconfig, no per-target pin branches elsewhere).
 - Added the **Web UI + JSON/WS protocol v1** ([docs/protocol.md](docs/protocol.md)), multi-credential Wi-Fi memory, browser-local OTA (8 MB dual slot + rollback; **removed in final slim**, see [docs/feature-flags.md](docs/feature-flags.md)), optional Web auth, SSDP/mDNS (SSDP **removed in final slim**), coredump, and the UART service/DataFlow data plane.
 - Kept and hardened the upstream DAP proxy layer (USBIP / elaphureLink / legacy WebSocket-DAP): ring-buffer lifecycle owned by the DAP task, socket fd leak fixes, error-path handling, etc.
-- Changed defaults: SWD clock 1 MHz, UART bridge 1346/115200, AP SSID `WiFi-Dap-XXXX`; removed ESP8266/KCP/corsacOTA (3241).
-- Default board `BOARD_ZXR_DAP_S3`; C3/ESP32 compile-only.
+- Changed defaults: SWD clock **2 MHz** (was 1 MHz in v1.0.0), UART bridge 1346/115200, AP SSID `WiFi-Dap-XXXX`; removed ESP8266/KCP/corsacOTA (3241).
+- Default board `BOARD_WIFI_DAP_S3` ("WiFi DAP S3"); C3/ESP32 compile-only.
 
 ---
 

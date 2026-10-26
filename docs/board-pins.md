@@ -8,9 +8,9 @@
 见 `analysis/03-fork-build.md` §2.3/§4）。
 
 - 组件：`components/board/`（IDF5 `idf_component_register`，header-only + 极小 `src/birdiebot_board.c`）
-- 默认板：`BOARD_ZXR_DAP_S3`
+- 默认板：`BOARD_WIFI_DAP_S3`（可读名 `WiFi DAP S3`，板文件 `board_wifi_dap_s3.h`）
 - 关联：WP-101（DAP_config 引脚走 board 头）、WP-114（UART TCP 桥）、WP-007（G0 三目标构建）
-- 状态：初版，引脚值沿用 A（旧 fork `zxr_dap`）实测配置 + C 树通用值；**上板前需按实际硬件复核**（集成计划 §5.2 ⚠）
+- 状态：初版，引脚值沿用 A（旧 fork `zxr_dap`；旧名，2026-10-27 已更名）实测配置 + C 树通用值；**上板前需按实际硬件复核**（集成计划 §5.2 ⚠）
 
 ---
 
@@ -22,30 +22,30 @@ Kconfig 菜单位置：
 idf.py menuconfig
   -> WiFi Dap board configuration
        -> Target board
-            ( ) BOARD_ZXR_DAP_S3   (default, ESP32-S3 WiFi Dap)
-            ( ) BOARD_GENERIC_S3
-            ( ) BOARD_GENERIC_C3
-            ( ) BOARD_GENERIC_C5   (compile-only, ESP32-C5)
-            ( ) BOARD_GENERIC_ESP32
+            ( ) BOARD_WIFI_DAP_S3   (default, WiFi Dap ESP32-S3 DAP)
+            ( ) BOARD_GENERIC_S3    (upstream generic ESP32-S3 wiring)
+            ( ) BOARD_GENERIC_C3    (compile-only, ESP32-C3)
+            ( ) BOARD_GENERIC_ESP32 (compile-only, ESP32)
+            ( ) BOARD_GENERIC_C5    (Wi-Fi-only, ESP32-C5)
 ```
 
 Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kconfig`）：
 
 | IDF target | 默认 board | 可选 board |
 |---|---|---|
-| `esp32s3` | `BIRDIEBOT_BOARD_ZXR_DAP_S3` | `..._ZXR_DAP_S3` / `..._GENERIC_S3` |
+| `esp32s3` | `BIRDIEBOT_BOARD_WIFI_DAP_S3` | `..._WIFI_DAP_S3` / `..._GENERIC_S3` |
 | `esp32c3` | `BIRDIEBOT_BOARD_GENERIC_C3` | `..._GENERIC_C3` |
 | `esp32` | `BIRDIEBOT_BOARD_GENERIC_ESP32` | `..._GENERIC_ESP32` |
 | `esp32c5` | `BIRDIEBOT_BOARD_GENERIC_C5` | `..._GENERIC_C5` |
 
-对应 sdkconfig 宏：`CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3=y` 等。
+对应 sdkconfig 宏：`CONFIG_BIRDIEBOT_BOARD_WIFI_DAP_S3=y` 等。
 `components/board/Kconfig` 里用 `depends on IDF_TARGET_*` 隐藏了与当前 target
 不匹配的选项；若在 `sdkconfig.defaults.esp32c3` 等处显式指定，请写整名
 （如 `CONFIG_BIRDIEBOT_BOARD_GENERIC_C3=y`）。
 
-> C3 / ESP32 / C5 在本项目只做**编译验收**（集成计划 §5.2；C5 见
-> docs/esp32-c5-port.md），不做硬件验证。C5 板是 **Wi-Fi-only** 变体（该芯片
-> 无 USB-OTG/NCM）。
+> C3 / ESP32 在本项目只做**编译验收**（集成计划 §5.2），不做硬件验证。
+> C5 板已做**真机验证（非发布目标）**（见 docs/esp32-c5-port.md 与
+> docs/hil-gate.md §11），是 **Wi-Fi-only** 变体（该芯片无 USB-OTG/NCM）。
 
 ---
 
@@ -68,7 +68,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | `BIRDIEBOT_UART_BRIDGE_PORT` | 1346（项目级默认） | 替代旧 `wifi_configuration.h` 的 `UART_BRIDGE_PORT` |
 | `UART_BRIDGE_BAUDRATE` | 115200（项目级默认） | 原样兼容 |
 | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ` | 2000000（2MHz，项目级默认，真机验证） | WP-101 映射到 `DAP_DEFAULT_SWJ_CLOCK` |
-| `BIRDIEBOT_BOARD_ID` / `BIRDIEBOT_BOARD_NAME` | 机器名 / 可读名 | 新增；DAP_Info / 启动日志使用 |
+| `BIRDIEBOT_BOARD_ID` / `BIRDIEBOT_BOARD_NAME` | 机器名 / 可读名（默认板：`wifi_dap_s3` / `WiFi DAP S3`） | 新增；DAP_Info / 启动日志使用 |
 | `BIRDIEBOT_BOARD_TARGET` | `"esp32s3"` / `"esp32c3"` / `"esp32"` | 新增；文档/日志用字符串 |
 | `BIRDIEBOT_BOARD_TARGET_ID` | 1=esp32, 2=esp32c3, 3=esp32s3 | 新增；`src/birdiebot_board.c` 做 board/target 一致性检查（warning） |
 | `BIRDIEBOT_BOARD_HAS_STATUS_LEDS` | 0/1，是否有 Connected/Running 灯 | **新增，必须使用**；0 时 LED 宏为 `_` |
@@ -99,10 +99,10 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 
 | board | target | UART 桥实例 | 状态灯 | WiFi 灯 | 用途 |
 |---|---|---|---|---|---|
-| `BOARD_ZXR_DAP_S3` | ESP32-S3 | UART1 | ✅（5/6） | ✅（4） | 默认板，WiFi Dap 实机 |
+| `BOARD_WIFI_DAP_S3` | ESP32-S3 | UART1 | ✅（5/6） | ✅（4） | 默认板，WiFi DAP S3 实机 |
 | `BOARD_GENERIC_S3` | ESP32-S3 | UART1 | ❌ | ❌ | 上游通用 S3 接线（仅编译/参考） |
 | `BOARD_GENERIC_C3` | ESP32-C3 | UART1 | ❌ | ❌ | 仅编译 |
-| `BOARD_GENERIC_C5` | ESP32-C5 | UART1 | ❌ | ❌ | 仅编译；Wi-Fi-only（无 USB-OTG/NCM） |
+| `BOARD_GENERIC_C5` | ESP32-C5 | UART1 | ❌ | ❌ | 真机验证（非发布目标）；Wi-Fi-only（无 USB-OTG/NCM） |
 | `BOARD_GENERIC_ESP32` | ESP32 | UART2 | ❌ | ❌ | 仅编译 |
 
 板文件路径：`components/board/boards/board_<board_id>.h`；
@@ -112,7 +112,11 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 
 ## 4. 各板引脚表
 
-### 4.1 `BOARD_ZXR_DAP_S3`（默认，ESP32-S3，8MB）
+### 4.1 `BOARD_WIFI_DAP_S3`（默认，ESP32-S3，8MB）
+
+> 板身份：`BIRDIEBOT_BOARD_ID="wifi_dap_s3"`、`BIRDIEBOT_BOARD_NAME="WiFi DAP S3"`。
+> 硬件模组为 **N16R8（实为 16 MB Flash）**，但当前 SDK 仍按 **8 MB 分区**（见
+> [PROJECT-HANDOFF.md](PROJECT-HANDOFF.md) §5）；本节标题的 8MB 是**分区口径**。
 
 | 功能 | 宏 | 引脚 | 说明 |
 |---|---|---|---|
@@ -181,7 +185,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 > 文件按新架构只给单线 `PIN_SWDIO_MOSI=13`，`PIN_SWDIO` 是它的别名。若实际使用
 > 双线电路，WP-101 需要复核输入采样路径（或在板文件中先定义 `PIN_SWDIO 12`）。
 
-### 4.5 `BOARD_GENERIC_C5`（ESP32-C5，仅编译）
+### 4.5 `BOARD_GENERIC_C5`（ESP32-C5，真机验证，非发布目标）
 
 | 功能 | 宏 | 引脚 |
 |---|---|---|
@@ -198,7 +202,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 > C5 引脚约束（datasheet §2.3/§2.4）：GPIO13/14 = USB Serial/JTAG（本变体只作
 > console/下载，无 USB-OTG）；GPIO15~18/20~22 = flash/PSRAM；GPIO27 = VDD_SPI
 > （QFN48）；GPIO2/3/7/27/28 为文档列出的 strapping；GPIO25/26 实机作 UART1 回环启动正常；GPIO2~5 为 C5 自身 JTAG。
-> 该板为**编译验收**接线（无 C5 硬件验证），上板前必须按实际板复核；详见
+> 该板已做**真机验证（非发布目标）**，上板前仍建议按实际板复核；详见
 > docs/esp32-c5-port.md。
 
 ---
@@ -207,7 +211,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 
 | 项 | 默认值 | 归属/说明 |
 |---|---|---|
-| 默认 board | `BOARD_ZXR_DAP_S3` | 本组件；Kconfig `BIRDIEBOT_BOARD` |
+| 默认 board | `BOARD_WIFI_DAP_S3` | 本组件；Kconfig `BIRDIEBOT_BOARD` |
 | mDNS 主机名 | `wifi-dap-XXXX.local` | XXXX = STA MAC 最后两个字节（4 位小写十六进制），与 AP SSID `WiFi-Dap-XXXX` 同后缀；见 `wt_mdns_config.c` |
 | AP SSID 前缀 | `WiFi-Dap-` | 后缀为 STA MAC 末 2 字节大写 hex（如 `WiFi-Dap-A1B2`），规则见 WiFi 多凭据契约 |
 | SWD 默认时钟 | **2 MHz** | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ=2000000`；真机 STM32F407 验证稳定；4MHz/10MHz 无额外吞吐收益（USBIP/WiFi 延迟为瓶颈） |
@@ -270,14 +274,14 @@ void board_bringup(void)
 ### 8.1 本地静态验证（无需 IDF，本机即可）
 
 ```bash
-# 默认板（无 sdkconfig 时回退 BOARD_ZXR_DAP_S3）
+# 默认板（无 sdkconfig 时回退 BOARD_WIFI_DAP_S3）
 gcc -fsyntax-only -x c -I components/board/include - <<'EOF'
 #include "birdiebot_board.h"
 int main(void) { return BIRDIEBOT_BOARD_TARGET_ID + BIRDIEBOT_BOARD_HAS_STATUS_LEDS; }
 EOF
 
-# 四块板逐一语法检查（-D 模拟 Kconfig 选择）
-for b in ZXR_DAP_S3 GENERIC_S3 GENERIC_C3 GENERIC_C5 GENERIC_ESP32; do
+# 五块板逐一语法检查（-D 模拟 Kconfig 选择）
+for b in WIFI_DAP_S3 GENERIC_S3 GENERIC_C3 GENERIC_C5 GENERIC_ESP32; do
   gcc -fsyntax-only -x c -DCONFIG_BIRDIEBOT_BOARD_$b \
       -I components/board/include - <<'EOF'
 #include "birdiebot_board.h"
@@ -310,8 +314,9 @@ scripts/idf-docker.sh -C . set-target esp32     && scripts/idf-docker.sh build
 
 | 日期 | 变更 | 作者 |
 |---|---|---|
-| 2026-10-20 | WP-006 初版：4 块板（zxr_dap_s3 默认 + 3 通用）、Kconfig 选择、引脚/默认值契约 | board-scaffold |
+| 2026-10-20 | WP-006 初版：4 块板（zxr_dap_s3 默认 + 3 通用；旧名，2026-10-27 已更名为 wifi_dap_s3）、Kconfig 选择、引脚/默认值契约 | board-scaffold |
+| 2026-10-27 | 默认板更名 `BOARD_ZXR_DAP_S3` → `BOARD_WIFI_DAP_S3`（可读名 `WiFi DAP S3`）；C5 状态改为**真机验证（非发布目标）**；SWD 默认时钟口径统一为 2 MHz | docs-core |
 
 ### WiFi 状态灯
 
-`BIRDIEBOT_BOARD_HAS_WIFI_LED=1` 的板子在 **STA 获取 IP 后**把 `PIN_LED_WIFI_STATUS` 拉高点亮（ZXR DAP S3 = GPIO4），STA 断开时拉低。实现位于 `project_components/wifi_manager/`（`wifi_manager_wifi_led_set`），不占用 Legacy LEDC 通道。
+`BIRDIEBOT_BOARD_HAS_WIFI_LED=1` 的板子在 **STA 获取 IP 后**把 `PIN_LED_WIFI_STATUS` 拉高点亮（WiFi DAP S3 = GPIO4），STA 断开时拉低。实现位于 `project_components/wifi_manager/`（`wifi_manager_wifi_led_set`），不占用 Legacy LEDC 通道。
