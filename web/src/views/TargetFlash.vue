@@ -3,19 +3,8 @@
     <h1 class="page-title">{{ translate('target.title') }}</h1>
     <p class="text-center text-xs bb-muted">{{ translate('target.description') }}</p>
 
-    <!-- P0 dashboard: DAP / WiFi / target / current link + quick entries.
-         Read-only status only; detection is an explicit user click. -->
-    <TargetDashboard
-        :target-info="targetInfo"
-        :detecting="detecting"
-        :detect-error="detectError"
-        :flashing="flashing"
-        :flash-success="phase === 'success'"
-        @detect="onDetect"
-        @goto-flash="scrollToFlash"
-        @open-diagnostics="openDiagnostics"
-    />
-
+    <!-- Detailed device status lives on the dedicated /status page; this page only
+         keeps the target-detect + flash workflow plus the app-wide compact strip. -->
     <el-alert
         class="mt-2"
         type="warning"
@@ -186,7 +175,7 @@
 
     </section>
 
-    <section ref="flashSectionRef" class="bb-card" data-testid="target-flash-actions">
+    <section class="bb-card" data-testid="target-flash-actions">
     <div class="flex flex-wrap gap-2 justify-center">
       <el-button
           type="primary"
@@ -267,25 +256,11 @@
         show-icon
     />
     </section>
-
-    <!-- Diagnostics / recovery (collapsed by default; dashboard + Ctrl+K can open it). -->
-    <section class="bb-card bb-card--diag-toggle" data-testid="diagnostics-toggle-card">
-      <div class="bb-card__head">
-        <div>
-          <h2 class="bb-card__title text-lg">{{ translate('diag.title') }}</h2>
-          <p class="bb-card__hint">{{ translate('diag.subtitle') }}</p>
-        </div>
-        <el-button size="small" data-testid="diagnostics-toggle" @click="toggleDiagnostics">
-          {{ diagnosticsOpen ? translate('common.close') : translate('common.details') }}
-        </el-button>
-      </div>
-    </section>
-    <DiagnosticsPanel v-if="diagnosticsOpen" ref="diagnosticsRef" />
   </div>
 </template>
 
 <script setup lang="ts">
-import {computed, nextTick, onMounted, onUnmounted, ref, shallowRef} from "vue";
+import {computed, onMounted, onUnmounted, ref, shallowRef} from "vue";
 import {ElMessageBox} from "element-plus";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
@@ -311,15 +286,12 @@ import {
   formatDevId,
   parseTargetDetection,
 } from "@/utils/targetProfile";
-import TargetDashboard from "@/components/dashboard/TargetDashboard.vue";
-import DiagnosticsPanel from "@/components/dashboard/DiagnosticsPanel.vue";
 import {onAction} from "@/components/dashboard/actionBus";
 import {
   isTargetStatusAvailable,
+  recordFlashOutcome,
   recordTargetDetection,
   refreshTargetStatus,
-  startLinkPolling,
-  stopLinkPolling,
 } from "@/components/dashboard/dashboardState";
 import {getSwdClock, setSwdClock} from "@/api/apiTarget";
 
@@ -351,13 +323,10 @@ const swdClockBusy = ref(false);
 const swdClockError = ref('');
 
 /* -----------------------------------------------------------------------
- * P0 web platform: dashboard / diagnostics integration.
- * The dashboard itself is read-only; all device actions below stay explicit
- * user clicks (or a command-palette action the user just invoked).
- * --------------------------------------------------------------------- */
-const diagnosticsRef = ref<InstanceType<typeof DiagnosticsPanel> | null>(null);
-const flashSectionRef = ref<HTMLElement | null>(null);
-const diagnosticsOpen = ref(false);
+ * P0 web platform: target detect + flash workflow.
+ * Detailed status/diagnostics live on the dedicated /status page; all device
+ * actions below stay explicit user clicks (or a command-palette action).
+ * ---------------------------------------------------------------------- */
 let offAction: (() => void) | null = null;
 
 let statusTimer = 0;
@@ -748,6 +717,8 @@ async function onStartFlash() {
   }
   resetResultState();
   phase.value = 'flashing';
+  // Shared telemetry: the compact strip / status page show the last flash outcome.
+  recordFlashOutcome('running');
   // 设备端只接收裸镜像：发送转换后的 image（不是源 ELF/HEX 文件）。
   const payload = new Blob([imageBytes.value as BlobPart], {type: 'application/octet-stream'});
   flashHandle = flashTarget(payload, fileSha256.value, {
@@ -763,6 +734,7 @@ async function onStartFlash() {
       flashHandle = null;
       phase.value = 'success';
       result.value = flashResult;
+      recordFlashOutcome('success', '', typeof flashResult.written === 'number' ? flashResult.written : null);
       globalNotify(translate('target.success'), 'success');
     },
     onFailure: (failure) => {
@@ -770,6 +742,7 @@ async function onStartFlash() {
       flashHandle = null;
       phase.value = 'error';
       handleFlashFailure(failure);
+      recordFlashOutcome('error', errorDetail.value || failure.err || '');
     },
   });
 }
@@ -792,41 +765,13 @@ async function onResetTarget() {
 }
 
 /* -------------------------------------------------------------------------
- * Dashboard / diagnostics glue
+ * Target detect / flash glue
  * ---------------------------------------------------------------------- */
 
-function scrollToFlash(): void {
-  void nextTick(() => {
-    flashSectionRef.value?.scrollIntoView({behavior: 'smooth', block: 'start'});
-  });
-}
-
-function scrollToDiagnostics(): void {
-  void nextTick(() => {
-    const el = diagnosticsRef.value?.$el as HTMLElement | undefined;
-    el?.scrollIntoView({behavior: 'smooth', block: 'start'});
-  });
-}
-
-function openDiagnostics(): void {
-  diagnosticsOpen.value = true;
-  scrollToDiagnostics();
-}
-
-function toggleDiagnostics(): void {
-  diagnosticsOpen.value = !diagnosticsOpen.value;
-  if (diagnosticsOpen.value) {
-    scrollToDiagnostics();
-  }
-}
-
 onMounted(() => {
-  // P1-16: first-screen work in parallel - SWD clock (HTTP) + link status poll
-  // (HTTP) + WS WIFI queries (started by the dashboard telemetry on connect).
+  // First-screen work: SWD clock (HTTP) + WS WIFI/system handshakes are started
+  // by the app shell; this page only reads its own clock.
   void loadSwdClock();
-  // One single page-level poll feeds the link-health card and flash progress; it
-  // stops on unmount / WS disconnect instead of several cards polling on their own.
-  startLinkPolling();
   // One-shot actions requested by the command palette (queued until mounted).
   offAction = onAction((action) => {
     switch (action) {
@@ -840,9 +785,6 @@ onMounted(() => {
           void onResetTarget();
         }
         break;
-      case 'diagnostics-open':
-        openDiagnostics();
-        break;
       default:
         break;
     }
@@ -852,7 +794,6 @@ onMounted(() => {
 onUnmounted(() => {
   offAction?.();
   offAction = null;
-  stopLinkPolling();
   stopStatusPolling();
   if (diagnosticsTimer) {
     window.clearTimeout(diagnosticsTimer);

@@ -1,5 +1,5 @@
 <template>
-  <section class="bb-card bb-dash" data-testid="target-dashboard">
+  <section class="bb-card bb-dash" data-testid="status-dashboard">
     <div class="bb-card__head bb-dash__head">
       <div>
         <h2 class="bb-card__title text-lg">{{ translate('dashboard.title') }}</h2>
@@ -138,6 +138,9 @@
         <template v-else>
           <p class="bb-dash__empty">{{ translate('dashboard.targetUnknown') }}</p>
           <p class="bb-muted text-xs">{{ translate('dashboard.targetHint') }}</p>
+          <router-link class="bb-dash__goto" to="/target" data-testid="status-goto-target">
+            {{ translate('dashboard.gotoTarget') }} →
+          </router-link>
         </template>
         <el-alert
             v-if="detectError"
@@ -209,40 +212,13 @@
       <p v-else class="bb-muted text-xs">{{ translate('dashboard.noErrors') }}</p>
     </div>
 
-    <!-- Quick actions -->
-    <div class="bb-dash__actions" data-testid="dashboard-actions">
-      <span class="bb-muted text-xs">{{ translate('dashboard.quickActions') }}</span>
-      <div class="flex flex-wrap gap-2">
-        <el-button
-            type="primary"
-            size="small"
-            :loading="detecting"
-            :disabled="flashing"
-            data-testid="dashboard-detect"
-            @click="emit('detect')"
-        >
-          {{ detecting ? translate('target.detecting') : translate('target.detect') }}
-        </el-button>
-        <el-button size="small" :disabled="flashing" data-testid="dashboard-goto-flash" @click="emit('goto-flash')">
-          {{ translate('dashboard.gotoTarget') }}
-        </el-button>
-        <el-button size="small" data-testid="dashboard-goto-curve" @click="router.push('/debug-curve')">
-          {{ translate('dashboard.gotoCurve') }}
-        </el-button>
-        <el-button size="small" data-testid="dashboard-goto-uart" @click="router.push('/uart')">
-          {{ translate('dashboard.gotoUart') }}
-        </el-button>
-      </div>
-    </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { useRouter } from 'vue-router';
 import { translate } from '@/locales';
 import { ControlEvent } from '@/api';
-import type { TargetInfo } from '@/api/apiTarget';
 import { useWsStore } from '@/stores/websocket';
 import { useSystemStore } from '@/stores/useSystemStore';
 import {
@@ -258,21 +234,18 @@ import {
 } from '@/components/dashboard/dashboardState';
 import LinkHealthCard from '@/components/dashboard/LinkHealthCard.vue';
 
-const props = defineProps<{
-  targetInfo: TargetInfo | null;
-  detecting: boolean;
-  detectError: string;
-  flashing: boolean;
-  flashSuccess: boolean;
-}>();
-
+/**
+ * Read-only status dashboard for the dedicated `/status` page.
+ *
+ * It owns no props: every field comes from the shared `dashboardState`
+ * telemetry (detection recorded by the target page, flash outcome recorded on
+ * flash start/success/failure, WiFi observed by the app-wide module listeners),
+ * so the status page and the compact status strip never run a second poll.
+ */
 const emit = defineEmits<{
-  (e: 'detect'): void;
-  (e: 'goto-flash'): void;
   (e: 'open-diagnostics'): void;
 }>();
 
-const router = useRouter();
 const wsStore = useWsStore();
 const systemStore = useSystemStore();
 const refreshing = ref(false);
@@ -423,16 +396,20 @@ const wifiApSsidText = computed(() => {
   return dashboardState.wifi.apSsid || translate('common.unknown');
 });
 
-/* ---- Target ---- */
+/* ---- Target (shared telemetry; detection is recorded by /target) ---- */
+const targetInfo = computed(() => dashboardState.target.info);
+const detectError = computed(() => dashboardState.target.lastError);
+const flashing = computed(() => dashboardState.flash.phase === 'running');
+const flashSuccess = computed(() => dashboardState.flash.phase === 'success');
 const detectedCandidate = computed(() => {
-  const target = props.targetInfo;
+  const target = targetInfo.value;
   if (!target?.detected) {
     return null;
   }
   const parsed = parseTargetDetection(target);
   return parsed.detected ? parsed : null;
 });
-const autoMatch = computed(() => autoMatchTargetProfile(props.targetInfo));
+const autoMatch = computed(() => autoMatchTargetProfile(targetInfo.value));
 const devIdText = computed(() => {
   const devId = detectedCandidate.value?.devId;
   return typeof devId === 'number' && devId > 0 ? formatDevId(devId) : translate('common.unknown');
@@ -443,7 +420,7 @@ const flashText = computed(() => {
   return text === '-' ? translate('common.unknown') : text;
 });
 const uidWords = computed(() => {
-  const raw = String(props.targetInfo?.uid ?? '')
+  const raw = String(targetInfo.value?.uid ?? '')
       .replace(/^0x/i, '')
       .replace(/[^0-9a-f]/gi, '')
       .toUpperCase();
@@ -563,8 +540,8 @@ const linkHint = computed<string>(() => {
 /* ---- Errors + refresh ---- */
 const errors = computed<string[]>(() => {
   const list: string[] = [];
-  if (props.detectError) {
-    list.push(props.detectError);
+  if (detectError.value) {
+    list.push(detectError.value);
   }
   if (dashboardState.wifi.lastError) {
     list.push(`${translate('diag.wifiError')}: ${dashboardState.wifi.lastError}`);
@@ -780,6 +757,18 @@ async function onRefresh(): Promise<void> {
   margin-top: var(--bb-space-4);
   padding-top: var(--bb-space-3);
   border-top: 1px solid var(--bb-border-subtle);
+}
+
+.bb-dash__goto {
+  display: inline-block;
+  margin-top: var(--bb-space-2);
+  color: var(--bb-accent);
+  font-size: var(--bb-font-size-sm);
+  text-decoration: none;
+}
+
+.bb-dash__goto:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 900px) {

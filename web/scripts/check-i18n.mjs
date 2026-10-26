@@ -24,9 +24,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(root, 'src')
 const LOCALE_DIR = path.join(SRC, 'locales')
 const LOCALES = ['zh', 'en']
-const EXPECTED_TOTAL = 938
+const EXPECTED_TOTAL = 947
 const EXPECTED_BASELINE = 148
-const EXPECTED_ADDED = 790
+const EXPECTED_ADDED = 799
 
 const errors = []
 const warnings = []
@@ -231,7 +231,7 @@ const ADDED_KEYS = [
         'activeOnly', 'currentFunctionOnly', 'sourceLineNoLineTable', 'targetTitle', 'targetRefresh', 'targetDetected', 'targetNotDetected', 'targetConfidence', 'targetProfile', 'targetProfileNone', 'targetMatch', 'targetFlashMismatch', 'targetFlashBeyond', 'verifyButton', 'verifyNeedElf', 'verifyStopFirst', 'verifyRunning', 'verifyNoFrames', 'verifyMismatch', 'wsTransport', 'wsFrames', 'wsDropped', 'wsLatency',
         'presetEmpty', 'presetDefault', 'presetSaved', 'presetApplied', 'presetName', 'presetSave', 'presetSelect', 'presetLoad', 'presetDelete', 'watchAdd', 'watchRemove', 'watchTitle', 'derivedWhileSampling', 'derivedNeedTwo', 'derivedType', 'derivedAdd', 'derivedSub', 'diagCopyFailed', 'diagTitle', 'diagCopied', 'diagCopy', 'diagHint', 'recordNeedSampling', 'recordStarted', 'recordEmpty', 'recordDefault', 'recordSaved', 'recordSaveFailed', 'recordLimit', 'recordLoaded', 'recordLoadFailed', 'recordTitle', 'recordStart', 'recordStop', 'recordName', 'recordSave', 'recordRows', 'recordSelect', 'recordLoad', 'recordDelete', 'recordRefresh', 'playbackExit', 'playbackPause', 'playbackPlay', 'playbackSpeed', 'cursorDeltaTitle', 'cursorHint', 'cursorClear', 'ariaChart', 'groupWeight',
     ]),
-    ...keys('page', ['debugCurve']),
+    ...keys('page', ['debugCurve', 'status']),
     // P0 Web platform (task-54, slimmed 2026-10-26): dashboard / command palette / diagnostics
     ...keys('dashboard', [
         'title', 'subtitle', 'refresh', 'lastUpdated', 'dapTitle', 'wsConnection', 'wsHost',
@@ -240,11 +240,16 @@ const ADDED_KEYS = [
         'wifiModeSta', 'wifiModeOff', 'wifiApOn', 'wifiApSsid', 'wifiDisconnected', 'wifiUnknown',
         'targetTitle', 'targetUnknown', 'targetHint', 'targetModel',
         'linkTitle', 'linkWired', 'linkWifi', 'linkUnknown', 'linkHostname', 'linkWiredHint',
-        'linkWifiHint', 'linkUnknownHint', 'quickActions', 'gotoTarget', 'gotoCurve', 'gotoUart',
+        'linkWifiHint', 'linkUnknownHint', 'gotoTarget',
         'openDiagnostics', 'deviceOfflineHint', 'flashSuccess', 'flashing',
 
         'currentPhysical', 'wiredPreferred', 'wifiLinkNcmAvailable', 'linkAddress', 'wifiGateway', 'ncmState', 'ncmActive', 'ncmInactive', 'ncmNotReported', 'dhcpState', 'dhcpStateInit', 'dhcpStateStarted', 'dhcpStateStopped', 'dhcpError', 'wiredDeviceIp', 'ncmHintOk', 'ncmHintReplug', 'ncmHintUnavailable', 'healthTitle', 'healthOk', 'healthWarn', 'healthError', 'healthUnknown', 'healthRefresh', 'healthRefreshed', 'healthRefreshFailed', 'healthOfflineHint', 'rttTitle', 'rttValue', 'rttStats', 'rttNone', 'rttHint', 'statusEndpoint', 'statusSupported', 'statusUnsupported', 'statusRequestFailed', 'dapLatency', 'dapLatencyValue', 'swdActual', 'swdActualValue', 'heapFreeShort', 'heapLargestShort', 'lastUpdate', 'unknownField', 'lastSeen', 'wifiQualityExcellent', 'wifiQualityGood', 'wifiQualityFair', 'wifiQualityPoor',
         'wifiChannel', 'dapXferCount', 'dapXferLast', 'dapRing',]),
+    ...keys('status', [
+        'subtitle', 'open', 'openHint', 'wifi', 'target', 'lastFlash', 'notDetected',
+        'flashNone', 'flashRunning', 'flashOk', 'flashFail',
+    ]),
+    // 紧凑状态条 + 独立设备状态页（ui/status）
     ...keys('palette', [
         'title', 'placeholder', 'openHint', 'recent', 'pages', 'actions', 'empty', 'footer',
         'actionDetect', 'actionDetectHint', 'actionReset', 'actionResetHint', 'actionCurveToggle',
