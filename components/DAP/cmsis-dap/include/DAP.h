@@ -390,7 +390,8 @@ __STATIC_FORCEINLINE void PIN_DELAY_FAST (void) {
   asm volatile("nop");
 #elif defined CONFIG_IDF_TARGET_ESP32C5
   /* ESP32-C5: same RISC-V fast-GPIO path as C3 (240 MHz CPU instead of
-   * 160 MHz). Compile-only / unverified on hardware: docs/esp32-c5-port.md. */
+   * 160 MHz). Hardware-validated on C5, see docs/esp32-c5-port.md §11 and
+   * docs/hil-gate.md §11. */
   asm volatile("nop");
   asm volatile("nop");
   asm volatile("nop");

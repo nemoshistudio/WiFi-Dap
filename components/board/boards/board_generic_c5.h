@@ -1,9 +1,9 @@
 /**
  * @file board_generic_c5.h
- * @brief Pin map for BOARD_GENERIC_C5 - compile-only ESP32-C5 wiring.
+ * @brief Pin map for BOARD_GENERIC_C5 - Wi-Fi-only ESP32-C5 wiring.
  *
- * Compile-only board in this project (no C5 hardware validation in this
- * branch), see docs/board-pins.md and docs/esp32-c5-port.md. Values follow the
+ * Hardware-validated board (docs/hil-gate.md §11); see docs/board-pins.md and
+ * docs/esp32-c5-port.md. Values follow the
  * C5 SPI2 IO_MUX pin assignment (datasheet Table 2-8 / soc spi_pins.h):
  *
  *   SWCLK  = GPIO6  (SPI2 FSPICLK, P1 - required by the optional SPI backend)
@@ -44,7 +44,7 @@
 #define PIN_nTRST      3
 #define PIN_nRESET     10
 
-/* ---- status LEDs: not populated on this reference wiring (compile-only) ---- */
+/* ---- status LEDs: not populated on this reference wiring ---- */
 #define PIN_LED_CONNECTED   _ /* unused */
 #define PIN_LED_RUNNING     _ /* unused */
 #define PIN_LED_WIFI_STATUS _ /* unused */

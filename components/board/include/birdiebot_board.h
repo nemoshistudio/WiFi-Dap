@@ -5,7 +5,7 @@
  *
  * Board selection is done through Kconfig:
  *   idf.py menuconfig -> "WiFi Dap board configuration" -> "Target board"
- *   default: BIRDIEBOT_BOARD_ZXR_DAP_S3 (ESP32-S3 WiFi Dap)
+ *   default: BIRDIEBOT_BOARD_WIFI_DAP_S3 (ESP32-S3 WiFi Dap)
  *
  * The selected board file (components/board/boards/board_<name>.h) defines the
  * actual pin numbers. All PIN_* names are kept compatible with the old
@@ -62,10 +62,10 @@
 #  include "../boards/board_generic_c5.h"
 #else
 /*
- * CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3 (Kconfig default) or no sdkconfig.h at
+ * CONFIG_BIRDIEBOT_BOARD_WIFI_DAP_S3 (Kconfig default) or no sdkconfig.h at
  * all (host syntax check). Both cases use the default board.
  */
-#  include "../boards/board_zxr_dap_s3.h"
+#  include "../boards/board_wifi_dap_s3.h"
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -170,8 +170,8 @@
 extern "C" {
 #endif
 
-extern const char birdiebot_board_id[];   /* e.g. "zxr_dap_s3" */
-extern const char birdiebot_board_name[]; /* e.g. "ZXR DAP S3" */
+extern const char birdiebot_board_id[];   /* e.g. "wifi_dap_s3" */
+extern const char birdiebot_board_name[]; /* e.g. "WiFi DAP S3" */
 
 #ifdef __cplusplus
 }

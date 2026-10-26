@@ -753,7 +753,7 @@ static void wifi_led_set_on(void)
 }
 
 /* Called from the WiFi/IP event handler: LED on after STA got an IP,
- * off when the STA link is lost. Active level: drive HIGH = on (ZXR S3
+ * off when the STA link is lost. Active level: drive HIGH = on (WiFi DAP S3
  * PIN_LED_WIFI_STATUS = GPIO4). */
 void wifi_manager_wifi_led_set(bool on)
 {

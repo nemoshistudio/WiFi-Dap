@@ -979,8 +979,8 @@ __STATIC_INLINE void DAP_SETUP(void)
    * The drive strength has a significant impact on signal integrity.
    * In actual use, it is necessary to perform signal measurements
    * on the board and select the appropriate drive strength.
-   * (A 2025 fork: 5 mA for esp32c3/esp32s3; ESP32-C5 keeps the same setting
-   *  for the compile-only C5 board, revisit after hardware tests.)
+   * (A 2025 fork: 5 mA for esp32c3/esp32s3; ESP32-C5 keeps the same setting;
+   *  C5 is hardware-validated, see docs/hil-gate.md §11.)
    */
 #if defined CONFIG_IDF_TARGET_ESP32C3 || defined CONFIG_IDF_TARGET_ESP32S3 || \
     defined CONFIG_IDF_TARGET_ESP32C5

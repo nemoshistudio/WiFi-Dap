@@ -37,7 +37,7 @@ DOC = ROOT / "docs/board-pins.md"
 
 # Kconfig symbol suffix -> board id used in the doc headings / board files.
 BOARDS = {
-    "ZXR_DAP_S3": "BOARD_ZXR_DAP_S3",
+    "WIFI_DAP_S3": "BOARD_WIFI_DAP_S3",
     "GENERIC_S3": "BOARD_GENERIC_S3",
     "GENERIC_C3": "BOARD_GENERIC_C3",
     "GENERIC_ESP32": "BOARD_GENERIC_ESP32",
@@ -46,7 +46,7 @@ BOARDS = {
 
 # Expected board identity values (docs/board-pins.md §3/§4).
 IDENTITY = {
-    "ZXR_DAP_S3": dict(id="zxr_dap_s3", target="esp32s3", target_id=3),
+    "WIFI_DAP_S3": dict(id="wifi_dap_s3", target="esp32s3", target_id=3),
     "GENERIC_S3": dict(id="generic_s3", target="esp32s3", target_id=3),
     "GENERIC_C3": dict(id="generic_c3", target="esp32c3", target_id=2),
     "GENERIC_ESP32": dict(id="generic_esp32", target="esp32", target_id=1),
@@ -230,7 +230,7 @@ def check_board(board: str, doc_pins: dict[str, dict[str, str]],
         ok("docs §3 overview agrees with docs §4 and the headers")
 
 
-def check_project_defaults(board: str = "ZXR_DAP_S3") -> None:
+def check_project_defaults(board: str = "WIFI_DAP_S3") -> None:
     print("\n[project-wide defaults]")
     macros = gcc_macros(board)
     for macro, want in (("BIRDIEBOT_UART_BRIDGE_PORT", "1346"),

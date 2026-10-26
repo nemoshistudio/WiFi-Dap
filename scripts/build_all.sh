@@ -9,10 +9,10 @@
 #   esp32s3 : 8MB flash + partitions/partitions_8mb_ota.csv   (release target)
 #   esp32c3 : 4MB flash + partitions/partitions_4mb_single.csv (compile-only)
 #   esp32   : 4MB flash + partitions/partitions_4mb_single.csv (compile-only)
-#   esp32c5 : 8MB flash + partitions/partitions_8mb_ota.csv    (compile-only,
-#             Wi-Fi-only: no USB OTG/NCM; unified ESP-IDF v5.5.6 baseline, image
-#             espressif/idf:v5.5.6 via IDF_DOCKER_IMAGE_C5). Not in the default
-#             target list: pass `-t esp32c5` explicitly.
+#   esp32c5 : 8MB flash + partitions/partitions_8mb_ota.csv    (Wi-Fi-only;
+#             no USB OTG/NCM; opt-in, not in the default matrix; unified
+#             ESP-IDF v5.5.6 baseline, image espressif/idf:v5.5.6 via
+#             IDF_DOCKER_IMAGE_C5. Pass `-t esp32c5` explicitly.)
 #
 # Each target gets its own build directory (build/esp32s3, build/esp32c3,
 # build/esp32) and a full log under build/logs/<target>.log. After a successful

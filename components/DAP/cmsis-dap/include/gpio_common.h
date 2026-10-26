@@ -9,8 +9,9 @@
  * layer.
  *
  * WP-102 merge decision (A 2025 fork + C IDF5 baseline):
- *   - ESP8266 is intentionally dropped (project supports esp32/esp32c3/esp32s3
- *     only, see docs/board-pins.md), so the old ESP8266 blocks are gone.
+ *   - ESP8266 is intentionally dropped (project supports
+ *     esp32/esp32c3/esp32s3/esp32c5, see docs/board-pins.md), so the old
+ *     ESP8266 blocks are gone.
  *   - Include paths follow the IDF5 layout (C tree): plain component include
  *     names ("soc/xxx.h"), not the IDF4 "soc/esp32c3/include/soc/xxx.h" form
  *     that the A fork used.
@@ -48,8 +49,7 @@
      * helpers; the register headers live in soc/.../register and are exposed
      * through the soc component include dirs. The DAP C5 code uses the C5
      * gpio_ll HAL + dedicated-GPIO CSR user registers (same RISC-V mechanism
-     * as C3) and the SPI2 register block (compile-only, see
-     * docs/esp32-c5-port.md). */
+     * as C3) and the SPI2 register block (see docs/esp32-c5-port.md). */
     #include "soc/gpio_struct.h"
     #include "soc/gpio_sig_map.h"
     #include "hal/gpio_ll.h"

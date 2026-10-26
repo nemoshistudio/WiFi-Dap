@@ -1219,8 +1219,8 @@ CONFIG_WIFI_PROV_STA_FAST_SCAN=y
 #
 # WiFi Dap board selection (components/board/Kconfig; docs/board-pins.md)
 #
-# ESP32-S3 default board: WiFi Dap ZXR DAP S3 (status LEDs + WiFi LED).
-CONFIG_BIRDIEBOT_BOARD_ZXR_DAP_S3=y
+# ESP32-S3 default board: WiFi Dap S3 (status LEDs + WiFi LED).
+CONFIG_BIRDIEBOT_BOARD_WIFI_DAP_S3=y
 
 
 #

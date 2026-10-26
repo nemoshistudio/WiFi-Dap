@@ -1,6 +1,6 @@
 /**
- * @file board_zxr_dap_s3.h
- * @brief Pin map for BOARD_ZXR_DAP_S3 - default WiFi Dap board.
+ * @file board_wifi_dap_s3.h
+ * @brief Pin map for BOARD_WIFI_DAP_S3 - default WiFi Dap board.
  *
  * MCU: ESP32-S3 (8MB flash, dual OTA layout reserved by WP-007).
  * Select with: idf.py menuconfig -> "WiFi Dap board configuration" -> "Target board".
@@ -10,12 +10,12 @@
  * components/DAP/config/DAP_config.h macros from the wireless-esp8266-dap
  * fork (A tree), so the IDF5 DAP_config can consume them unchanged.
  */
-#ifndef BIRDIEBOT_BOARD_ZXR_DAP_S3_H
-#define BIRDIEBOT_BOARD_ZXR_DAP_S3_H
+#ifndef BIRDIEBOT_BOARD_WIFI_DAP_S3_H
+#define BIRDIEBOT_BOARD_WIFI_DAP_S3_H
 
 /* ---- board identity ---- */
-#define BIRDIEBOT_BOARD_ID        "zxr_dap_s3"
-#define BIRDIEBOT_BOARD_NAME      "ZXR DAP S3"
+#define BIRDIEBOT_BOARD_ID        "wifi_dap_s3"
+#define BIRDIEBOT_BOARD_NAME      "WiFi DAP S3"
 #define BIRDIEBOT_BOARD_TARGET    "esp32s3"
 /* 1 = esp32, 2 = esp32c3, 3 = esp32s3: used by the target sanity check */
 #define BIRDIEBOT_BOARD_TARGET_ID 3
@@ -42,4 +42,4 @@
 #define UART_BRIDGE_TX_PIN 10
 #define UART_BRIDGE_RX_PIN 9
 
-#endif /* BIRDIEBOT_BOARD_ZXR_DAP_S3_H */
+#endif /* BIRDIEBOT_BOARD_WIFI_DAP_S3_H */

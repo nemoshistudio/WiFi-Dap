@@ -82,7 +82,8 @@ SDKCONFIG_EXPECT = {
     "sdkconfig.defaults.esp32c3": ("partitions/partitions_4mb_single.csv", "4MB"),
     "sdkconfig.defaults.esp32": ("partitions/partitions_4mb_single.csv", "4MB"),
     # ESP32-C5: 8MB DevKit (N8R8) reuses the frozen dual-OTA S3 layout; no USB
-    # OTG/NCM, Wi-Fi-only variant (compile-only until hardware validation).
+    # OTG/NCM, Wi-Fi-only variant (hardware-validated; see
+    # docs/esp32-c5-port.md §11).
     "sdkconfig.defaults.esp32c5": ("partitions/partitions_8mb_ota.csv", "8MB"),
 }
 
