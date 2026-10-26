@@ -197,7 +197,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 
 > C5 引脚约束（datasheet §2.3/§2.4）：GPIO13/14 = USB Serial/JTAG（本变体只作
 > console/下载，无 USB-OTG）；GPIO15~18/20~22 = flash/PSRAM；GPIO27 = VDD_SPI
-> （QFN48）；GPIO2/3/7/25/26/27/28 为 strapping；GPIO2~5 为 C5 自身 JTAG。
+> （QFN48）；GPIO2/3/7/27/28 为文档列出的 strapping；GPIO25/26 实机作 UART1 回环启动正常；GPIO2~5 为 C5 自身 JTAG。
 > 该板为**编译验收**接线（无 C5 硬件验证），上板前必须按实际板复核；详见
 > docs/esp32-c5-port.md。
 
