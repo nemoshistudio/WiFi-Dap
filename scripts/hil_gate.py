@@ -11,6 +11,19 @@ machine-readable verdict (JSON with ``--json``) plus a CI exit code:
     target/status (heap/no-leak) -> target/info (target alive) ->
     page smoke (index HTML + optional Playwright SPA routes)
 
+Profile: ``--profile auto`` (default) detects the firmware build from two
+read-only probes - ``GET /api/discover`` (full: JSON, slim: SPA fallback) and a
+4-byte ``POST /api/ota/upload`` (full: 400/411 before any OTA session, slim:
+405).  ``--profile full|slim`` forces the profile and still asserts those facts.
+The final "slim" build removes OTA/discovery/update/guided-flow; its checks
+assert the removals instead (``slim.ota.removed``/``slim.discover.removed``) and
+the page smoke switches to the hash routes ``/#/status``, ``/#/target``,
+``/#/debug-curve``, ``/#/uart``, ``/#/wifi``, ``/#/about`` with DOM assertions
+for the dedicated status page, the compact status strip, a target page without
+the detailed status cards, and the 404 catch-all for ``/#/update`` /
+``/#/discover``.  WS heartbeat/PING-PONG and the mDNS TXT ``name`` are checked
+too (``--ws-mdns``, ``--mdns-expect-name``).
+
 Safety: by default this tool NEVER writes the target Flash, never OTA-updates
 the ESP32 and never resets the target.  The only active operations are
 ``POST /api/curve/start`` (device-local SWD sampling: halt -> read RAM ->
@@ -57,6 +70,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -79,6 +93,17 @@ CURVE_START_BIN_PATH = "/api/curve/start-bin"
 CURVE_STOP_PATH = "/api/curve/stop"
 CURVE_STATUS_PATH = "/api/curve/status"
 CURVE_FRAMES_PATH = "/api/curve/frames"
+#: Endpoints that the final "slim" firmware removes.  The gate probes them
+#: read-only (see `probe_device_profile()`): slim answers 405 / SPA fallback.
+OTA_UPLOAD_PATH = "/api/ota/upload"
+DISCOVER_PATH = "/api/discover"
+
+#: Device build profiles.  `auto` detects the profile from the two probes above;
+#: `full`/`slim` force it and then assert the expected endpoint facts.
+PROFILE_AUTO = "auto"
+PROFILE_FULL = "full"
+PROFILE_SLIM = "slim"
+PROFILE_CHOICES = (PROFILE_AUTO, PROFILE_FULL, PROFILE_SLIM)
 
 #: Endpoints that would mutate device/target state.  The gate must never call
 #: them; FakeDevice asserts on them in --dry-run and docs/hil-gate.md states the
@@ -561,8 +586,366 @@ def integer(value: Any) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# Device profile detection (full vs slim) + mDNS TXT identity
+# ---------------------------------------------------------------------------
+
+def response_is_json(response: Response) -> bool:
+    """True when the response body parses as a JSON object/array."""
+    try:
+        parsed = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(parsed, (dict, list))
+
+
+def response_looks_like_spa_html(response: Response) -> bool:
+    """True when the response is the single-file Web UI (SPA fallback)."""
+    content_type = (response.headers.get("content-type") or "").lower()
+    body = response.body.lstrip()[:512].lower()
+    return "text/html" in content_type and body.startswith(b"<!doctype html")
+
+
+def probe_device_profile(http: HttpTransport,
+                         args: argparse.Namespace) -> Dict[str, Any]:
+    """Probe the two slim-only differences without starting any write.
+
+    * ``GET /api/discover``: full firmware returns JSON, slim firmware has no
+      handler so the SPA fallback (text/html index) answers.
+    * ``POST /api/ota/upload`` with a tiny 4-byte body: slim has no route (405).
+      Full firmware checks the size before ``esp_ota_begin()`` *and* before the
+      async hand-off, so a 4-byte body can never start an OTA session (it
+      returns 400/411 "image too small"/bad request).  This keeps `auto`
+      detection read-only in practice.
+    """
+    evidence: Dict[str, Any] = {}
+    discover = http.request("GET", DISCOVER_PATH, timeout=args.timeout,
+                            retries=1)
+    evidence["discover"] = {
+        "http": discover.status,
+        "content_type": discover.headers.get("content-type", ""),
+        "bytes": len(discover.body),
+        "json": response_is_json(discover),
+        "spa_html": response_looks_like_spa_html(discover),
+    }
+    ota = http.request_bytes("POST", OTA_UPLOAD_PATH, data=b"hilslim",
+                             headers={"Content-Type": "application/octet-stream"},
+                             timeout=args.timeout, retries=0)
+    evidence["ota_upload"] = {
+        "http": ota.status,
+        "content_type": ota.headers.get("content-type", ""),
+        "bytes": len(ota.body),
+        "body_head": ota.body[:80].decode("utf-8", "replace"),
+    }
+
+    discover_json = evidence["discover"]["json"]
+    ota_status = ota.status
+    errors: List[str] = []
+    if discover_json and ota_status == 405:
+        detected = "ambiguous"  # full discover + no OTA route is unexpected
+        errors.append("discover JSON present but /api/ota/upload is 405")
+    elif (not discover_json) and ota_status == 405:
+        detected = PROFILE_SLIM
+    elif discover_json and ota_status in (400, 411, 413, 415, 422, 500):
+        detected = PROFILE_FULL
+    else:
+        detected = "unknown"
+        errors.append("cannot classify: discover_json=%r ota_http=%r"
+                      % (discover_json, ota_status))
+    return {
+        "detected": detected,
+        "requested": getattr(args, "profile", PROFILE_AUTO),
+        "evidence": evidence,
+        "errors": errors,
+    }
+
+
+def _dns_encode_name(name: str) -> bytes:
+    out = bytearray()
+    for label in name.rstrip(".").split("."):
+        if not label:
+            continue
+        raw = label.encode("utf-8")
+        if len(raw) > 63:
+            raise ValueError("DNS label too long: %r" % (label,))
+        out.append(len(raw))
+        out += raw
+    out.append(0)
+    return bytes(out)
+
+
+def _dns_read_name(data: bytes, offset: int,
+                   depth: int = 0) -> Tuple[str, int]:
+    """Decode a possibly-compressed DNS name; returns (name, next_offset)."""
+    if depth > 8:
+        raise ValueError("DNS name compression loop")
+    labels: List[str] = []
+    cursor = offset
+    next_offset: Optional[int] = None
+    while True:
+        if cursor >= len(data):
+            raise ValueError("truncated DNS name")
+        length = data[cursor]
+        if length == 0:
+            cursor += 1
+            if next_offset is None:
+                next_offset = cursor
+            break
+        if (length & 0xC0) == 0xC0:
+            if cursor + 1 >= len(data):
+                raise ValueError("truncated DNS pointer")
+            pointer = ((length & 0x3F) << 8) | data[cursor + 1]
+            suffix, _ = _dns_read_name(data, pointer, depth + 1)
+            labels.extend(part for part in suffix.split(".") if part)
+            cursor += 2
+            if next_offset is None:
+                next_offset = cursor
+            break
+        if length & 0xC0:
+            raise ValueError("unsupported DNS label type 0x%02x" % length)
+        cursor += 1
+        if cursor + length > len(data):
+            raise ValueError("truncated DNS label")
+        labels.append(data[cursor:cursor + length].decode("utf-8", "replace"))
+        cursor += length
+    return ".".join(labels), next_offset
+
+
+def build_mdns_query(service: str = "_http._tcp.local",
+                     unicast: bool = True) -> bytes:
+    """Build one standard mDNS PTR query (QU bit for a unicast reply)."""
+    header = struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0)
+    question = _dns_encode_name(service) + struct.pack(
+        "!HH", 12, 0x8001 if unicast else 1)
+    return header + question
+
+
+def parse_dns_response(data: bytes) -> List[Dict[str, Any]]:
+    """Parse DNS/mDNS answers+additional records into a flat list of dicts."""
+    if len(data) < 12:
+        raise ValueError("short DNS header")
+    _msg_id, _flags, qdcount, ancount, nscount, arcount = struct.unpack(
+        "!HHHHHH", data[:12])
+    offset = 12
+    for _ in range(qdcount):
+        _name, offset = _dns_read_name(data, offset)
+        offset += 4  # qtype + qclass
+    records: List[Dict[str, Any]] = []
+    for _ in range(ancount + nscount + arcount):
+        name, offset = _dns_read_name(data, offset)
+        if offset + 10 > len(data):
+            break
+        rtype, rclass, _ttl, rdlength = struct.unpack(
+            "!HHIH", data[offset:offset + 10])
+        offset += 10
+        rdata = data[offset:offset + rdlength]
+        offset += rdlength
+        record: Dict[str, Any] = {"name": name, "type": rtype,
+                                  "class": rclass}
+        try:
+            if rtype == 12:  # PTR
+                record["target"], _ = _dns_read_name(data, offset - rdlength)
+            elif rtype == 33 and rdlength >= 6:  # SRV
+                _prio, _weight, port = struct.unpack("!HHH", rdata[:6])
+                target, _ = _dns_read_name(data, offset - rdlength + 6)
+                record.update({"port": port, "target": target})
+            elif rtype == 16:  # TXT
+                values: List[str] = []
+                index = 0
+                while index < len(rdata):
+                    length = rdata[index]
+                    index += 1
+                    values.append(rdata[index:index + length]
+                                  .decode("utf-8", "replace"))
+                    index += length
+                record["txt"] = values
+            elif rtype == 1 and rdlength == 4:  # A
+                record["ip"] = socket.inet_ntoa(rdata)
+        except (ValueError, IndexError, struct.error):
+            record["malformed"] = True
+        records.append(record)
+    return records
+
+
+def mdns_txt_values(records: List[Dict[str, Any]]) -> List[str]:
+    """Collect `key=value` TXT entries from mDNS records (name key first)."""
+    values: List[str] = []
+    for record in records:
+        for entry in record.get("txt") or []:
+            values.append(entry)
+    return values
+
+
+def mdns_advertised_names(records: List[Dict[str, Any]]) -> List[str]:
+    """Extract the WiFi Dap TXT `name` values from parsed mDNS records."""
+    names: List[str] = []
+    for entry in mdns_txt_values(records):
+        key, _, value = entry.partition("=")
+        if key.strip().lower() == "name" and value.strip():
+            names.append(value.strip())
+    return names
+
+
+def query_mdns(host: str, service: str = "_http._tcp.local",
+               timeout: float = 5.0) -> Dict[str, Any]:
+    """Query the device's mDNS responder (unicast first, multicast fallback).
+
+    Returns ``{"records": [...], "names": [...], "transport": "unicast"|...}``.
+    Pure stdlib: a unicast DNS query with the QU bit is answered by ESP-IDF
+    mDNS directly; the multicast attempt covers responders that only answer
+    group queries.
+    """
+    result: Dict[str, Any] = {"records": [], "names": [], "transport": "none"}
+    attempts: List[Tuple[str, bytes]] = []
+    unicast_query = build_mdns_query(service, unicast=True)
+    multicast_query = build_mdns_query(service, unicast=False)
+    local_ip = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((host, 5353))
+            local_ip = probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        local_ip = None
+    attempts.append(("unicast", unicast_query))
+    if local_ip:
+        attempts.append(("multicast", multicast_query))
+
+    for transport, query in attempts:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if transport == "multicast":
+                try:
+                    sock.setsockopt(socket.IPPROTO_IP,
+                                    socket.IP_MULTICAST_IF,
+                                    socket.inet_aton(local_ip))
+                    sock.setsockopt(socket.IPPROTO_IP,
+                                    socket.IP_MULTICAST_TTL, 1)
+                except OSError:
+                    sock.close()
+                    continue
+                sock.bind((local_ip, 0))
+                destination = ("224.0.0.251", 5353)
+            else:
+                sock.bind(("", 0))
+                destination = (host, 5353)
+            sock.settimeout(min(1.0, timeout))
+            sock.sendto(query, destination)
+            deadline = time.monotonic() + timeout
+            records: List[Dict[str, Any]] = []
+            while time.monotonic() < deadline:
+                try:
+                    data, _addr = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    records.extend(parse_dns_response(data))
+                except ValueError:
+                    continue
+                if mdns_advertised_names(records):
+                    break
+                if transport == "unicast":
+                    break
+        finally:
+            sock.close()
+        names = mdns_advertised_names(records) if records else []
+        if names:
+            result = {"records": records, "names": names,
+                      "transport": transport}
+            break
+    return result
+
+
+def mdns_candidate_hosts(primary: str, explicit: str = "",
+                         sta_ip: str = "") -> List[str]:
+    """Hosts to ask for the mDNS TXT record, most specific first.
+
+    A dual-link device (USB-NCM + WiFi STA) may answer mDNS only on the WiFi
+    interface: the NCM link is a point-to-point CDC-NCM netif without multicast
+    users.  So the HIL gate may run over NCM while the mDNS query must go to
+    the WiFi STA IP.
+    """
+    candidates: List[str] = []
+    for value in (explicit, primary, sta_ip):
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
+def derive_mdns_name(mac: Optional[str]) -> Optional[str]:
+    """`aa:bb:cc:dd:ca:60` -> `WiFi-Dap-CA60` (same as firmware TXT)."""
+    if not mac:
+        return None
+    digits = "".join(ch for ch in str(mac).upper()
+                     if ch in "0123456789ABCDEF")
+    if len(digits) < 4:
+        return None
+    if len(digits) == 12:
+        suffix = digits[-4:]
+    else:
+        suffix = digits[-4:]
+    return "WiFi-Dap-%s" % suffix
+
+
+# ---------------------------------------------------------------------------
 # Phases
 # ---------------------------------------------------------------------------
+
+def _resolve_profile(gate: Gate, http: HttpTransport,
+                     args: argparse.Namespace) -> None:
+    """Detect full vs slim firmware and assert the expected endpoint facts."""
+    probe = probe_device_profile(http, args)
+    detected = probe["detected"]
+    requested = probe["requested"]
+    args._profile = detected
+    gate.metric("profile", probe)
+    gate.require("profile.detected",
+                 detected in (PROFILE_FULL, PROFILE_SLIM),
+                 "cannot classify firmware: requested=%s detected=%r "
+                 "evidence=%r" % (requested, detected, probe["evidence"]),
+                 values=probe["evidence"])
+    if requested != PROFILE_AUTO:
+        gate.require("profile.matches_request", detected == requested,
+                     "requested --profile %s but device looks %s"
+                     % (requested, detected),
+                     values={"requested": requested, "detected": detected})
+    gate.info("profile.detected.summary",
+              "profile=%s (requested=%s) discover_json=%r ota_http=%r"
+              % (detected, requested,
+                 probe["evidence"]["discover"]["json"],
+                 probe["evidence"]["ota_upload"]["http"]),
+              values={"profile": detected})
+    evidence = probe["evidence"]
+    if detected == PROFILE_SLIM:
+        ota_status = evidence["ota_upload"]["http"]
+        discover = evidence["discover"]
+        gate.require("slim.ota.removed", ota_status == 405,
+                     "POST %s -> HTTP %d (slim firmware must answer 405)"
+                     % (OTA_UPLOAD_PATH, ota_status))
+        gate.require("slim.discover.removed",
+                     (not discover["json"])
+                     and "application/json" not in
+                     (discover["content_type"] or "").lower(),
+                     "GET %s -> HTTP %d content_type=%r json=%r (slim must "
+                     "serve the SPA fallback, not discovery JSON)"
+                     % (DISCOVER_PATH, discover["http"],
+                        discover["content_type"], discover["json"]))
+        gate.info("slim.profile", "final slim firmware detected: OTA upload "
+                                  "removed (405), discovery API removed")
+    else:
+        gate.check("full.discover.json", evidence["discover"]["json"],
+                   "GET %s -> HTTP %d content_type=%r (full firmware should "
+                   "serve discovery JSON)"
+                   % (DISCOVER_PATH, evidence["discover"]["http"],
+                      evidence["discover"]["content_type"]),
+                   severity="warn")
+        gate.info("full.profile", "full firmware detected: discovery JSON "
+                                  "present, OTA upload route present")
+
 
 def phase_preflight(gate: Gate, http: HttpTransport, args: argparse.Namespace) -> None:
     """Ensure the device answers an HTTP request before doing anything else."""
@@ -575,6 +958,7 @@ def phase_preflight(gate: Gate, http: HttpTransport, args: argparse.Namespace) -
     gate.require("device.reachable", response.status in (200, 403),
                  "HTTP %d from GET %s" % (response.status, TARGET_INFO_PATH),
                  values={"status": response.status})
+    _resolve_profile(gate, http, args)
 
 
 def phase_target_info(gate: Gate, http: HttpTransport,
@@ -1177,6 +1561,47 @@ PAGE_ROUTES = (
     ("/#/update", "OTA update page"),
 )
 
+#: Routes of the final "slim" firmware.  The Web UI uses createWebHashHistory,
+#: so every route is a `/#/...` hash route; `/#/update` no longer exists and is
+#: rendered by the 404 catch-all (there is no `/update` HTTP route at all).
+SLIM_PAGE_ROUTES = (
+    ("/#/status", "dedicated device status page"),
+    ("/#/target", "target flash page (home)"),
+    ("/#/debug-curve", "variable curve page"),
+    ("/#/uart", "UART page"),
+    ("/#/wifi", "WiFi page"),
+    ("/#/about", "about page"),
+)
+
+#: Required/forbidden `data-testid` selectors per slim route (DOM assertions).
+SLIM_PAGE_RULES = {
+    "/#/status": {
+        "require": ('[data-testid="status-page"]',
+                    '[data-testid="status-dashboard"]',
+                    '[data-testid="diagnostics-panel"]'),
+        "forbid": ('[data-testid="status-strip"]',),
+    },
+    "/#/target": {
+        "require": ('[data-testid="target-flash-actions"]',
+                    '[data-testid="status-strip"]'),
+        "forbid": ('[data-testid="status-page"]',
+                   '[data-testid="status-dashboard"]',
+                   '[data-testid="diagnostics-panel"]'),
+    },
+    "/#/debug-curve": {
+        "require": ('[data-testid="status-strip"]',),
+        "forbid": (),
+    },
+    "/#/uart": {"require": ('[data-testid="status-strip"]',), "forbid": ()},
+    "/#/wifi": {"require": ('[data-testid="status-strip"]',), "forbid": ()},
+    "/#/about": {"require": ('[data-testid="status-strip"]',), "forbid": ()},
+}
+
+#: Removed features must render the 404 catch-all, not a dedicated page.
+SLIM_404_ROUTES = ("/#/update", "/#/discover")
+#: data-testid prefixes that must never appear in the slim bundle's DOM.
+SLIM_FORBIDDEN_TESTID_PREFIXES = ("update", "ota", "discover", "guided")
+
 
 def _page_http_check(gate: Gate, http: HttpTransport,
                      args: argparse.Namespace) -> None:
@@ -1203,6 +1628,55 @@ def _page_http_check(gate: Gate, http: HttpTransport,
               % len(response.body))
 
 
+def _hash_route_expected(route: str) -> str:
+    """`/#/status` -> `#/status` (location.hash form of a hash-router route)."""
+    if "#" in route:
+        return "#" + route.split("#", 1)[-1]
+    return route
+
+
+def _slim_dom_snapshot(page: Any, selectors: List[str]) -> Dict[str, Any]:
+    """Capture the DOM facts needed by the slim page assertions."""
+    return page.evaluate(
+        """(selectors) => {
+             const counts = {};
+             for (const sel of selectors) {
+               counts[sel] = document.querySelectorAll(sel).length;
+             }
+             return {
+               counts,
+               testids: Array.from(document.querySelectorAll('[data-testid]'))
+                 .map(el => el.getAttribute('data-testid') || ''),
+               links: Array.from(document.querySelectorAll('a[href]'))
+                 .map(el => el.getAttribute('href') || ''),
+               text: (document.body && document.body.innerText) || '',
+             };
+           }""", selectors)
+
+
+def _slim_route_problems(obs: Dict[str, Any], rules: Dict[str, Any]) -> List[str]:
+    """Return the slim assertion problems for one route observation."""
+    problems: List[str] = []
+    for selector in rules.get("require", ()):
+        if obs["counts"].get(selector, 0) < 1:
+            problems.append("missing %s" % selector)
+    for selector in rules.get("forbid", ()):
+        if obs["counts"].get(selector, 0) > 0:
+            problems.append("forbidden %s present" % selector)
+    bad_ids = [testid for testid in obs["testids"]
+               if any(testid.startswith(prefix)
+                      for prefix in SLIM_FORBIDDEN_TESTID_PREFIXES)]
+    if bad_ids:
+        problems.append("removed-feature testids present: %r"
+                        % (sorted(set(bad_ids))[:5],))
+    bad_links = [link for link in obs["links"]
+                 if re.search(r"/(?:update|discover)(?:/|$|\?)", link,
+                              re.IGNORECASE)]
+    if bad_links:
+        problems.append("removed-feature links present: %r" % (bad_links[:5],))
+    return problems
+
+
 def _page_playwright_check(gate: Gate, args: argparse.Namespace) -> None:
     mode = args.playwright
     if mode == "off":
@@ -1219,9 +1693,14 @@ def _page_playwright_check(gate: Gate, args: argparse.Namespace) -> None:
             gate.skip("pages.playwright.routes", "skipped (playwright missing)")
         return
 
+    profile = getattr(args, "_profile", PROFILE_FULL)
+    slim = profile == PROFILE_SLIM
+    routes = SLIM_PAGE_ROUTES if slim else PAGE_ROUTES
     base = "http://%s:%d" % (args.host, args.port)
     failures: List[str] = []
     observations: List[Dict[str, Any]] = []
+    slim_observations: Dict[str, Dict[str, Any]] = {}
+    notfound_observations: Dict[str, Dict[str, Any]] = {}
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
@@ -1229,39 +1708,101 @@ def _page_playwright_check(gate: Gate, args: argparse.Namespace) -> None:
             page = context.new_page()
             page_errors: List[str] = []
             page.on("pageerror", lambda error: page_errors.append(str(error)))
-            for route, label in PAGE_ROUTES:
+
+            def _visit(route: str) -> Dict[str, Any]:
                 page_errors.clear()
                 page.goto(base + route, wait_until="domcontentloaded",
                           timeout=int(args.timeout * 1000))
                 page.wait_for_timeout(1200)
-                title = page.title()
-                current_hash = page.evaluate("() => location.hash")
-                app_text_len = page.evaluate(
-                    "() => (document.querySelector('#app')?.innerText || '').length")
+                snapshot = _slim_dom_snapshot(page, []) if slim else None
+                return {
+                    "title": page.title(),
+                    "hash": page.evaluate("() => location.hash"),
+                    "app_text_len": page.evaluate(
+                        "() => (document.querySelector('#app')?.innerText || '')"
+                        ".length"),
+                    "errors": list(page_errors),
+                    "snapshot": snapshot,
+                }
+
+            for route, label in routes:
+                visit = _visit(route)
+                title = visit["title"]
+                current_hash = visit["hash"]
                 title_parts = [part.strip() for part in title.split("|")]
                 duplicate_title = (len(title_parts) >= 2
                                    and title_parts[0] == title_parts[-1])
+                min_text = 300 if route == "/#/status" else 120
                 problem = None
-                if page_errors:
-                    problem = "uncaught JS error: %s" % page_errors[0][:160]
-                elif current_hash != "#" + route.split("#", 1)[-1]:
-                    problem = "hash=%r (expected %r)" % (
-                        current_hash, "#" + route.split("#", 1)[-1])
-                elif app_text_len < 250:
+                expected_hash = _hash_route_expected(route)
+                if visit["errors"]:
+                    problem = "uncaught JS error: %s" % visit["errors"][0][:160]
+                elif current_hash != expected_hash:
+                    problem = "hash=%r (expected %r)" % (current_hash,
+                                                         expected_hash)
+                elif visit["app_text_len"] < min_text:
                     problem = ("app not rendered (innerText=%d chars, likely "
-                               "404/blank route)" % app_text_len)
+                               "404/blank route)" % visit["app_text_len"])
                 elif duplicate_title:
                     problem = "unmatched route title=%r" % title
-                observations.append({
+                observation = {
                     "route": route,
                     "label": label,
                     "title": title,
                     "hash": current_hash,
-                    "app_text_len": app_text_len,
+                    "app_text_len": visit["app_text_len"],
                     "ok": problem is None,
-                })
+                }
+                if slim:
+                    selectors = list(dict.fromkeys(
+                        list(SLIM_PAGE_RULES.get(route, {}).get("require", ()))
+                        + list(SLIM_PAGE_RULES.get(route, {}).get("forbid", ()))
+                        + ['[data-testid="status-strip"]']))
+                    snapshot = _slim_dom_snapshot(page, selectors)
+                    observation["dom"] = {
+                        "counts": snapshot["counts"],
+                        "testids": snapshot["testids"][:80],
+                        "links": snapshot["links"][:40],
+                    }
+                    slim_observations[route] = observation
+                    dom_problems = _slim_route_problems(
+                        snapshot, SLIM_PAGE_RULES.get(route, {}))
+                    if dom_problems:
+                        problem = "; ".join(dom_problems)
+                observations.append(observation)
                 if problem:
                     failures.append("%s: %s" % (route, problem))
+
+            if slim:
+                for route in SLIM_404_ROUTES:
+                    visit = _visit(route)
+                    snapshot = _slim_dom_snapshot(
+                        page, ['[data-testid="status-page"]'])
+                    text = snapshot["text"]
+                    obs = {
+                        "route": route,
+                        "title": visit["title"],
+                        "hash": visit["hash"],
+                        "text_len": len(text),
+                        "has_404": "404" in text,
+                        "counts": snapshot["counts"],
+                        "testids": snapshot["testids"][:80],
+                        "links": snapshot["links"][:40],
+                    }
+                    problems = []
+                    expected_hash = _hash_route_expected(route)
+                    if visit["hash"] != expected_hash:
+                        problems.append("hash=%r (expected %r)"
+                                        % (visit["hash"], expected_hash))
+                    if not obs["has_404"]:
+                        problems.append("404 catch-all page not rendered")
+                    problems.extend(_slim_route_problems(snapshot, {}))
+                    if snapshot["counts"].get('[data-testid="status-page"]'):
+                        problems.append("status page rendered on removed route")
+                    obs["problems"] = problems
+                    notfound_observations[route] = obs
+                    if problems:
+                        failures.append("%s: %s" % (route, "; ".join(problems)))
             context.close()
             browser.close()
     except Exception as exc:  # pragma: no cover - env/hardware dependent
@@ -1273,13 +1814,98 @@ def _page_playwright_check(gate: Gate, args: argparse.Namespace) -> None:
             gate.skip("pages.playwright.routes", "skipped (%s)" % exc)
         return
 
-    gate.metric("pages", observations)
-    gate.require("pages.playwright.routes", not failures,
-                 "; ".join(failures) if failures else
-                 "3 SPA routes mounted (target/debug-curve/update)")
-    gate.info("pages.playwright.ok",
-              "; ".join("%s=%r" % (item["route"], item["title"])
-                        for item in observations))
+    if not slim:
+        gate.metric("pages", observations)
+        gate.require("pages.playwright.routes", not failures,
+                     "; ".join(failures) if failures else
+                     "3 SPA routes mounted (target/debug-curve/update)")
+        gate.info("pages.playwright.ok",
+                  "; ".join("%s=%r" % (item["route"], item["title"])
+                            for item in observations))
+        return
+
+    # ---- final slim firmware DOM assertions ----
+    gate.metric("pages_slim", {
+        "routes": observations,
+        "notfound": notfound_observations,
+    })
+    route_failures = [failure for failure in failures
+                      if ": 404 catch-all" not in failure]
+    gate.require("pages.slim.routes", not route_failures,
+                 "; ".join(route_failures) if route_failures else
+                 "6 slim hash routes mounted (status/target/debug-curve/uart/"
+                 "wifi/about)")
+
+    status_obs = slim_observations.get("/#/status") or {}
+    status_problems = _slim_route_problems(
+        status_obs.get("dom") and {
+            "counts": status_obs["dom"]["counts"],
+            "testids": status_obs["dom"]["testids"],
+            "links": status_obs["dom"]["links"],
+            "text": "",
+        } or {"counts": {}, "testids": [], "links": [], "text": ""},
+        SLIM_PAGE_RULES["/#/status"])
+    gate.require("pages.slim.status_page", not status_problems,
+                 "; ".join(status_problems) if status_problems else
+                 "/#/status renders status-page + status-dashboard + "
+                 "diagnostics-panel (full device status)")
+
+    target_obs = slim_observations.get("/#/target") or {}
+    target_problems = _slim_route_problems(
+        target_obs.get("dom") and {
+            "counts": target_obs["dom"]["counts"],
+            "testids": target_obs["dom"]["testids"],
+            "links": target_obs["dom"]["links"],
+            "text": "",
+        } or {"counts": {}, "testids": [], "links": [], "text": ""},
+        SLIM_PAGE_RULES["/#/target"])
+    gate.require("pages.slim.target_no_status", not target_problems,
+                 "; ".join(target_problems) if target_problems else
+                 "/#/target keeps target-flash-actions + compact strip and has "
+                 "no detailed status card (status-page/dashboard/diagnostics)")
+
+    strip_problems: List[str] = []
+    for route, observation in slim_observations.items():
+        counts = ((observation.get("dom") or {}).get("counts") or {})
+        strip_count = counts.get('[data-testid="status-strip"]', 0)
+        if route == "/#/status":
+            if strip_count:
+                strip_problems.append("/#/status shows the compact strip")
+        elif strip_count < 1:
+            strip_problems.append("%s missing compact status strip" % route)
+    gate.require("pages.slim.compact_strip", not strip_problems,
+                 "; ".join(strip_problems) if strip_problems else
+                 "compact status strip on every page except /#/status")
+
+    removed_ui_problems: List[str] = []
+    for route, observation in slim_observations.items():
+        removed_ui_problems.extend(
+            "%s: %s" % (route, problem) for problem in
+            _slim_route_problems(
+                {"counts": {}, "testids": observation["dom"]["testids"],
+                 "links": observation["dom"]["links"], "text": ""}, {}))
+    for route, observation in notfound_observations.items():
+        removed_ui_problems.extend(
+            "%s: %s" % (route, problem) for problem in
+            _slim_route_problems(observation, {}))
+    gate.require("pages.slim.no_update_ui", not removed_ui_problems,
+                 "; ".join(sorted(set(removed_ui_problems))[:8])
+                 if removed_ui_problems else
+                 "no Update / discovery / guided-flow UI in slim DOM")
+
+    notfound_problems = [problem
+                         for obs in notfound_observations.values()
+                         for problem in obs.get("problems") or []]
+    gate.require("pages.slim.spa_404", not notfound_problems,
+                 "; ".join(notfound_problems) if notfound_problems else
+                 "/#/update and /#/discover render the 404 catch-all "
+                 "(removed pages absent)")
+    gate.info("pages.slim.ok",
+              "; ".join("%s=%r strip=%s" % (
+                  item["route"], item["title"],
+                  (item.get("dom") or {}).get("counts", {}).get(
+                      '[data-testid="status-strip"]', 0))
+                  for item in observations))
 
 
 def phase_pages(gate: Gate, http: HttpTransport,
@@ -1289,6 +1915,163 @@ def phase_pages(gate: Gate, http: HttpTransport,
         return
     _page_http_check(gate, http, args)
     _page_playwright_check(gate, args)
+
+
+# ---------------------------------------------------------------------------
+# WS heartbeat + mDNS TXT identity (final slim firmware retains both)
+# ---------------------------------------------------------------------------
+
+def _ws_fm_info(host: str, port: int, timeout: float) -> Dict[str, Any]:
+    client = WsJsonClient(host, port, timeout=timeout)
+    try:
+        client.connect()
+        return client.request(0, 1, timeout=timeout)  # SYSTEM/GET_FM_INFO
+    finally:
+        client.close()
+
+
+def phase_ws_mdns(gate: Gate, args: argparse.Namespace) -> None:
+    """WS heartbeat/PING-PONG + mDNS `_http._tcp` TXT `name` assertions.
+
+    The final slim firmware keeps the WS control channel (2 s heartbeat on the
+    Web UI side) and the mDNS advertisement (`_http._tcp` with TXT
+    `name=WiFi-Dap-XXXX`).  Both are checked here:
+    * two consecutive WS connect -> GET_FM_INFO -> close cycles (heartbeat /
+      reconnect tolerance) plus a real WS PING/PONG;
+    * one mDNS query for the TXT name, compared with `--mdns-expect-name` or
+      with the name derived from the device STA MAC (same derivation as the
+      firmware: last two MAC bytes, uppercase).
+    """
+    mode = args.ws_mdns
+    if getattr(args, "_offline", False):
+        gate.skip("ws_mdns", "offline dry-run: WS/mDNS checks skipped")
+        return
+    if mode == "off":
+        gate.skip("ws_mdns", "disabled by --ws-mdns off")
+        return
+    profile = getattr(args, "_profile", PROFILE_FULL)
+    if mode == "auto" and profile != PROFILE_SLIM:
+        gate.skip("ws_mdns", "full profile (pass --ws-mdns on to enable)")
+        return
+
+    heartbeat: List[Dict[str, Any]] = []
+    for attempt in range(2):
+        record: Dict[str, Any] = {"attempt": attempt + 1, "ok": False}
+        started = time.monotonic()
+        client = None
+        try:
+            client = WsJsonClient(args.host, args.port, timeout=args.timeout)
+            client.connect()
+            info = client.request(0, 1, timeout=args.timeout)
+            record.update({
+                "ok": True,
+                "fm_ver": info.get("fm_ver"),
+                "protocol_version": info.get("protocol_version"),
+            })
+            if attempt == 0:
+                record["pong"] = client.ping(
+                    timeout=max(1.0, args.timeout / 2))
+        except (OSError, ProtocolError) as exc:
+            record["error"] = str(exc)
+        finally:
+            if client is not None:
+                client.close()
+            record["seconds"] = round(time.monotonic() - started, 2)
+        heartbeat.append(record)
+        if attempt == 0:
+            time.sleep(0.5)
+    gate.metric("ws_heartbeat", heartbeat)
+    gate.require("ws.heartbeat.reconnect",
+                 all(record["ok"] for record in heartbeat),
+                 "two consecutive WS connect/GET_FM_INFO cycles: %r"
+                 % ([(record.get("ok"), record.get("error"))
+                     for record in heartbeat],))
+    protocols = [record.get("protocol_version") for record in heartbeat
+                 if record["ok"]]
+    gate.require("ws.heartbeat.protocol",
+                 bool(protocols) and all(value == 1 for value in protocols),
+                 "protocol_version=%r (expected 1)" % (protocols,))
+    gate.require("ws.ping_pong", heartbeat[0].get("pong") is True,
+                 "WS PING/PONG: %r" % (heartbeat[0].get("pong"),),
+                 ok_detail="WS PING/PONG echo verified")
+
+    expected_name = (args.mdns_expect_name or "").strip()
+    sn = None
+    sta_ip = ""
+    wifi_mac = None
+    if not expected_name:
+        # SYSTEM(0)/GET_SYS_INFO `sn` is the STA MAC (12 hex); the WIFI(1)
+        # module `mac` field is not reliable on the current slim builds (both
+        # lab devices report the same value), so it is only a fallback.
+        identity_client = WsJsonClient(args.host, args.port,
+                                       timeout=args.timeout)
+        try:
+            identity_client.connect()
+            try:
+                sysinfo = identity_client.request(0, 3, timeout=args.timeout)
+                sn = sysinfo.get("sn")
+            except (OSError, ProtocolError) as exc:
+                gate.check("mdns.sysinfo", False,
+                           "cannot read SYSTEM(0)/GET_SYS_INFO: %s" % exc,
+                           severity="warn")
+            try:
+                sta = identity_client.request(1, 1, timeout=args.timeout)
+                wifi_mac = sta.get("mac")
+                sta_ip = sta.get("ip") or ""
+            except (OSError, ProtocolError):
+                pass
+        except (OSError, ProtocolError) as exc:
+            gate.check("mdns.sysinfo", False,
+                       "cannot open WS identity query: %s" % exc,
+                       severity="warn")
+        finally:
+            identity_client.close()
+        expected_name = (derive_mdns_name(sn) or derive_mdns_name(wifi_mac)
+                         or "")
+    candidates = mdns_candidate_hosts(args.host, args.mdns_host, sta_ip)
+    query_results: List[Dict[str, Any]] = []
+    result: Dict[str, Any] = {"records": [], "names": [], "transport": "none"}
+    for candidate in candidates:
+        candidate_result = query_mdns(candidate, timeout=args.mdns_timeout)
+        query_results.append({
+            "host": candidate,
+            "transport": candidate_result.get("transport"),
+            "names": candidate_result.get("names"),
+            "records": len(candidate_result.get("records") or []),
+        })
+        if candidate_result.get("names"):
+            result = candidate_result
+            result["query_host"] = candidate
+            break
+    names = result.get("names") or []
+    lowered = [name.lower() for name in names]
+    if expected_name:
+        matched = expected_name.lower() in lowered
+        detail = ("mDNS TXT name %r present=%r (expected %r, sn=%r, "
+                  "query_host=%r, %s)"
+                  % (names, matched, expected_name, sn,
+                     result.get("query_host"), result.get("transport")))
+    else:
+        matched = any(name.lower().startswith("wifi-dap-")
+                      for name in names)
+        detail = ("mDNS TXT names %r (%s); no expected name, prefix match=%r"
+                  % (names, result.get("transport"), matched))
+    gate.metric("mdns", {
+        "expected": expected_name,
+        "sn": sn,
+        "wifi_mac": wifi_mac,
+        "sta_ip": sta_ip,
+        "candidates": candidates,
+        "queries": query_results,
+        "query_host": result.get("query_host"),
+        "names": names,
+        "transport": result.get("transport"),
+        "records": len(result.get("records") or []),
+    })
+    gate.require("mdns.service_present", bool(names), detail)
+    gate.require("mdns.txt_name", matched, detail,
+                 ok_detail="mDNS _http._tcp TXT name matches %r"
+                           % (expected_name or "WiFi-Dap-*",))
 
 
 # ---------------------------------------------------------------------------
@@ -1307,6 +2090,11 @@ def _report(gate: Gate, args: argparse.Namespace, started_at: str,
         "exit_code": exit_code,
         "host": args.host,
         "port": args.port,
+        "profile": {
+            "requested": getattr(args, "profile", PROFILE_AUTO),
+            "detected": getattr(args, "_profile", "unknown"),
+            "probe": gate.metrics.get("profile"),
+        },
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "duration_s": round(duration_s, 3),
@@ -1324,6 +2112,15 @@ def _report(gate: Gate, args: argparse.Namespace, started_at: str,
             "soak_seconds": getattr(args, "soak_seconds", 0),
             "swd_clock_steps": getattr(args, "swd_clock_steps", ""),
             "swd_clock_expect_ok": getattr(args, "swd_clock_expect_ok", ""),
+            "profile": getattr(args, "profile", PROFILE_AUTO),
+            "ws_mdns": getattr(args, "ws_mdns", "auto"),
+            "mdns_expect_name": getattr(args, "mdns_expect_name", ""),
+            "openocd_target_cfg": getattr(args, "openocd_target_cfg", ""),
+        },
+        "ws_mdns": {
+            "ws_heartbeat": gate.metrics.get("ws_heartbeat"),
+            "mdns": gate.metrics.get("mdns"),
+            "pages_slim": gate.metrics.get("pages_slim"),
         },
         "modes": {
             "extended": _extended_enabled(args),
@@ -1384,6 +2181,29 @@ def _human_report(report: Dict[str, Any], stream: Any = sys.stdout) -> None:
                  curve_perf.get("frames", 0),
                  curve_perf.get("missing_seqs", 0),
                  curve_perf.get("status_invalid", 0)), file=stream)
+    profile = report.get("profile") or {}
+    if profile:
+        print("profile: detected=%r requested=%r"
+              % (profile.get("detected"), profile.get("requested")),
+              file=stream)
+    ws_heartbeat = metrics.get("ws_heartbeat") or []
+    if ws_heartbeat:
+        print("ws heartbeat: %s"
+              % "; ".join("try%d ok=%r pong=%r protocol=%r"
+                          % (item.get("attempt"), item.get("ok"),
+                             item.get("pong"), item.get("protocol_version"))
+                          for item in ws_heartbeat), file=stream)
+    mdns = metrics.get("mdns") or {}
+    if mdns:
+        print("mDNS: names=%r expected=%r transport=%r"
+              % (mdns.get("names"), mdns.get("expected"),
+                 mdns.get("transport")), file=stream)
+    pages_slim = metrics.get("pages_slim") or {}
+    if pages_slim:
+        routes = pages_slim.get("routes") or []
+        print("slim pages: %d routes, 404-catchall=%d"
+              % (len(routes), len(pages_slim.get("notfound") or {})),
+              file=stream)
     target = metrics.get("target") or {}
     if target:
         print("target: %s %s flash=%d KiB swd=%d kHz"
@@ -1531,6 +2351,7 @@ def run_gate(args: argparse.Namespace,
             phase_target_status_post(gate, http, args)
             phase_target_info_after(gate, http, args)
             phase_pages(gate, http, args)
+            phase_ws_mdns(gate, args)
         except GateAbort as exc:
             error = "aborted at %s: %s" % (exc.check_id, exc.detail)
         except DeviceUnreachable as exc:
@@ -1589,9 +2410,13 @@ class FakeDevice:
     def __init__(self, detected: bool = True, diagnostics: bool = True,
                  frame_format: str = "cvf2-pc", effective_fps: float = 50.0,
                  port: int = 0,
-                 swd_clock_fail_hz: Optional[Any] = None) -> None:
+                 swd_clock_fail_hz: Optional[Any] = None,
+                 slim: bool = False) -> None:
         self.detected = detected
         self.diagnostics = diagnostics
+        #: Final slim firmware: no POST /api/ota/upload (405) and no discovery
+        #: JSON (SPA fallback).  Used by --dry-run slim scenarios.
+        self.slim = slim
         self.frame_format = frame_format
         self.effective_interval_us = 1e6 / effective_fps if effective_fps > 0 else 1e6
         self.running = False
@@ -1660,6 +2485,14 @@ class FakeDevice:
                       timeout: Optional[float] = None, retries: int = 1,
                       close_after: bool = False) -> Response:
         del headers, timeout, retries, close_after
+        if path == OTA_UPLOAD_PATH:
+            if self.slim:
+                return Response(status=405,
+                                headers={"content-type": "text/html"},
+                                body=b"Specified method is invalid for this "
+                                     b"resource")
+            return self._json({"module": 5, "cmd": 2, "ok": False,
+                               "err": "image too small", "code": 5}, 400)
         for forbidden in FORBIDDEN_PATHS:
             if path == forbidden or path.startswith(forbidden + "?") \
                     or path.startswith(forbidden + "/"):
@@ -1704,6 +2537,24 @@ class FakeDevice:
                 timeout: Optional[float] = None,
                 retries: int = 1) -> Response:
         del timeout, retries
+        if path == DISCOVER_PATH and method == "GET":
+            if self.slim:
+                return Response(status=200,
+                                headers={"content-type": "text/html"},
+                                body=DRY_RUN_HTML.encode("utf-8"))
+            return self._json({"module": 6, "cmd": 8, "ok": True,
+                               "devices": [{"name": "WiFi-Dap-DRY0",
+                                            "hostname": "dry-run.local",
+                                            "ip": "127.0.0.1", "port": 80}],
+                               "count": 1})
+        if path == OTA_UPLOAD_PATH:
+            if self.slim:
+                return Response(status=405,
+                                headers={"content-type": "text/html"},
+                                body=b"Specified method is invalid for this "
+                                     b"resource")
+            return self._json({"module": 5, "cmd": 2, "ok": False,
+                               "err": "image too small", "code": 5}, 400)
         for forbidden in FORBIDDEN_PATHS:
             if path == forbidden or path.startswith(forbidden + "?") \
                     or path.startswith(forbidden + "/"):
@@ -1812,26 +2663,34 @@ class FakeDevice:
 
 
 def run_dry_run(args: argparse.Namespace) -> int:
-    """Offline self-test: 5 fake devices, each with an expected exit code."""
+    """Offline self-test: 7 fake devices, each with an expected exit code."""
     scenarios = [
         ("healthy-firmware", dict(detected=True, diagnostics=True,
                                   frame_format="cvf2-pc", effective_fps=50.0),
-         False, EXIT_PASS),
+         False, EXIT_PASS, {}),
         ("legacy-firmware-strict", dict(diagnostics=False,
                                         frame_format="cvf1", effective_fps=50.0),
-         False, EXIT_FAIL),
+         False, EXIT_FAIL, {}),
         ("legacy-firmware-allowed", dict(diagnostics=False,
                                          frame_format="cvf1", effective_fps=50.0),
-         True, EXIT_PASS),
+         True, EXIT_PASS, {}),
         ("low-sampling-rate", dict(diagnostics=True,
                                    frame_format="cvf2-pc", effective_fps=10.0),
-         False, EXIT_FAIL),
+         False, EXIT_FAIL, {}),
         ("target-not-detected", dict(detected=False),
-         False, EXIT_FAIL),
+         False, EXIT_FAIL, {}),
+        # Final "slim" firmware: OTA upload 405 + SPA fallback for discovery,
+        # compact status strip / status page DOM checks are covered by the
+        # Playwright suite (skipped offline).
+        ("slim-firmware-healthy", dict(slim=True),
+         False, EXIT_PASS, {"profile": PROFILE_AUTO}),
+        # Forcing the wrong profile must fail loudly (auto would detect slim).
+        ("slim-firmware-forced-full", dict(slim=True),
+         False, EXIT_FAIL, {"profile": PROFILE_FULL}),
     ]
     results = []
     failures = 0
-    for name, device_options, allow_legacy, expected in scenarios:
+    for name, device_options, allow_legacy, expected, overrides in scenarios:
         scenario_args = argparse.Namespace(**vars(args))
         scenario_args.dry_run = False
         scenario_args.host = "dry-run"
@@ -1843,6 +2702,8 @@ def run_dry_run(args: argparse.Namespace) -> int:
         scenario_args.verbose = False
         scenario_args.allow_legacy_firmware = allow_legacy
         scenario_args.allow_dap_session = False
+        for key, value in overrides.items():
+            setattr(scenario_args, key, value)
         report = run_gate(scenario_args, transport=FakeDevice(**device_options))
         actual = int(report["exit_code"])
         ok = actual == expected
@@ -2151,7 +3012,7 @@ def _openocd_argv(args: argparse.Namespace) -> List[str]:
         "-f", "interface/cmsis-dap.cfg",
         "-c", "adapter usb vid_pid 0xc251 0xf00a",
         "-c", "transport select swd",
-        "-f", "target/stm32h7x.cfg",
+        "-f", getattr(args, "openocd_target_cfg", "target/stm32h7x.cfg"),
         "-c", "adapter speed 1900",
         "-c", "reset_config none",
         "-c", "cortex_m reset_config sysresetreq",
@@ -2674,6 +3535,31 @@ class WsJsonClient:
                 print("[hil_gate] WS ignoring module=%r cmd=%r"
                       % (parsed.get("module"), parsed.get("cmd")),
                       file=sys.stderr)
+
+    def ping(self, payload: bytes = b"hil-ping",
+             timeout: Optional[float] = None) -> bool:
+        """Send a WebSocket PING and wait for the matching PONG."""
+        wait = self.timeout if timeout is None else timeout
+        if self.sock is None:
+            return False
+        try:
+            self._send_frame(0x9, payload)
+        except OSError:
+            return False
+        deadline = time.monotonic() + wait
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                self.sock.settimeout(remaining)
+                opcode, data = self._recv_frame()
+            except (OSError, ProtocolError):
+                return False
+            if opcode == 0xA:
+                return data == payload
+            if opcode == 0x8:
+                return False
 
     def close(self) -> None:
         if self.sock is not None:
@@ -3369,13 +4255,23 @@ def phase_extended(gate: Gate, args: argparse.Namespace,
     """Run every enabled extended mode, isolated so one failure cannot skip the
     rest, and always stop the curve sampler at the end."""
     gate.metric("extended_enabled", True)
+    slim = getattr(args, "_profile", "") == PROFILE_SLIM
+    if slim and (args.ota_image or args.ota_interrupt):
+        gate.skip("extended.ota.slim",
+                  "slim firmware removed POST /api/ota/upload; OTA extended "
+                  "modes are skipped")
+    if slim and args.reboot_recovery:
+        gate.skip("extended.reboot_recovery.slim",
+                  "slim firmware removed the OTA endpoint; the recovery "
+                  "reboot mode is skipped")
     gate.check("extended.mode", True,
                "extended modes enabled: %s" % ", ".join(
                    name for name, on in (
                        ("usbip-smoke", args.usbip_smoke),
-                       ("reboot-recovery", args.reboot_recovery),
+                       ("reboot-recovery", args.reboot_recovery and not slim),
                        ("flash", bool(args.flash_image)),
-                       ("ota", bool(args.ota_image or args.ota_interrupt)),
+                       ("ota", bool(args.ota_image or args.ota_interrupt)
+                        and not slim),
                        ("swd-clock-matrix", args.swd_clock_matrix),
                        ("soak", bool(args.soak_seconds)),
                    ) if on),
@@ -3383,11 +4279,11 @@ def phase_extended(gate: Gate, args: argparse.Namespace,
     phases = []
     if args.usbip_smoke:
         phases.append(("usbip", phase_extended_usbip, (gate, args)))
-    if args.reboot_recovery:
+    if args.reboot_recovery and not slim:
         phases.append(("recovery", phase_extended_reboot_recovery, (gate, args)))
     if args.flash_image:
         phases.append(("flash", phase_extended_flash, (gate, args)))
-    if args.ota_image or args.ota_interrupt:
+    if (args.ota_image or args.ota_interrupt) and not slim:
         phases.append(("ota", phase_extended_ota, (gate, args)))
     if args.swd_clock_matrix:
         phases.append(("swd-clock", phase_extended_swd_clock,
@@ -3508,6 +4404,27 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Playwright SPA page smoke mode")
     parser.add_argument("--skip-pages", action="store_true",
                         help="skip the page smoke (index + Playwright)")
+    parser.add_argument("--profile", choices=PROFILE_CHOICES,
+                        default=PROFILE_AUTO,
+                        help="firmware profile: auto detects full vs slim from "
+                             "GET /api/discover + a 4-byte POST to "
+                             "/api/ota/upload (read-only probe), full/slim "
+                             "force it and assert the expected endpoints")
+    parser.add_argument("--ws-mdns", choices=("auto", "on", "off"),
+                        default="auto",
+                        help="WS heartbeat/PING-PONG + mDNS TXT checks "
+                             "(auto = on for slim, skipped for full)")
+    parser.add_argument("--mdns-expect-name", default="",
+                        help="expected mDNS TXT name, e.g. "
+                             "WiFi-Dap-4B38 (default: derive from the "
+                             "device STA MAC via WIFI(1)/GET_STA_INFO)")
+    parser.add_argument("--mdns-timeout", type=float, default=5.0,
+                        help="mDNS query timeout in seconds")
+    parser.add_argument("--mdns-host", default="",
+                        help="host/IP to query for the mDNS TXT record "
+                             "(default: --host, then the device WiFi STA IP "
+                             "reported by WIFI(1)/GET_STA_INFO; dual-link "
+                             "devices may answer mDNS only on WiFi)")
     parser.add_argument("--json", action="store_true",
                         help="print the report as JSON on stdout")
     parser.add_argument("--report", metavar="PATH", default=None,
@@ -3542,6 +4459,11 @@ def build_parser() -> argparse.ArgumentParser:
                                "build/openocd-master-install/bin/openocd)")
     extended.add_argument("--openocd-scripts", default=DEFAULT_OPENOCD_SCRIPTS,
                           help="OpenOCD scripts directory")
+    extended.add_argument("--openocd-target-cfg",
+                          default="target/stm32h7x.cfg",
+                          help="OpenOCD target config for the USBIP/OpenOCD "
+                               "smoke (default target/stm32h7x.cfg; S3 F407 "
+                               "boards use target/stm32f4x.cfg)")
     extended.add_argument("--openocd-timeout", type=float, default=120.0,
                           help="per-OpenOCD-session timeout in seconds")
     extended.add_argument("--reboot-recovery", action="store_true",
@@ -3642,6 +4564,19 @@ def validate_args(parser: argparse.ArgumentParser,
     if args.heap_min_free < 0 or args.heap_min_largest < 0 \
             or args.heap_leak_tolerance < 0:
         parser.error("heap thresholds must be >= 0")
+
+    # ---- slim profile validation ----
+    if args.profile == PROFILE_SLIM and (args.ota_image or args.ota_interrupt
+                                         or args.reboot_recovery):
+        parser.error("--profile slim: the final slim firmware removed POST "
+                     "/api/ota/upload, so --ota-image/--ota-interrupt/"
+                     "--reboot-recovery are not available")
+    if not 1.0 <= args.mdns_timeout <= 30.0:
+        parser.error("--mdns-timeout out of range (1..30 s): %g"
+                     % args.mdns_timeout)
+    if args.mdns_expect_name and any(ch.isspace() for ch in args.mdns_expect_name):
+        parser.error("--mdns-expect-name must not contain whitespace: %r"
+                     % args.mdns_expect_name)
 
     # ---- extended (opt-in) mode validation ----
     if args.flash_allow and not args.flash_image:

@@ -18,9 +18,11 @@ No ESP-IDF, Docker, network or hardware is required.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
+import socket
 import struct
 import subprocess
 import sys
@@ -252,7 +254,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(payload["dry_run"])
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["failures"], 0)
-        self.assertEqual(len(payload["scenarios"]), 5)
+        self.assertEqual(len(payload["scenarios"]), 7)
         self.assertTrue(all(item["ok"] for item in payload["scenarios"]))
 
     def test_help_mentions_exit_codes(self) -> None:
@@ -597,6 +599,214 @@ class ExtendedModeTests(unittest.TestCase):
         report = hil.run_gate(args, transport=hil.FakeDevice())
         self.assertFalse(report["modes"]["extended"])
         self.assertEqual(report["extended"], {"enabled": False})
+
+
+
+
+class SlimProfileTests(unittest.TestCase):
+    """Offline coverage for the final slim profile (task final-slim HIL)."""
+
+    def _parse(self, argv):
+        parser = hil.build_parser()
+        args = parser.parse_args(argv)
+        hil.validate_args(parser, args)
+        return args
+
+    def _offline_gate(self, argv, device):
+        args = self._parse(argv)
+        args.host = "dry-run"
+        args.port = 0
+        args.duration = 0.3
+        args.one_series_duration = 0.15
+        args.poll_interval = 0.02
+        args.playwright = "off"
+        args.verbose = False
+        args.allow_legacy_firmware = False
+        args.allow_dap_session = False
+        return hil.run_gate(args, transport=device)
+
+    # -- profile probing ---------------------------------------------------
+    @staticmethod
+    def _response(status, body, content_type="application/json"):
+        headers = {"content-type": content_type} if content_type else {}
+        return hil.Response(status=status, headers=headers, body=body,
+                            elapsed_ms=1.0)
+
+    class _ProbeTransport:
+        def __init__(self, discover, ota):
+            self.discover = discover
+            self.ota = ota
+
+        def request(self, method, path, body=None, timeout=None, retries=1):
+            if path == hil.DISCOVER_PATH and method == "GET":
+                return self.discover
+            raise AssertionError("unexpected request %s %s" % (method, path))
+
+        def request_bytes(self, method, path, data=b"", headers=None,
+                          timeout=None, retries=1, close_after=False):
+            if path == hil.OTA_UPLOAD_PATH:
+                return self.ota
+            raise AssertionError("unexpected raw request %s %s"
+                                 % (method, path))
+
+    def _probe(self, discover, ota, profile=hil.PROFILE_AUTO):
+        args = argparse.Namespace(timeout=5.0, profile=profile)
+        transport = self._ProbeTransport(discover, ota)
+        return hil.probe_device_profile(transport, args)
+
+    def test_probe_slim(self) -> None:
+        probe = self._probe(
+            self._response(200, hil.DRY_RUN_HTML.encode(), "text/html"),
+            self._response(405, b"Specified method is invalid for this resource",
+                           "text/html"))
+        self.assertEqual(probe["detected"], hil.PROFILE_SLIM)
+        self.assertEqual(probe["errors"], [])
+        self.assertTrue(probe["evidence"]["discover"]["spa_html"])
+        self.assertEqual(probe["evidence"]["ota_upload"]["http"], 405)
+
+    def test_probe_full(self) -> None:
+        probe = self._probe(
+            self._response(200, b'{"ok":true,"devices":[]}'),
+            self._response(400, b'{"ok":false,"err":"image too small"}'))
+        self.assertEqual(probe["detected"], hil.PROFILE_FULL)
+        self.assertEqual(probe["errors"], [])
+        self.assertTrue(probe["evidence"]["discover"]["json"])
+
+    def test_probe_ambiguous(self) -> None:
+        probe = self._probe(
+            self._response(200, b'{"ok":true,"devices":[]}'),
+            self._response(405, b"nope", "text/html"))
+        self.assertEqual(probe["detected"], "ambiguous")
+        self.assertTrue(probe["errors"])
+
+    # -- mDNS helpers ------------------------------------------------------
+    def test_derive_mdns_name(self) -> None:
+        self.assertEqual(hil.derive_mdns_name("aa:bb:cc:dd:ca:60"),
+                         "WiFi-Dap-CA60")
+        self.assertEqual(hil.derive_mdns_name("AA:BB:CC:DD:4B:38"),
+                         "WiFi-Dap-4B38")
+        # SYSTEM(0)/GET_SYS_INFO sn is a bare 12-hex STA MAC.
+        self.assertEqual(hil.derive_mdns_name("<device-serial>"),
+                         "WiFi-Dap-CA60")
+        self.assertEqual(hil.derive_mdns_name("10BDA3F04B38"),
+                         "WiFi-Dap-4B38")
+        self.assertIsNone(hil.derive_mdns_name(None))
+        self.assertIsNone(hil.derive_mdns_name("zz"))
+
+    def test_mdns_candidate_hosts(self) -> None:
+        self.assertEqual(
+            hil.mdns_candidate_hosts("192.168.7.1", "",
+                                     "<device-ip>"),
+            ["192.168.7.1", "<device-ip>"])
+        self.assertEqual(
+            hil.mdns_candidate_hosts("192.168.7.1", "10.0.0.5",
+                                     "<device-ip>"),
+            ["10.0.0.5", "192.168.7.1", "<device-ip>"])
+        self.assertEqual(hil.mdns_candidate_hosts("a", "", ""), ["a"])
+
+    def _dns_record(self, name, rtype, rdata, rclass=1):
+        encoded = hil._dns_encode_name(name)
+        return encoded + struct.pack("!HHIH", rtype, rclass, 120,
+                                     len(rdata)) + rdata
+
+    def test_mdns_txt_name_parse(self) -> None:
+        service = "_http._tcp.local"
+        instance = "WiFi-Dap-4B38._http._tcp.local"
+        ptr = self._dns_record(service, 12,
+                              hil._dns_encode_name(instance))
+        srv_rdata = struct.pack("!HHH", 0, 0, 80) + \
+            hil._dns_encode_name("wifi-dap-4b38.local")
+        srv = self._dns_record(instance, 33, srv_rdata)
+        txt_payload = b"name=WiFi-Dap-4B38"
+        txt_rdata = bytes([len(txt_payload)]) + txt_payload
+        txt = self._dns_record(instance, 16, txt_rdata, rclass=0x8001)
+        a = self._dns_record("wifi-dap-4b38.local", 1,
+                             socket.inet_aton("192.168.254.161"),
+                             rclass=0x8001)
+        message = struct.pack("!HHHHHH", 0, 0x8400, 0, 4, 0, 0) + \
+            ptr + srv + txt + a
+        records = hil.parse_dns_response(message)
+        self.assertEqual(len(records), 4)
+        self.assertEqual(hil.mdns_advertised_names(records),
+                         ["WiFi-Dap-4B38"])
+        self.assertIn("192.168.254.161",
+                      [record.get("ip") for record in records])
+
+    def test_build_mdns_query(self) -> None:
+        query = hil.build_mdns_query("_http._tcp.local", unicast=True)
+        self.assertGreater(len(query), 12)
+        self.assertEqual(struct.unpack("!H", query[4:6])[0], 1)  # QDCOUNT
+        self.assertIn(b"\x05_http", query)
+        self.assertIn(b"\x04_tcp", query)
+        self.assertIn(b"\x05local", query)
+
+    # -- CLI / validation --------------------------------------------------
+    def test_profile_flag_choices(self) -> None:
+        args = self._parse([])
+        self.assertEqual(args.profile, hil.PROFILE_AUTO)
+        self.assertEqual(args.ws_mdns, "auto")
+        self.assertEqual(args.mdns_expect_name, "")
+        self.assertAlmostEqual(args.mdns_timeout, 5.0)
+        with self.assertRaises(SystemExit):
+            self._parse(["--profile", "bogus"])
+
+    def test_slim_profile_rejects_ota_modes(self) -> None:
+        parser = hil.build_parser()
+        for argv in (["--profile", "slim", "--ota-image", "/tmp/fw.bin",
+                      "--ota-allow"],
+                     ["--profile", "slim", "--ota-interrupt",
+                      "--ota-restore-image", "/tmp/fw.bin"],
+                     ["--profile", "slim", "--reboot-recovery"]):
+            args = parser.parse_args(argv)
+            with self.assertRaises(SystemExit):
+                hil.validate_args(parser, args)
+
+    def test_mdns_option_validation(self) -> None:
+        parser = hil.build_parser()
+        for argv in (["--mdns-timeout", "0"],
+                     ["--mdns-timeout", "31"],
+                     ["--mdns-expect-name", "has space"]):
+            args = parser.parse_args(argv)
+            with self.assertRaises(SystemExit):
+                hil.validate_args(parser, args)
+
+    # -- offline gate integration -----------------------------------------
+    def test_offline_slim_gate_passes(self) -> None:
+        report = self._offline_gate([], hil.FakeDevice(slim=True))
+        self.assertEqual(report["exit_code"], hil.EXIT_PASS,
+                         msg=json.dumps(report["warnings"]))
+        self.assertEqual(report["profile"]["detected"], hil.PROFILE_SLIM)
+        ids = {check["id"]: check for check in report["checks"]}
+        self.assertTrue(ids["slim.ota.removed"]["ok"])
+        self.assertTrue(ids["slim.discover.removed"]["ok"])
+        self.assertTrue(ids["profile.detected"]["ok"])
+        # WS/mDNS is skipped offline, never failed.
+        self.assertTrue(ids["ws_mdns"].get("skipped"))
+
+    def test_offline_full_gate_still_passes(self) -> None:
+        report = self._offline_gate([], hil.FakeDevice())
+        self.assertEqual(report["exit_code"], hil.EXIT_PASS,
+                         msg=json.dumps(report["warnings"]))
+        self.assertEqual(report["profile"]["detected"], hil.PROFILE_FULL)
+
+    def test_offline_forced_profile_mismatch_fails(self) -> None:
+        report = self._offline_gate(["--profile", "full"],
+                                    hil.FakeDevice(slim=True))
+        self.assertEqual(report["exit_code"], hil.EXIT_FAIL)
+        ids = {check["id"]: check for check in report["checks"]}
+        self.assertFalse(ids["profile.matches_request"]["ok"])
+
+    def test_slim_runtime_skips_ota_extended_modes(self) -> None:
+        # Auto-detected slim + OTA flags: the extended OTA phase must be
+        # skipped (never probe/upload OTA), and the gate still passes.
+        report = self._offline_gate(
+            ["--ota-image", "/tmp/fw.bin", "--ota-allow"],
+            hil.FakeDevice(slim=True))
+        self.assertEqual(report["exit_code"], hil.EXIT_PASS,
+                         msg=json.dumps(report["warnings"]))
+        ids = {check["id"]: check for check in report["checks"]}
+        self.assertTrue(ids["extended.ota.slim"].get("skipped"))
+        self.assertNotIn("extended_ota", report.get("extended") or {})
 
 
 
