@@ -135,6 +135,18 @@ export interface DapTelemetry {
     lastKickError: string;
 }
 
+/** Latest flash attempt (shared by the compact status strip / status page). */
+export interface FlashTelemetry {
+    /** idle = no attempt this session; running/success/error = last attempt state. */
+    phase: 'idle' | 'running' | 'success' | 'error';
+    /** Device/HTTP error detail for `error` (raw text, never fabricated). */
+    message: string;
+    /** Verified written bytes from the flash response (success only). */
+    written: number | null;
+    /** Timestamp of the latest attempt (null while idle). */
+    at: number | null;
+}
+
 /** Rolling browser-measured HTTP RTT samples to /api/target/status. */
 export interface LinkTelemetry {
     samples: number[];
@@ -211,6 +223,7 @@ export const dashboardState = reactive<{
     target: TargetTelemetry;
     dap: DapTelemetry;
     link: LinkTelemetry;
+    flash: FlashTelemetry;
 }>({
     wifi: emptyWifi(),
     target: {
@@ -238,6 +251,12 @@ export const dashboardState = reactive<{
         max: null,
         updatedAt: null,
         polling: false,
+    },
+    flash: {
+        phase: 'idle',
+        message: '',
+        written: null,
+        at: null,
     },
 });
 
@@ -434,6 +453,23 @@ export function recordTargetDetection(info: TargetInfo | null, errorText = ''): 
     target.info = info;
     target.httpStatus = typeof info?.httpStatus === 'number' ? info.httpStatus : null;
     target.lastError = errorText || info?.err || '';
+}
+
+/**
+ * Record the latest flash attempt (called by the target page on start/success/failure).
+ *
+ * The compact status strip and the status page read this shared record, so the
+ * flash result is visible outside the flashing tab without a second poll.
+ */
+export function recordFlashOutcome(
+    phase: FlashTelemetry['phase'],
+    message = '',
+    written: number | null = null,
+): void {
+    dashboardState.flash.phase = phase;
+    dashboardState.flash.message = message;
+    dashboardState.flash.written = written;
+    dashboardState.flash.at = phase === 'idle' ? null : Date.now();
 }
 
 /** Record the latest /api/target/status snapshot (legacy-compatible API). */

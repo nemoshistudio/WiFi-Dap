@@ -223,6 +223,14 @@ const allItems = computed<PaletteItem[]>(() => {
       route: '/wifi',
     },
     {
+      id: 'page:status',
+      kind: 'page',
+      label: translate('page.status'),
+      hint: '',
+      keywords: ['status', 'device', 'dap', 'wifi', 'target', 'link', 'health', 'diagnostics'],
+      route: '/status',
+    },
+    {
       id: 'page:about',
       kind: 'page',
       label: translate('page.about'),
@@ -569,7 +577,7 @@ async function runAction(action: PaletteAction): Promise<void> {
       return;
     }
     case 'diagnostics':
-      await navigateThenRun('/target', 'diagnostics');
+      await navigateThenRun('/status', 'diagnostics');
       return;
     case 'refresh-wifi':
       if (wsStore.state !== ControlEvent.CONNECTED) {

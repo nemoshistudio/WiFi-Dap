@@ -4,9 +4,11 @@ import { useSystemStore } from '@/stores/useSystemStore'
 import type { IWebsocketService } from '@/composables/websocket/websocketService'
 import { getWebsocketService } from '@/composables/websocket/websocketService'
 import { computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { changeFavicon } from '@/composables/importFavicon'
 import { logHelloMessage } from '@/composables/logConsoleMsg'
 import NavBar from '@/views/navigation/NavBar.vue'
+import StatusStrip from '@/components/dashboard/StatusStrip.vue'
 import type { ControlMsg, ServerMsg } from '@/api'
 import { ControlEvent, ControlMsgType, PROTOCOL_VERSION } from '@/api'
 import { routeCtrlMsg, routeModuleServerMsg } from '@/router/msgRouter'
@@ -27,6 +29,9 @@ import { runAfterPaint, runWhenIdle } from '@/utils/idle'
 
 const wsState = useWsStore()
 const systemStore = useSystemStore()
+const route = useRoute()
+/** The compact strip is the app-wide one-line status; /status is the detail copy. */
+const showStatusStrip = computed(() => route.name !== 'status')
 
 const onClientCtrl = (msg: ControlMsg) => {
   if (isDevMode()) {
@@ -163,6 +168,8 @@ const banner = computed<{ type: 'error' | 'warning' | 'info'; title: string; des
         :closable="false"
         show-icon
     />
+    <!-- One compact status row for every page except the detailed /status page. -->
+    <StatusStrip v-if="showStatusStrip" />
     <main id="main-content" class="app-main">
       <RouterView />
     </main>

@@ -30,6 +30,7 @@ export default {
         fullscreen: "全屏",
         windowed: "窗口",
         debugCurve: '变量曲线',
+        status: '设备状态',
     },
 
     uart: {
@@ -876,10 +877,7 @@ export default {
         linkWiredHint: '页面由 192.168.7.x 的有线 USB-NCM 提供：设备固定 192.168.7.1 并运行 DHCP，主机通常自动取址；静态兜底为 192.168.7.2/24、网关留空。',
         linkWifiHint: '页面由设备 WiFi 提供；同一固件也支持 USB-NCM，插线后可用 192.168.7.x 访问（本页不会自动切换网络）。',
         linkUnknownHint: '无法判断物理链路（如开发服务器/离线预览）；本页不会自动切换网络。',
-        quickActions: '快捷入口',
         gotoTarget: '去烧录',
-        gotoCurve: '变量曲线',
-        gotoUart: 'UART',
         openDiagnostics: '诊断 / 恢复',
         deviceOfflineHint: '设备未连接：以下状态显示为未知。',
         flashSuccess: '最近烧录：成功',
@@ -939,6 +937,20 @@ export default {
         flashing: '烧录中…',
     },
 
+    status: {
+        subtitle: '只读设备状态总览：DAP、Wi-Fi、目标、链路与链路健康；诊断与恢复操作集中在下方。',
+        open: '查看详情',
+        openHint: '打开设备状态页',
+        wifi: 'Wi-Fi',
+        target: '目标',
+        lastFlash: '最近烧录',
+        notDetected: '未检测',
+        flashNone: '无记录',
+        flashRunning: '烧录中',
+        flashOk: '成功',
+        flashFail: '失败',
+    },
+
     palette: {
         title: '命令面板',
         placeholder: '搜索页面或操作…',
@@ -959,7 +971,7 @@ export default {
         actionCopyDiag: '复制诊断信息',
         actionCopyDiagHint: '复制当前设备、链路、目标与错误摘要 JSON',
         actionDiagnostics: '打开诊断 / 恢复',
-        actionDiagnosticsHint: '跳转到目标烧录页并展开诊断面板',
+        actionDiagnosticsHint: '跳转到设备状态页并定位到诊断面板',
         actionRefreshWifi: '刷新 WiFi 状态',
         actionRefreshWifiHint: '向设备查询 WiFi 信息（不会切换网络）',
         notConnected: '设备未连接，无法执行该操作',

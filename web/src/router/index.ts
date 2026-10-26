@@ -1,6 +1,7 @@
 import {createRouter, createWebHashHistory, type RouteLocationNormalizedLoaded} from 'vue-router'
 import Wifi from '@/views/Wifi.vue'
 import TargetFlash from '@/views/TargetFlash.vue'
+import Status from '@/views/Status.vue'
 import DebugCurve from '@/views/DebugCurve.vue'
 import About from '@/views/About.vue'
 import Uart from '@/views/Uart.vue'
@@ -39,6 +40,8 @@ function translateRouteTitle(name: unknown): string {
             return translate('target.title');
         case 'debugCurve':
             return translate('page.debugCurve');
+        case 'status':
+            return translate('page.status');
         default:
             // 404 / 未知路由回退品牌名（i18n 契约 §5：标题回退使用品牌常量）
             return BRAND_NAME;
@@ -89,6 +92,11 @@ const router = createRouter({
             meta: { titleKey: 'target.title' },
             name: 'targetFlash',
             component: TargetFlash,
+        }, {
+            path: '/status:ext(.*)',
+            meta: { titleKey: 'page.status' },
+            name: 'status',
+            component: Status,
         }, {
             path: '/debug-curve:ext(.*)',
             meta: { titleKey: 'page.debugCurve' },

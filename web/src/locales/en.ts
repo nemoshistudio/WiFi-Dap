@@ -30,6 +30,7 @@ export default {
         fullscreen: "Fullscreen",
         windowed: "Windowed",
         debugCurve: 'Data Curve',
+        status: 'Device status',
     },
 
     uart: {
@@ -871,10 +872,7 @@ export default {
         linkWiredHint: 'Page is served over the 192.168.7.x USB-NCM network: device 192.168.7.1, host 192.168.7.2/24 with an empty gateway.',
         linkWifiHint: 'Page is served over device WiFi; the wired NCM variant requires the 192.168.7.x address (this page never switches networks automatically).',
         linkUnknownHint: 'Physical link cannot be determined (e.g. dev server/offline preview); this page never switches networks automatically.',
-        quickActions: 'Quick actions',
         gotoTarget: 'Go to flashing',
-        gotoCurve: 'Data Curve',
-        gotoUart: 'UART',
         openDiagnostics: 'Diagnostics / recovery',
         deviceOfflineHint: 'Device offline: the status below is shown as unknown.',
         flashSuccess: 'Last flash: succeeded',
@@ -934,6 +932,20 @@ export default {
         flashing: 'Flashing…',
     },
 
+    status: {
+        subtitle: 'Read-only device status overview: DAP, Wi-Fi, target, link and link health; diagnostics/recovery actions are collected below.',
+        open: 'View details',
+        openHint: 'Open the device status page',
+        wifi: 'Wi-Fi',
+        target: 'Target',
+        lastFlash: 'Last flash',
+        notDetected: 'Not detected',
+        flashNone: 'No record',
+        flashRunning: 'Flashing',
+        flashOk: 'Succeeded',
+        flashFail: 'Failed',
+    },
+
     palette: {
         title: 'Command palette',
         placeholder: 'Search pages or actions…',
@@ -954,7 +966,7 @@ export default {
         actionCopyDiag: 'Copy diagnostics',
         actionCopyDiagHint: 'Copy device, link, target and error summary JSON',
         actionDiagnostics: 'Open diagnostics / recovery',
-        actionDiagnosticsHint: 'Open Target Flash and expand the diagnostics panel',
+        actionDiagnosticsHint: 'Open the device status page and jump to the diagnostics panel',
         actionRefreshWifi: 'Refresh WiFi status',
         actionRefreshWifiHint: 'Query WiFi info from the device (never switches networks)',
         notConnected: 'Device offline; action unavailable',

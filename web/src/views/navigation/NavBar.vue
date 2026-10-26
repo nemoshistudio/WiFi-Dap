@@ -338,6 +338,9 @@ const menuItems: ComputedRef<Item[]> = computed(() => {
     }, {
       name: translate("page.wifi"),
       href: "/wifi",
+    }, {
+      name: translate("page.status"),
+      href: "/status",
     },
   ];
   return items;
@@ -357,6 +360,9 @@ const sideBarItems: ComputedRef<Item[]> = computed(() => {
     }, {
       name: translate("page.wifi"),
       href: "/wifi",
+    }, {
+      name: translate("page.status"),
+      href: "/status",
     }, {
       name: translate("page.about"),
       href: "/about",
