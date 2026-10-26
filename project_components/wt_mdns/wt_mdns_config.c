@@ -34,7 +34,7 @@ void wt_mdns_init()
 
 	/* mac already read above (STA MAC); keep TXT suffix identical to hostname. */
 	char value[64];
-	snprintf(value, 63, "允斯调试器-%02X-%02X", mac[4], mac[5]);
+	snprintf(value, 63, "WiFi-Dap-%02X%02X", mac[4], mac[5]);
 	value[63] = '\0';
 
 	//structure with TXT records
