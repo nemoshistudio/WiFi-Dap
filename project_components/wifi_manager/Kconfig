@@ -18,6 +18,25 @@ menu "WiFi Dap WiFi manager"
             WIFI cmd 8 SET_AP_CRED (docs/wifi-credential-memory.md §6).
             README/UI must tell users to change it on first use.
 
+    config BIRDIEBOT_BOOT_STA_WINDOW_MS
+        int "Boot STA connection window (ms, 0 = disabled)"
+        range 0 300000
+        default 30000
+        help
+            Per-boot policy (docs/wifi-boot-window.md): when a saved STA
+            credential exists, the firmware keeps trying to associate the
+            station for at most this many milliseconds after boot.  If the
+            station is not connected when the window expires, the device
+            switches to AP-only at runtime and pauses the rotation / automatic
+            reconnection until the user issues a manual CONNECT from the AP
+            Web UI (WS WIFI cmd 2).
+
+            The window is a boot-only policy: it is not persisted to NVS and
+            the NVS permanent mode stays WIFI_AP_AUTO_STA_ON, so the next
+            power-on starts a new window.  With no saved STA credential the
+            device goes to AP-only immediately (no window wait).  Set to 0 to
+            disable the policy and keep the legacy boot behaviour.
+
     menu "First-boot STA provisioning (factory/test build)"
 
         config BIRDIEBOT_WIFI_STA_PROV_SSID

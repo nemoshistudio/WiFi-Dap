@@ -43,6 +43,13 @@
 #else
 #define WIFI_MANUAL_CONNECT_TIMEOUT_MS 10000
 #endif
+/* Boot STA connection window (docs/wifi-boot-window.md).  Per-boot policy
+ * only: never persisted; 0 disables the policy (legacy boot behaviour). */
+#ifndef CONFIG_BIRDIEBOT_BOOT_STA_WINDOW_MS
+#define CONFIG_BIRDIEBOT_BOOT_STA_WINDOW_MS 30000
+#endif
+#define BOOT_STA_WINDOW_MS ((uint32_t)CONFIG_BIRDIEBOT_BOOT_STA_WINDOW_MS)
+
 #define WIFI_ROTATION_SCAN_MAX_AP 24
 #define WIFI_ROTATION_CANDIDATE_MAX (BIRDIEBOT_WIFI_CRED_MAX * 2)
 
@@ -79,6 +86,12 @@ typedef struct wifi_ctx_t {
 	volatile uint8_t rotation_cancel;
 	volatile uint8_t rotation_suppressed;
 	volatile uint8_t rotation_pending; /* disconnect seen while rotation was suppressed */
+	/* Boot-only STA policy (docs/wifi-boot-window.md): boot_window_active = the
+	 * post-boot association window is running; boot_ap_only = the window
+	 * expired (or no saved credential): AP kept up and all automatic STA
+	 * retries paused until a manual CONNECT succeeds.  Never persisted. */
+	volatile uint8_t boot_window_active;
+	volatile uint8_t boot_ap_only;
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 	/* C5 single dual-band radio: set while the 5G fallback SoftAP is running
 	 * with no STA connection.  A STA connect (manual or rotation) must suspend
@@ -118,6 +131,8 @@ static void disconn_handler(void);
 static int set_wifi_mode(wifi_apsta_mode_e mode);
 static void handle_wifi_connected(void);
 static void handle_wifi_disconnected(void);
+static void boot_window_task(void *arg);
+static void boot_enter_ap_only(const char *why);
 static void rotation_request_stop(void);
 static int scan_run(wifi_ap_record_t *aps, uint16_t max_ap, uint16_t *found,
                     bool cancellable);
@@ -329,10 +344,117 @@ static void c5_ap_restore_fallback(void)
 	ESP_LOGI(TAG, "C5 single radio: restoring 5G SoftAP fallback, rotation paused");
 	set_wifi_mode(WIFI_AP_START);
 	ctx.ap_fallback_active = 1;
+	/* The failed manual CONNECT leaves the device AP-only with all automatic
+	 * STA retries paused (docs/wifi-boot-window.md). */
+	ctx.boot_ap_only = 1;
+	ctx.auto_reconnect = 0;
 	ctx.rotation_cancel = 1;
 	xEventGroupSetBits(ctx.events, WIFI_EVT_CANCEL);
 }
 #endif /* CONFIG_IDF_TARGET_ESP32C5 */
+
+/** Re-enable the station interface for a manual CONNECT issued while the
+ *  device runs AP-only (boot window expired / no saved credential).  Keeps the
+ *  AP up and does not touch the persisted permanent mode.  Requires ctx.lock
+ *  to be held; avoids set_wifi_mode()'s AP->APSTA hand-off which releases the
+ *  lock in the middle of the connect path. */
+static void ensure_sta_interface_enabled(void)
+{
+	wifi_mode_t new_mode;
+
+	if ((ctx.mode & WIFI_MODE_STA) != 0) {
+		return;
+	}
+	new_mode = (wifi_mode_t)(ctx.mode | WIFI_MODE_STA);
+	if (esp_wifi_set_mode(new_mode) == ESP_OK) {
+		ctx.mode = new_mode;
+		wifi_manager_apply_no_power_save("manual CONNECT");
+	} else {
+		ESP_LOGE(TAG, "manual CONNECT: cannot enable the STA interface");
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Boot-only STA policy (docs/wifi-boot-window.md)                            */
+/*                                                                           */
+/* One power-on may try to join a saved STA for at most                       */
+/* CONFIG_BIRDIEBOT_BOOT_STA_WINDOW_MS.  If the window expires without a      */
+/* connection, the device switches to AP-only at runtime and pauses the       */
+/* rotation / automatic reconnection until the user issues a manual CONNECT   */
+/* from the AP Web UI.  The policy is per-boot only: the NVS permanent mode   */
+/* stays WIFI_AP_AUTO_STA_ON and the next power-on starts a new window.       */
+/* ------------------------------------------------------------------------- */
+
+/** Switch to runtime AP-only and pause all automatic STA retries.
+ *  Requires ctx.lock to be held.  Never changes the persisted mode. */
+static void boot_enter_ap_only(const char *why)
+{
+	ctx.boot_ap_only = 1;
+	ctx.boot_window_active = 0;
+	ctx.auto_reconnect = 0;
+	ctx.rotation_cancel = 1;
+	ctx.rotation_pending = 0;
+	xEventGroupSetBits(ctx.events, WIFI_EVT_CANCEL);
+	esp_wifi_disconnect();
+	vTaskDelay(pdMS_TO_TICKS(50));
+	if (ctx.delayed_startAP_task != NULL) {
+		xTaskNotifyGive(ctx.delayed_startAP_task);
+	}
+	/* Keep the persisted permanent mode untouched: a later manual CONNECT
+	 * success must still follow the normal smart-APSTA design (AP off after
+	 * the station connects).  set_wifi_mode() only flips the runtime mode. */
+	{
+		wifi_apsta_mode_e saved_mode = ctx.permanent_mode;
+		set_wifi_mode(WIFI_AP_ON_STA_OFF);
+		ctx.permanent_mode = saved_mode;
+	}
+	ESP_LOGW(TAG, "%s -> AP-only, rotation paused (per-boot policy only)",
+	         why != NULL ? why : "boot STA window");
+}
+
+/** Monitor the boot STA window; on expiry switch to AP-only. */
+static void boot_window_task(void *arg)
+{
+	(void)arg;
+	const uint32_t window_ms = BOOT_STA_WINDOW_MS;
+	uint32_t elapsed_ms = 0;
+	uint32_t next_log_ms = 10000;
+
+	while (elapsed_ms < window_ms) {
+		if (ctx.is_sta_connected) {
+			ESP_LOGI(TAG, "boot STA window: STA connected after %lu ms",
+			         (unsigned long)elapsed_ms);
+			ctx.boot_window_active = 0;
+			vTaskDelete(NULL);
+		}
+		vTaskDelay(pdMS_TO_TICKS(200));
+		elapsed_ms += 200;
+		if (elapsed_ms >= next_log_ms && elapsed_ms < window_ms) {
+			ESP_LOGI(TAG, "boot STA window: %lu ms elapsed, %lu ms left",
+			         (unsigned long)elapsed_ms,
+			         (unsigned long)(window_ms - elapsed_ms));
+			next_log_ms += 10000;
+		}
+	}
+
+	if (ctx.is_sta_connected) {
+		ESP_LOGI(TAG, "boot STA window: STA connected at window end");
+		ctx.boot_window_active = 0;
+		vTaskDelete(NULL);
+	}
+	if (xSemaphoreTake(ctx.lock, portMAX_DELAY) != pdTRUE) {
+		ctx.boot_window_active = 0;
+		vTaskDelete(NULL);
+	}
+	if (ctx.is_sta_connected) {
+		ctx.boot_window_active = 0;
+		xSemaphoreGive(ctx.lock);
+		vTaskDelete(NULL);
+	}
+	boot_enter_ap_only("boot STA window expired");
+	xSemaphoreGive(ctx.lock);
+	vTaskDelete(NULL);
+}
 
 void wifi_manager_init(void)
 {
@@ -357,6 +479,8 @@ void wifi_manager_init(void)
 	ctx.rotation_cancel = 0;
 	ctx.rotation_suppressed = 0;
 	ctx.rotation_pending = 0;
+	ctx.boot_window_active = 0;
+	ctx.boot_ap_only = 0;
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 	ctx.ap_fallback_active = 0;
 #endif
@@ -520,8 +644,27 @@ void wifi_manager_init(void)
 	esp_log_level_set("wifi", ESP_LOG_WARN);
 
 	wifi_event_set_disco_handler(disconn_handler);
-	if (do_connect) {
+	if (BOOT_STA_WINDOW_MS == 0U) {
+		/* Kconfig disabled the per-boot policy: keep the legacy boot flow. */
+		if (do_connect) {
+			disconn_handler();
+		}
+	} else if (do_connect) {
+		ctx.boot_window_active = 1;
+		ESP_LOGI(TAG, "BOOT STA window %lu ms (per-boot policy only)",
+		         (unsigned long)BOOT_STA_WINDOW_MS);
 		disconn_handler();
+		if (xTaskCreate(boot_window_task, "boot win", 3072, NULL, 2, NULL) != pdPASS) {
+			ctx.boot_window_active = 0;
+			ESP_LOGE(TAG, "boot STA window task create failed; legacy behaviour");
+		}
+	} else {
+		/* No saved STA credential: go AP-only immediately, no pointless 30 s
+		 * wait and no rotation task. */
+		if (xSemaphoreTake(ctx.lock, pdMS_TO_TICKS(2000)) == pdTRUE) {
+			boot_enter_ap_only("boot STA window skipped: no saved credential");
+			xSemaphoreGive(ctx.lock);
+		}
 	}
 
 #if defined(CONFIG_BIRDIEBOT_SSDP_ENABLE)
@@ -834,6 +977,10 @@ static int set_sta_cred(const char *ssid, const char *password)
 static void handle_wifi_connected(void)
 {
 	ctx.is_sta_connected = 1;
+	/* The per-boot policy ends once the station is connected; later
+	 * disconnects keep the existing rotation / AP fallback behaviour. */
+	ctx.boot_window_active = 0;
+	ctx.boot_ap_only = 0;
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 	/* A STA connection always wins the single radio; the fallback AP will be
 	 * stopped by delayed_set_ap_stop() ~2 s later. */
@@ -874,6 +1021,11 @@ static void handle_wifi_disconnected(void)
 		xTaskNotifyGive(ctx.delayed_stopAP_task);
 	}
 	if (ctx.permanent_mode != WIFI_AP_AUTO_STA_ON) {
+		return;
+	}
+	if (ctx.boot_window_active || ctx.boot_ap_only) {
+		/* The boot policy owns the AP/STA retry state: do not schedule the
+		 * 10 s AP fallback while the window is running or AP-only is paused. */
 		return;
 	}
 	++ctx.try_connect_count;
@@ -1040,6 +1192,9 @@ static int rotation_run_candidates(const char (*visible)[BIRDIEBOT_WIFI_SSID_MAX
 	for (int i = 0; i < planned; ++i) {
 		int ret;
 
+		if (ctx.boot_ap_only) {
+			return -1;
+		}
 		if (ctx.rotation_cancel || ctx.auto_reconnect == 0) {
 			return -1;
 		}
@@ -1083,6 +1238,10 @@ static void rotation_task(void *arg)
 	xSemaphoreGive(ctx.lock);
 
 	while (ctx.rotation_cancel == 0 && ctx.auto_reconnect) {
+		if (ctx.boot_ap_only) {
+			ESP_LOGI(TAG, "rotation: boot AP-only policy pausing retries");
+			break;
+		}
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 		/* The fallback 5G AP owns the single radio: retrying the STA here
 		 * would only starve the AP (real-hardware AP-only deadlock).  A
@@ -1194,6 +1353,11 @@ static void disconn_handler(void)
 	 * */
 	wifi_led_set_off();
 	handle_wifi_disconnected();
+	if (ctx.boot_ap_only) {
+		/* Per-boot AP-only policy: no automatic STA retries until a manual
+		 * CONNECT from the AP Web UI succeeds. */
+		return;
+	}
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 	/* While the 5G AP fallback is up, rotation retries cannot reach any STA
 	 * (single radio): keep it paused.  A manual CONNECT from the AP Web UI
@@ -1267,10 +1431,11 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 	 * beaconing.  Suspend the AP first; on failure restore it and keep the
 	 * rotation paused instead of retrying against the AP forever. */
 	bool ap_was_running = c5_ap_suspend_for_sta("manual CONNECT");
-	if (!(ctx.mode & WIFI_MODE_STA)) {
-		set_wifi_mode(WIFI_STA_START);
-	}
 #endif
+	/* Runtime AP-only boot policy: re-enable the station interface before the
+	 * manual CONNECT attempt (AP stays up on APSTA targets; on the C5 it was
+	 * just suspended above). */
+	ensure_sta_interface_enabled();
 
 	ctx.auto_reconnect = 1;
 	wifi_cred_mem_clear_failures();
@@ -1313,6 +1478,7 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 	}
 	if (ret != 0) {
 		ctx.is_sta_connected = 0;
+		ESP_LOGW(TAG, "manual CONNECT \"%s\": failed", ssid);
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 		if (ap_was_running) {
 			/* The user was on the AP Web UI (single radio): bring the 5G AP
@@ -1331,12 +1497,21 @@ int wifi_manager_connect(const char *ssid, const char *password, int save)
 			return 1;
 		}
 #endif
+		if (ctx.boot_ap_only) {
+			/* The per-boot policy is still in force: stay AP-only with the
+			 * rotation paused instead of resuming automatic retries. */
+			ctx.auto_reconnect = 0;
+			ESP_LOGW(TAG, "manual CONNECT \"%s\": failed; AP-only boot policy "
+			         "stays, rotation paused", ssid);
+			return 1;
+		}
 		ESP_LOGW(TAG, "connect to \"%s\" failed, resuming rotation", ssid);
 		if (ctx.auto_reconnect) {
 			disconn_handler();
 		}
 		return 1;
 	}
+	ESP_LOGI(TAG, "manual CONNECT \"%s\": success", ssid);
 	handle_wifi_connected();
 	return 0;
 }
@@ -1364,6 +1539,11 @@ int wifi_manager_disconnect(void)
 int wifi_manager_change_mode(wifi_apsta_mode_e mode)
 {
 	int err;
+	/* An explicit user mode change owns the policy from now on: end the
+	 * per-boot boot-window/AP-only state (the saved mode below follows the
+	 * existing permanent-mode + NVS rules). */
+	ctx.boot_window_active = 0;
+	ctx.boot_ap_only = 0;
 	if (ctx.permanent_mode == mode) {
 		return 0;
 	}
@@ -1491,6 +1671,14 @@ static void delayed_set_ap_start(void *arg)
 	}
 	if (xSemaphoreTake(ctx.lock, pdMS_TO_TICKS(10000)) != pdTRUE) {
 		ctx.delayed_startAP_task = NULL;
+		vTaskDelete(NULL);
+		return;
+	}
+	if (ctx.boot_window_active || ctx.boot_ap_only) {
+		/* The boot policy owns the AP/STA state (window running or AP-only
+		 * paused); the 10 s fallback must not interfere. */
+		ctx.delayed_startAP_task = NULL;
+		xSemaphoreGive(ctx.lock);
 		vTaskDelete(NULL);
 		return;
 	}
