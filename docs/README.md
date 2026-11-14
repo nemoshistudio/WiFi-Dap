@@ -19,6 +19,9 @@
 | **当前功能状态 / 恢复** | [feature-flags.md](feature-flags.md) | final slim 移除项（A1/A2/H1/H3/J1/M1/C4、B2/B3/B5）、Kconfig 开关、备份 tag `backup/full-features-2026-10-26`、逐项恢复步骤、资源收益、验证记录 |
 | **Web UI 当前结构** | [web-status-ui.md](web-status-ui.md) | 页面地图（target/status/curve/uart/wifi/about）、`/#/status` 详情页、compact 状态条、数据来源与 HIL 断言 |
 | **历史归档** | [archive/README.md](archive/README.md) / [archive/removed-features/README.md](archive/removed-features/README.md) | 已移除功能的历史契约/清单/旧任务简报（OTA、discover、SSDP、Ozone、引导等）与按日期归档的验证报告；**仅作证据，不是当前功能** |
+| XRDAP 借鉴项落地（M1–M4） | [xrdap-learnings.md](xrdap-learnings.md) | 探针唯一身份/CMSIS-DAP caps 合规/mDNS TXT、本地 CI 门禁、TCP 3241 骨架、S3 高速 SWD 引擎：默认状态、验证结果、HIL 待办与回退（2026-11-14，非冻结契约） |
+| SWD 高速引擎 | [swd-23mhz-engine.md](swd-23mhz-engine.md) | ESP32-S3 dedicated-GPIO 20/24 MHz 档位、时序预算、`DAP_SWJ_Clock` 接线、Kconfig、HIL 清单与风险 |
+| CMSIS-DAP over TCP 骨架 | [dap-tcp-backend.md](dap-tcp-backend.md) | 3241 端口 `DAP\0` 帧格式、流解析、单客户端服务器、DAP 执行器接线计划、HIL H1–H14（默认关闭） |
 | 部署加固 / 安全自查 | [security.md](security.md) | 面向部署者的精简安全指南：默认实验室模式、开鉴权/改口令/关传输、端口与发现面清单、final slim 无 OTA 端点、Host/Origin guard 默认关闭（M1）、Accepted risks 与 N1–N9 修复状态 |
 | 许可证 / 合规署名 | [NOTICE](../NOTICE) / [LICENSES/](../LICENSES/) | 混合许可总览（本项目原创 Apache-2.0 + 第三方 MIT/Apache-2.0 组件）与许可证全文 |
 | 工具链 / 构建发布 | [scripts/README.md](../scripts/README.md) | Docker ESP-IDF 5.5.6 构建、分区/板级校验、Web 资产、发布包、E2E/HIL 脚本（OTA 脚本仅 full 构建适用） |

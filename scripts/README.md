@@ -9,6 +9,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `idf-docker.sh` | 在 `espressif/idf:v5.5.6` 容器里运行 `idf.py`；整 worktree git 目录只读挂载；`--git-probe` 自检 | WP-002 |
 | `build-lock.sh` | `flock` 构建信号量，最多 3 个并发构建，超限自动排队 | WP-002 |
 | `build_all.sh` | 默认三目标（esp32s3/esp32c3/esp32）+ C5 opt-in（`-t esp32c5`）一键构建 + 版本/大小汇总 + 分区门禁 | WP-143 |
+| `ci_local.sh` | **本地 presubmit 聚合门禁**：host 测试 + 组件 host 测试 + 静态契约门禁（可选 `--build` Docker 构建/分区门禁）；TAP-ish 汇总 + `build/ci/` 日志，与手动 CI 模板同源 | M2 |
 | `check_partitions.py` | 分区表冻结校验（含 docker 内 `gen_esp32part.py`）+ app 大小/版本上限 | WP-142 |
 | `check_board_pins.py` | `components/board` 与 `docs/board-pins.md` 契约比对 + 5 板 host 语法检查 | WP-143 |
 | `gen_web_assets.sh` | `web/dist-gz`/`web/dist` → 暂存 + hash + `web_version.txt`；`--install` 才显式写入 `project_components/html/` | WP-143 |
@@ -57,6 +58,51 @@ scripts/build_all.sh -t esp32s3 --release
 > 注意：ESP-IDF 默认把每个 `-B` 目录的 sdkconfig 都写到工程根 `sdkconfig`，
 > 默认三目标连续构建会互相覆盖。`build_all.sh` 显式传
 > `-D SDKCONFIG=build/<target>/sdkconfig` 隔离；手工构建也请照做。
+
+## 本地 presubmit 聚合门禁：ci_local.sh（M2）
+
+一条命令跑完“提交前必须绿”的本地门禁：host 测试 + 组件 host 测试 + 静态契约门禁，
+需要时再加 Docker 构建与分区门禁。输出 TAP-ish（`ok N - ...` / `not ok N - ...` +
+`#` 诊断），每个阶段完整日志写 `build/ci/<UTC run-id>/`（gitignore；`build/ci/latest`
+指向最近一次）。**不安装依赖、不 pull 镜像、不烧录、不 push/tag**；Docker 镜像缺失时
+相关阶段显式 SKIP 而不是自动拉取。
+
+```bash
+scripts/ci_local.sh                       # host 测试 + 组件 host 测试 + 静态门禁（默认）
+scripts/ci_local.sh --skip-host           # 只跑静态门禁
+scripts/ci_local.sh --skip-web            # 不跑 Web 资产/i18n 门禁（无 Web 构建时本来就 SKIP）
+scripts/ci_local.sh --build s3            # 追加 S3 Docker 构建 + 该目标分区/大小门禁
+scripts/ci_local.sh --build "s3 c3"       # 多目标（逗号/空格分隔）
+scripts/ci_local.sh --build all           # 默认矩阵 s3+c3+esp32（c5 仍 opt-in）
+scripts/ci_local.sh --release --build s3  # 发布 presubmit（需要 HEAD 在 vX.Y.Z tag 上）
+scripts/ci_local.sh --dry-run             # 只打印将执行的命令，不执行
+```
+
+| 阶段 | 内容 | 何时 SKIP |
+| --- | --- | --- |
+| 1. host 测试 | `scripts/test_host.sh`（C wifi_cred_logic + DAP ASan + python 契约套件） | `--skip-host` |
+| 2. 组件 host 测试 | `components/*/test/host/run.sh`，每个组件一个 TAP 项（新增组件自动纳入） | `--skip-host`；runner 需要 Docker 镜像但本机没有（不 pull）或 `--skip-docker` |
+| 3. 静态契约门禁 | `check-protocol-version.sh`、`check_board_pins.py`、`check-release-versions.sh`（仅 `--release`）、`gen_web_assets.sh --check`（存在 `web/dist`/`web/dist-gz` 时）、`web/scripts/check-i18n.mjs --strict`（存在 `web/node_modules` 时） | 各脚本前置不满足时显式 SKIP；`--skip-web` 跳过 Web 两项 |
+| 4. 可选 Docker 构建 | `--build` 时逐目标 `build_all.sh -t <t> --no-check` + `check_partitions.py --bin build/<t>/birdiebot_wifi_dap.bin --require-bin` | 未给 `--build` |
+
+参数：`--skip-host`、`--skip-web`、`--release`、`--build <s3|c3|esp32|c5|all>`、
+`--skip-docker`（跳过需要 Docker 的组件测试；与 `--build` 互斥）、`--dry-run`、
+`-h/--help`。退出码：`0` 所有选中阶段通过（显式 SKIP 不算失败）、`1` 至少一个阶段失败、
+`2` 用法错误。失败阶段的日志尾部会以 `#` 注释形式直接回显。
+
+### 与 CI 模板的映射
+
+`.github/workflows/main.yml` 只是**手动** CI 模板（`workflow_dispatch`，不 push/不发布）。
+其中新增的 `host-tests` job 直接运行 `scripts/ci_local.sh`（不带 `--build`），保证本地
+presubmit 与 CI 同源；该 job 无 `needs`，不影响既有 `web` → `firmware` 依赖关系。
+
+| `.github/workflows/main.yml` | ci_local.sh 对应阶段 | 说明 |
+| --- | --- | --- |
+| `host-tests` job：Host tests + static contract gates | 阶段 1–3（默认） | 同一个聚合器；CI 上无 `web/dist`/`web/node_modules`，Web 两项显式 SKIP |
+| `web` job：`npm ci` + `npm run build` + `gen_web_assets.sh` + 上传 web-assets | 阶段 3 的 `gen_web_assets.sh --check`（仅校验，不跑 npm） | 本地先 `(cd web && bash build.sh)`；聚合器不安装依赖、不构建 Web |
+| `firmware` job matrix：S3/C3/ESP32（`docker run` 构建 + 分区门禁） | 阶段 4：`--build s3` / `--build c3` / `--build esp32`（`--build all` 为三目标矩阵） | CI 在 workflow 内直调 `idf.py`；本地经 `build_all.sh`（构建锁 + 版本解析 + 分区门禁） |
+| `firmware` job：Partition table + app size + image version gate | 阶段 4 的 `check_partitions.py --require-bin`（每目标一次） | 同一脚本、同一契约 |
+| （模板无对应 job） | 阶段 3 的 i18n `--strict`、`check-release-versions.sh`（`--release`） | 仅本地/开发机；发布走 `release_local.sh` 或 `--release` 门禁 |
 
 ## idf-docker.sh
 
@@ -395,6 +441,10 @@ python3 scripts/test_wifi_device_readonly.py --host dap.local --json
 ## 自检 / 验证
 
 ```bash
+# 0) 提交前聚合门禁（host 测试 + 组件 host 测试 + 静态契约；TAP-ish + build/ci/ 日志）
+scripts/ci_local.sh
+scripts/ci_local.sh --release --build s3   # 发布 presubmit（需要 HEAD 在 vX.Y.Z tag 上）
+
 # 1) 镜像 + IDF 版本 + worktree git 挂载
 docker images espressif/idf
 scripts/idf-docker.sh --version

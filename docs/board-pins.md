@@ -213,12 +213,15 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 |---|---|---|
 | 默认 board | `BOARD_WIFI_DAP_S3` | 本组件；Kconfig `BIRDIEBOT_BOARD` |
 | mDNS 主机名 | `wifi-dap-XXXX.local` | XXXX = STA MAC 最后两个字节（4 位小写十六进制），与 AP SSID `WiFi-Dap-XXXX` 同后缀；见 `wt_mdns_config.c` |
+| mDNS TXT | `name` / `serial` / `chip` / `fw` | `name` = `WiFi-Dap-XXXX`（浏览器发现用）；`serial` 为唯一序列号，`chip`/`fw` 供脚本与工具识别；见 `wt_mdns_config.c` |
+| 探针唯一序列号 | `WiFi-Dap-<12HEX>` | 12 位 = WiFi STA MAC 大写十六进制；单一来源 `components/probe_identity/`，同时用于 CMSIS-DAP `DAP_Info(SER_NUM)`、USBIP 字符串描述符 iSerial 与 mDNS TXT `serial`；`SYSTEM/GET_SYS_INFO.sn` 仍为 12hex 无前缀（协议不变） |
 | AP SSID 前缀 | `WiFi-Dap-` | 后缀为 STA MAC 末 2 字节大写 hex（如 `WiFi-Dap-A1B2`），规则见 WiFi 多凭据契约 |
 | SWD 默认时钟 | **2 MHz** | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ=2000000`；真机 STM32F407 验证稳定；4MHz/10MHz 无额外吞吐收益（USBIP/WiFi 延迟为瓶颈） |
+| SWD 高速引擎（M4） | S3 默认开，阈值 12 MHz | `BIRDIEBOT_SWD_ULTRA_FAST=y`（仅 S3）；host 请求 ≥12 MHz 才走专用 GPIO 高速档（160 MHz CPU→20 MHz，240 MHz 变体→24 MHz）；默认 2 MHz 与旧 GPIO/SPI 档行为不变；见 [swd-23mhz-engine.md](swd-23mhz-engine.md) |
 | UART 桥端口 | **1346** | `BIRDIEBOT_UART_BRIDGE_PORT`（旧 A 的 1234 已废弃） |
 | UART 桥波特率 | **115200** | `UART_BRIDGE_BAUDRATE`（旧 A 的 74880 已废弃） |
 | 控制台 | UART0（S3：GPIO43/44） | 不被 UART 桥占用 |
-| 固件服务端口 | 3240（USBIP/DAP）、80（HTTP）、1346（UART TCP 桥）、5353（mDNS）；**1900（SSDP）已在 final slim 移除**（H1） | 集成计划 §1.4；本期**不启用** OTA 3241 |
+| 固件服务端口 | 3240（USBIP/DAP）、80（HTTP）、1346（UART TCP 桥）、5353（mDNS）；**1900（SSDP）已在 final slim 移除**（H1） | 集成计划 §1.4；3241 预留给 CMSIS-DAP TCP 后端（M3 骨架，Kconfig 默认关闭，见 [dap-tcp-backend.md](dap-tcp-backend.md)） |
 
 ---
 

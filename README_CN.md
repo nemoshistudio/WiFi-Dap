@@ -14,7 +14,7 @@
 > 浏览器 Host/Origin 校验**默认关闭**（M1，用户已接受实验室局域网风险，见 [§9](#9-安全默认与加固)）；
 > 曲线系列上限 **256 → 64**（C4）。**新增**：独立 `/#/status` 设备状态页 + 全站
 > compact 状态条（见 [docs/web-status-ui.md](docs/web-status-ui.md)）。
-> USBIP/DAP、目标烧录、变量曲线、UART、WiFi、mDNS（TXT `name=WiFi-Dap-XXXX`）
+> USBIP/DAP、目标烧录、变量曲线、UART、WiFi、mDNS（TXT `name`/`serial`/`chip`/`fw`）
 > 与 About 保留。逐项 Kconfig 开关/恢复方式/资源收益/归档路径见
 > **[docs/feature-flags.md](docs/feature-flags.md)**；已移除功能的历史文档见
 > **[docs/archive/removed-features/](docs/archive/removed-features/README.md)**。
@@ -62,6 +62,8 @@
 | 目标芯片 | ESP32-C3 / ESP32 | 🧪 仅编译 | 4 MB 单 app 分区，无 OTA 分区，未做硬件验证 |
 | 目标芯片 | ESP32-C5 | ✅ 真机验证（非发布目标）、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；实验室 bring-up + final slim HIL 有记录（非发布目标） |
 | 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，引脚见 [docs/board-pins.md](docs/board-pins.md)，默认 SWD 时钟 **2 MHz** |
+| 调试协议 | SWD 高速引擎（M4） | ✅ 代码完成，HIL 待办 | ESP32-S3 专用 GPIO 高速路径：默认 160 MHz CPU 下 **20 MHz**，240 MHz 变体下 **24 MHz**；Kconfig 默认打开，仅当 host 请求 ≥12 MHz 时启用（默认时钟仍 2 MHz）；见 [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
+| 管理传输 | CMSIS-DAP over TCP 后端（M3 骨架） | 🧪 骨架，默认关闭 | 端口 **3241**，OpenOCD `cmsis-dap backend tcp` 帧格式；真正使用前需补 DAP 执行器桥接；见 [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
 | 目标烧录 | Web 直接烧录 / STM32 识别 | ✅ F4/H7 实板验证 | 浏览器上传 `.bin`/`.elf`/`.hex`/`.srec`（前端转裸镜像），ESP32 经 SWD 流式写入（扇区擦除、x64/x32、SHA-256 校验 + SWD 复位）；**全 STM32 系列识别**（DEV_ID 表）；见 [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | 传输性能 | USBIP/DAP 调优 | ✅ | A3：Wi-Fi 下 64 KB 读约 43 KiB/s（延迟受限）；目标烧录时暂停 UART 桥，Wi-Fi/HTTP 保持在线 |
 | USB 传输 | USBIP / WinUSB | ✅ | CMSIS-DAP v2，TCP **3240**；Windows 推荐 usbip-win 0.3.0 `attach_ude` |
@@ -70,16 +72,17 @@
 | 免驱传输 | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil 插件或 OpenOCD 直连，TCP **3240**，无需 USBIP 驱动 |
 | 浏览器传输 | WebSocket-DAP（legacy） | ✅（可关） | TCP **3240**，二进制帧 = CMSIS-DAP 命令包；`CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
 | Web UI | 内嵌管理面板（zh/en） | ✅ | HTTP **80**，SharedWorker 单 WS 连接；页面：**目标烧录 / 设备状态 / 变量曲线 / UART / Wi-Fi / About**；除状态页外每页一条 compact 状态条；i18n 947 key |
-| Wi-Fi | AP + STA（Smart APSTA） | ✅ | 默认 AP `WiFi-Dap-XXXX` / `12345678`；STA 连上 30 s 后关 AP、断开 10 s 后重开；mDNS TXT `name=WiFi-Dap-XXXX` |
+| Wi-Fi | AP + STA（Smart APSTA） | ✅ | 默认 AP `WiFi-Dap-XXXX` / `12345678`；STA 连上 30 s 后关 AP、断开 10 s 后重开；mDNS TXT `name`/`serial`/`chip`/`fw` |
 | Wi-Fi | 多凭据记忆 | ✅ | 最多 8 个网络，自动记忆 + 上电/断线轮换（[契约](docs/wifi-credential-memory.md)） |
 | 串口 | Web UART 终端 + WS 二进制 | ✅ | 默认 115200-8N1，可配数据位/校验/停止位/流控 |
 | 串口 | UART TCP 桥 | ✅（可关） | TCP **1346**；首包文本可切换波特率；`CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE`；C5 使用 UART1 GPIO25/26（回环实测） |
-| 发现 | 仅 mDNS | ✅（SSDP 已移除） | `_http._tcp` 服务 + TXT `name=WiFi-Dap-XXXX`；SSDP/UPnP（H1）与 `GET /api/discover`（H3）已在 slim 移除，见 [归档索引](docs/archive/removed-features/README.md) |
+| 发现 | 仅 mDNS | ✅（SSDP 已移除） | `_http._tcp` 服务 + TXT `name`/`serial`/`chip`/`fw`（`serial=WiFi-Dap-<12HEX>`，每台唯一）；SSDP/UPnP（H1）与 `GET /api/discover`（H3）已在 slim 移除，见 [归档索引](docs/archive/removed-features/README.md) |
 | 固件更新 | USB-JTAG / OpenOCD / UART0 | ✅ | **slim 无 Web OTA**（A1/A2）；经 UART0 或内置 USB Serial/JTAG 重烧（S3：BOOT+RESET ROM 下载；C5：OpenOCD + USB-JTAG）；OTA 分区 + 10 s 回滚确认保留；完整 Web OTA 可从 `backup/full-features-2026-10-26` 恢复 |
 | 变量曲线 | Web 采样 | ✅ | 设备本地采样上限 **64 系列**（原 256，C4）；WS-DAP 模式 24 系列；协议分组格式不变 |
 | 诊断 | coredump 到 Flash | ✅ | 64 KB `coredump` 分区（`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`） |
 | 安全 | 无登录/鉴权（实验室模式）；**slim 默认关闭 Host/Origin 校验** | ⚠️ 实验室模式 | M1 风险已接受；可用 `CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y` 恢复；见 [§9](#9-安全默认与加固) |
 | 版本 | 固件 semver + 协议 v1 | ✅ | About 页 / `SYSTEM/GET_FM_INFO`，见 [docs/versioning.md](docs/versioning.md) |
+| 身份 | 探针唯一序列号/多探针 | ✅ | `WiFi-Dap-<12HEX>`（WiFi STA MAC 派生）；DAP_Info(SER_NUM)、USBIP iSerial、mDNS TXT `serial` 同源（`components/probe_identity/`） |
 
 ## 3. 硬件与引脚
 
@@ -212,7 +215,7 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
    - 默认口令：`12345678`（**首次使用请立即在 Wi-Fi 页修改**，见 [§9](#9-安全默认与加固)）
 3. 浏览器打开 **<http://192.168.1.1/>**（AP 模式默认网关/设备地址）。
    - 若已通过 Wi-Fi 页把设备接入局域网，则改用路由器分配给它的 IP；
-   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap-XXXX.local`，TXT 记录 `name=WiFi-Dap-XXXX`，**XXXX = STA MAC 最后两个字节的 4 位十六进制**（与默认 AP SSID 同后缀；例如 MAC 末两字节 CA:60 → `http://wifi-dap-ca60.local/`）；若解析失败请直接使用设备 IP。slim 已移除 SSDP/UPnP 发现。
+   - mDNS：设备注册 `_http._tcp` 服务，主机名 `wifi-dap-XXXX.local`，TXT 记录 `name`/`serial`/`chip`/`fw`（`name=WiFi-Dap-XXXX`，**XXXX = STA MAC 最后两个字节的 4 位十六进制**；`serial` 为唯一序列号 `WiFi-Dap-<12HEX>`）（与默认 AP SSID 同后缀；例如 MAC 末两字节 CA:60 → `http://wifi-dap-ca60.local/`）；若解析失败请直接使用设备 IP。slim 已移除 SSDP/UPnP 发现。
 4. 在 **Wi-Fi** 页填写并连接你的局域网（支持多网络记忆与自动切换），之后即可在局域网内访问 Web UI、调试器端口与 UART 桥。
 5. 打开 **UART** 页，选择波特率（默认 115200-8N1）即可看目标串口输出；或直接使用 USBIP/elaphureLink 开始调试（[§7](#7-调试工具接入)）。
 
@@ -439,7 +442,7 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 
 ### 13.3 硬件验收清单与 final slim HIL
 
-- **final slim HIL（推荐）**：[docs/hil-gate.md §11](docs/hil-gate.md) —— `--profile auto` 自动识别 slim 固件、断言 OTA/discover 端点不存在、6 条 hash 路由（`/status`、`/target`、`/debug-curve`、`/uart`、`/wifi`、`/about`）、状态页 + compact 状态条、WS/mDNS（TXT `name=WiFi-Dap-XXXX`）。设备证据：`analysis/slim-hil/` —— **S3-F407 600 s soak clean**（110 cycles，0 failures）与 **C5-H7 180 s soak clean**（33 cycles，0 failures），USBIP ×2 与 SWD 时钟矩阵 PASS。
+- **final slim HIL（推荐）**：[docs/hil-gate.md §11](docs/hil-gate.md) —— `--profile auto` 自动识别 slim 固件、断言 OTA/discover 端点不存在、6 条 hash 路由（`/status`、`/target`、`/debug-curve`、`/uart`、`/wifi`、`/about`）、状态页 + compact 状态条、WS/mDNS（TXT `name`/`serial`/`chip`/`fw`）。设备证据：`analysis/slim-hil/` —— **S3-F407 600 s soak clean**（110 cycles，0 failures）与 **C5-H7 180 s soak clean**（33 cycles，0 failures），USBIP ×2 与 SWD 时钟矩阵 PASS。
 - **UART/DataFlow/WS 二进制**：[docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md) —— T1–T8 场景。
 - **DAP/USBIP 真机验证**：[docs/hardware-test-dap.md](docs/hardware-test-dap.md)。
 - **OTA（历史，仅完整构建）**：[docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md)。
@@ -452,7 +455,7 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 |---|---|
 | 找不到 `WiFi-Dap-XXXX` 热点 | 是否已首次烧录；板卡 board 选择是否正确（`sdkconfig.defaults.*`）；串口日志是否有 Wi-Fi 初始化错误；STA 已连接时 AP 会在 30 s 后关闭（正常） |
 | 打开 `192.168.1.1` 无响应 | 手机/PC 是否连的是设备 AP；是否被 Smart APSTA 关闭了 AP；改连 STA 网段的设备 IP |
-| `wifi-dap-XXXX.local` 无法解析 | 设备/客户端 mDNS 支持；检查 TXT `name=WiFi-Dap-XXXX`；改用 IP 访问（主机名见 `wt_mdns_config.h`，XXXX 为 MAC 后两字节）。slim 已移除 SSDP 发现 |
+| `wifi-dap-XXXX.local` 无法解析 | 设备/客户端 mDNS 支持；检查 TXT `name`/`serial`/`chip`/`fw`；改用 IP 访问（主机名见 `wt_mdns_config.h`，XXXX 为 MAC 后两字节）。slim 已移除 SSDP 发现 |
 | Web UI 提示在线但操作被拒（HTTP 403） | 只在重新开启 Host/Origin guard 的加固构建可能出现：用 IP 访问，或把主机名加入 `BIRDIEBOT_WEB_ALLOWED_ORIGIN`（slim 默认关闭 guard） |
 | `/#/update` 返回 404 | 预期：final slim 无 Web OTA/Update 页。用 USB-JTAG/UART0 重烧（见 §4.5），或恢复完整功能构建 |
 | `POST /api/ota/upload` 返回 405/404 | 预期：slim 已移除 OTA 端点。改用 USB-JTAG/OpenOCD/UART0 |

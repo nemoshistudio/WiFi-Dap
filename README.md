@@ -16,7 +16,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 > **disabled by default** (M1 — accepted lab risk, see [§9](#9-security-defaults--hardening));
 > curve series cap **256 → 64** (C4). **New:** independent `/#/status` device
 > status page + app-wide compact status strip ([docs/web-status-ui.md](docs/web-status-ui.md)).
-> USBIP/DAP, target flashing, curves, UART, Wi-Fi, mDNS (TXT `name=WiFi-Dap-XXXX`)
+> USBIP/DAP, target flashing, curves, UART, Wi-Fi, mDNS (TXT `name`/`serial`/`chip`/`fw`)
 > and About remain. Per-item Kconfig flags, restore recipes, resource savings and
 > archive paths: **[docs/feature-flags.md](docs/feature-flags.md)**; historical
 > removed-feature docs: **[docs/archive/removed-features/](docs/archive/removed-features/README.md)**.
@@ -64,6 +64,8 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA partitions, not hardware-validated |
 | SoC | ESP32-C5 | ✅ hardware-validated (non-release target), Wi-Fi-only | ESP-IDF **v5.5.6**, 8 MB dual-slot layout, **no USB-OTG/NCM**; Wi-Fi USBIP + Web/curve/UART; UART1 bridge GPIO25/26; no Web OTA in slim; flashed via built-in USB Serial/JTAG + OpenOCD; lab bring-up + final-slim HIL recorded (not a release target) |
 | Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
+| Debug | SWD high-speed engine (M4) | ✅ code complete, HIL pending | ESP32-S3 dedicated-GPIO ultra-fast path: **20 MHz** at the default 160 MHz CPU, **24 MHz** with the 240 MHz variant; Kconfig default on, engages only when the host requests ≥12 MHz (default clock stays 2 MHz); see [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
+| Management | CMSIS-DAP over TCP backend (M3 skeleton) | 🧪 skeleton, default off | OpenOCD `cmsis-dap backend tcp` framing on port **3241**; requires the DAP-executor bridge before real use; see [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
 | Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`/`.elf`/`.hex`/`.srec` (front-end converts to a raw image); ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
 | USB transport | USBIP / WinUSB | ✅ | CMSIS-DAP v2 on TCP **3240**; Windows: usbip-win 0.3.0 `attach_ude` |
@@ -72,16 +74,17 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | Driver-free | elaphureLink / OpenOCD-elaphureLink | ✅ | Keil plugin or OpenOCD, TCP **3240**, no USBIP driver required |
 | Browser transport | WebSocket-DAP (legacy) | ✅ (can disable) | TCP **3240**, binary frames = CMSIS-DAP command packets; `CONFIG_BIRDIEBOT_DAP_WS_ENABLE` |
 | Web UI | Embedded dashboard (zh/en) | ✅ | HTTP **80**, single SharedWorker WS connection; pages: **Target flash / Device status / Data Curve / UART / Wi-Fi / About**; one compact status strip on every page except status; i18n 947 keys |
-| Wi-Fi | AP + STA (Smart APSTA) | ✅ | Default AP `WiFi-Dap-XXXX` / `12345678`; AP off 30 s after STA connects, on 10 s after disconnect; mDNS TXT `name=WiFi-Dap-XXXX` |
+| Wi-Fi | AP + STA (Smart APSTA) | ✅ | Default AP `WiFi-Dap-XXXX` / `12345678`; AP off 30 s after STA connects, on 10 s after disconnect; mDNS TXT `name`/`serial`/`chip`/`fw` |
 | Wi-Fi | Multi-credential memory | ✅ | Up to 8 networks, auto-save + rotation on boot/disconnect ([contract](docs/wifi-credential-memory.md)) |
 | Serial | Web UART terminal + WS binary | ✅ | 115200-8N1 default; data bits / parity / stop bits / flow control configurable |
 | Serial | UART TCP bridge | ✅ (can disable) | TCP **1346**; first text packet may switch baud rate; `CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE`; C5 uses UART1 GPIO25/26 (loopback verified) |
-| Discovery | mDNS only | ✅ (SSDP removed) | `_http._tcp` service + TXT `name=WiFi-Dap-XXXX`; SSDP/UPnP (H1) and `GET /api/discover` (H3) removed in slim, see [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md) |
+| Discovery | mDNS only | ✅ (SSDP removed) | `_http._tcp` service + TXT `name`/`serial`/`chip`/`fw` (`serial=WiFi-Dap-<12HEX>`, unique per probe); SSDP/UPnP (H1) and `GET /api/discover` (H3) removed in slim, see [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md) |
 | Firmware update | USB-JTAG / OpenOCD / UART0 | ✅ | **No Web OTA in slim** (A1/A2); re-flash via UART0 or the built-in USB Serial/JTAG (S3: BOOT+RESET ROM download; C5: OpenOCD over USB-JTAG); OTA partitions + 10 s rollback confirmation retained; full Web-OTA flow restorable from `backup/full-features-2026-10-26` |
 | Variable curve | Web sampling | ✅ | Device-local sampler limit **64 series** (was 256, C4); WS-DAP mode 24 series; protocol group format unchanged |
 | Diagnostics | coredump to flash | ✅ | 64 KB `coredump` partition (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`) |
 | Security | No login/auth (lab mode); **Host/Origin guard OFF by default in slim** | ⚠️ lab mode | M1 accepted LAN risk; re-enable with `CONFIG_BIRDIEBOT_WEB_HOST_GUARD=y`; see [§9](#9-security-defaults--hardening) |
 | Versioning | Firmware semver + protocol v1 | ✅ | About page / `SYSTEM/GET_FM_INFO`, see [docs/versioning.md](docs/versioning.md) |
+| Identity | Unique probe serial / multi-probe | ✅ | `WiFi-Dap-<12HEX>` derived from the WiFi STA MAC; shared by DAP_Info(SER_NUM), USBIP iSerial and mDNS TXT `serial` (`components/probe_identity/`) |
 
 ## 3. Hardware & pinout
 
@@ -214,7 +217,7 @@ cd .. && scripts/gen_web_assets.sh --install   # explicitly updates project_comp
    - Default password: `12345678` (**change it in the Wi-Fi page on first use**, see [§9](#9-security-defaults--hardening))
 3. Open **<http://192.168.1.1/>** in a browser (default AP gateway/device address).
    - If the device has been joined to your LAN via the Wi-Fi page, use the IP assigned by your router instead;
-   - mDNS: the device registers an `_http._tcp` service under `wifi-dap-XXXX.local` with TXT record `name=WiFi-Dap-XXXX`, where **XXXX is the last two STA MAC bytes as four hex digits** (same suffix as the default AP SSID; e.g. MAC ending CA:60 -> `http://wifi-dap-ca60.local/`). If your resolver cannot find it, use the device IP. SSDP/UPnP discovery was removed in slim.
+   - mDNS: the device registers an `_http._tcp` service under `wifi-dap-XXXX.local` with TXT records `name`/`serial`/`chip`/`fw` (`name=WiFi-Dap-XXXX`, where **XXXX is the last two STA MAC bytes as four hex digits**; `serial` is the unique `WiFi-Dap-<12HEX>`) (same suffix as the default AP SSID; e.g. MAC ending CA:60 -> `http://wifi-dap-ca60.local/`). If your resolver cannot find it, use the device IP. SSDP/UPnP discovery was removed in slim.
 4. In the **Wi-Fi** page, join your LAN (multiple networks are remembered and rotated automatically). Afterwards the Web UI, debugger ports and UART bridge are reachable from that LAN.
 5. Open the **UART** page (115200-8N1 by default) to watch the target's serial output, or start debugging over USBIP/elaphureLink ([§7](#7-debugger-transports)).
 
@@ -441,7 +444,7 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 
 ### 13.3 Hardware checklists & final slim HIL
 
-- **Final slim HIL (recommended)**: [docs/hil-gate.md §11](docs/hil-gate.md) — `--profile auto` detects slim firmware, checks absent OTA/discover endpoints, the 6 hash routes (`/status`, `/target`, `/debug-curve`, `/uart`, `/wifi`, `/about`), status page + compact strip, WS/mDNS (TXT `name=WiFi-Dap-XXXX`). Device evidence: `analysis/slim-hil/` — **S3-F407 600 s soak clean** (110 cycles, 0 failures) and **C5-H7 180 s soak clean** (33 cycles, 0 failures), USBIP ×2 and SWD clock matrix PASS.
+- **Final slim HIL (recommended)**: [docs/hil-gate.md §11](docs/hil-gate.md) — `--profile auto` detects slim firmware, checks absent OTA/discover endpoints, the 6 hash routes (`/status`, `/target`, `/debug-curve`, `/uart`, `/wifi`, `/about`), status page + compact strip, WS/mDNS (TXT `name`/`serial`/`chip`/`fw`). Device evidence: `analysis/slim-hil/` — **S3-F407 600 s soak clean** (110 cycles, 0 failures) and **C5-H7 180 s soak clean** (33 cycles, 0 failures), USBIP ×2 and SWD clock matrix PASS.
 - **UART/DataFlow/WS binary**: [docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md) — scenarios T1–T8.
 - **DAP/USBIP hardware validation**: [docs/hardware-test-dap.md](docs/hardware-test-dap.md).
 - **OTA (historical, full builds only)**: [docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md).
@@ -454,7 +457,7 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 |---|---|
 | `WiFi-Dap-XXXX` AP not found | first flash done? correct board (`sdkconfig.defaults.*`)? Wi-Fi init errors in the serial log? AP turns off 30 s after STA connects (normal) |
 | `192.168.1.1` does not respond | is the client on the device AP? did Smart APSTA turn the AP off? use the device's STA-network IP |
-| `wifi-dap-XXXX.local` does not resolve | mDNS support on device/client; check TXT `name=WiFi-Dap-XXXX`; fall back to the IP (hostname is `wifi-dap-XXXX` in `wt_mdns_config.h`, XXXX = last two MAC bytes). SSDP discovery was removed in slim |
+| `wifi-dap-XXXX.local` does not resolve | mDNS support on device/client; check TXT `name`/`serial`/`chip`/`fw`; fall back to the IP (hostname is `wifi-dap-XXXX` in `wt_mdns_config.h`, XXXX = last two MAC bytes). SSDP discovery was removed in slim |
 | Web UI opens but operations are rejected with HTTP 403 | only possible if a hardened build re-enabled the Host/Origin guard: access via IP or add the hostname to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (slim default: guard off) |
 | `/#/update` returns 404 | expected: the final slim build has no Web OTA/Update page. Re-flash via USB-JTAG/UART0 (see §4.5) or restore a full-feature build |
 | `POST /api/ota/upload` returns 405/404 | expected on slim: OTA endpoint removed. Use USB-JTAG/OpenOCD/UART0 |
