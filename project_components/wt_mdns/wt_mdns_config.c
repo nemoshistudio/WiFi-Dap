@@ -5,6 +5,8 @@
 #include <esp_mac.h>
 #include <stdio.h>
 
+#include "birdiebot_probe_identity.h"
+
 #define MDNS_TAG "wt_mdns"
 
 void wt_mdns_init()
@@ -37,9 +39,15 @@ void wt_mdns_init()
 	snprintf(value, 63, "WiFi-Dap-%02X%02X", mac[4], mac[5]);
 	value[63] = '\0';
 
-	//structure with TXT records
+	/* TXT records: name is the browser-facing short name; serial/chip/fw make
+	 * the probe discoverable and addressable by scripts and future host tools
+	 * (same idea as XRDAP-ESP's _xrdap._tcp TXT records, without changing the
+	 * existing _http._tcp service).  The strings are static in probe_identity. */
 	mdns_txt_item_t serviceTxtData[] = {
 		{"name", value},
+		{"serial", birdiebot_probe_serial()},
+		{"chip", birdiebot_probe_chip()},
+		{"fw", birdiebot_probe_fw_version()},
 	};
 
 	//initialize service

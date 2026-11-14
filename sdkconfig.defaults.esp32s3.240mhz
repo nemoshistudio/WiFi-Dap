@@ -1,0 +1,21 @@
+# Experimental ESP32-S3 240 MHz CPU variant -- M4 SWD ultra-fast engine.
+#
+# The default ESP32-S3 build keeps CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
+# (sdkconfig.defaults.esp32s3) for the existing validated power/thermal/Wi-Fi
+# baseline.  The ultra-fast SWD engine reaches 20 MHz at 160 MHz CPU and
+# 24 MHz at 240 MHz (docs/swd-23mhz-engine.md).  Append this file as a second
+# SDKCONFIG_DEFAULTS entry to build the 24 MHz variant:
+#
+#   idf.py -B build/esp32s3-240 \
+#     -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32s3;sdkconfig.defaults.esp32s3.240mhz" \
+#     -D SDKCONFIG=build/esp32s3-240/sdkconfig set-target esp32s3
+#   idf.py -B build/esp32s3-240 build
+#
+# Or via scripts/idf-docker.sh with the same -D arguments.  This variant is
+# NOT part of the default build/release matrix; hardware validation (Wi-Fi
+# coexistence, PSRAM, thermal, USB-NCM) is pending.  Remove this file's use to
+# return to the 160 MHz baseline.
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80 is not set
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 is not set
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240

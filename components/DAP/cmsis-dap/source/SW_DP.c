@@ -36,6 +36,10 @@
  *              (likely/unlikely, PIN_DELAY_FAST in the no-delay branch,
  *              UNROLL_32 read/write loops, IRAM_ATTR hot functions) and drop
  *              the DAP_SPI_Enable/Disable no-ops plus ESP8266.
+ *    2026-11   M4: new kTransfer_GPIO_ultra_fast backend for the ESP32-S3
+ *              dedicated-GPIO engine (SWD_Fast_GPIO.c).  Opt-in behind
+ *              BIRDIEBOT_SWD_ULTRA_FAST; silently falls back to the GPIO fast
+ *              path if the engine is not active.  See docs/swd-23mhz-engine.md.
  * @version 0.2
  * @date 2026-10-20
  *
@@ -48,6 +52,7 @@
 
 #include "DAP_config.h"
 #include "cmsis-dap/include/DAP.h"
+#include "SWD_Fast_GPIO.h"
 #include "cmsis-dap/include/spi_op.h"
 #include "cmsis-dap/include/spi_switch.h"
 #include "cmsis-dap/include/dap_utility.h"
@@ -519,6 +524,18 @@ uint8_t  SWD_Transfer(uint32_t request, uint32_t *data) {
   switch (SWD_TransferSpeed) {
     case kTransfer_SPI:
       ret = SWD_Transfer_SPI(request, data);
+      break;
+    case kTransfer_GPIO_ultra_fast:
+      /* M4 opt-in backend: ESP32-S3 dedicated-GPIO engine (SWD_Fast_GPIO.c).
+       * It is only selected by DAP_SWJ_Clock after SWD_UltraFast_Available()
+       * said yes, but re-check at transfer time so a lost engine (e.g. a
+       * task running on the wrong core) degrades to the proven GPIO fast
+       * path instead of producing garbage on the wire. */
+      if (SWD_UltraFast_Active()) {
+        ret = SWD_Transfer_Ultra(request, data);
+      } else {
+        ret = SWD_Transfer_GPIO(request, data, 0);
+      }
       break;
     case kTransfer_GPIO_fast:
       ret = SWD_Transfer_GPIO(request, data, 0);

@@ -1,0 +1,74 @@
+menu "WiFi Dap TCP backend (CMSIS-DAP over TCP)"
+
+    config BIRDIEBOT_DAP_TCP_ENABLE
+        bool "Enable the CMSIS-DAP over TCP backend (OpenOCD cmsis-dap backend tcp)"
+        default n
+        help
+            Listen on TCP 3241 and serve one debugger at a time with the
+            CMSIS-DAP TCP frame format shared by OpenOCD's cmsis-dap TCP
+            backend and the XRDAP probes (8-byte header "DAP\0" + u16
+            little-endian length + type + reserved, then the CMSIS-DAP
+            packet).  Frame format, state machine and host tests:
+            docs/dap-tcp-backend.md.
+
+            M3 SKELETON: the server reads frames but does not run the DAP
+            engine.  Every request is handed to the weak hook
+            birdiebot_dap_tcp_execute(); the default implementation reports
+            "not wired" and the server closes the connection.  Wire the hook
+            (docs/dap-tcp-backend.md section 7) before enabling this in a
+            release build.
+
+            The transport is plain text and unauthenticated: enable it only on
+            a trusted LAN.
+
+            Default: n - the shipped USBIP / WebSocket-DAP / elaphureLink
+            behaviour is unchanged and nothing listens on 3241.
+
+    config BIRDIEBOT_DAP_TCP_PORT
+        int "Listening port"
+        depends on BIRDIEBOT_DAP_TCP_ENABLE
+        range 1024 65535
+        default 3241
+        help
+            TCP port of the CMSIS-DAP backend.  3241 matches the XRDAP probes;
+            OpenOCD selects it with `cmsis-dap tcp port 3241`.  The port is
+            free in this firmware (the removed corsacOTA service used it), and
+            the USBIP / WebSocket-DAP / elaphureLink front-end keeps 3240.
+
+    config BIRDIEBOT_DAP_TCP_CORE
+        int "Core affinity of the DAP TCP server task"
+        depends on BIRDIEBOT_DAP_TCP_ENABLE
+        range 0 1
+        default 1 if SOC_CPU_CORES_NUM > 1
+        default 0
+        help
+            Core that runs the DAP TCP server task.  On the dual-core
+            ESP32-S3, core 1 places the socket task next to the DAP task
+            (BIRDIEBOT_DAP_TASK_PRIORITY) and the USBIP front-end, which
+            minimizes the hand-off latency to SWD.
+
+            Single-core targets (ESP32, ESP32-C3, ESP32-C5) must use 0: pinning
+            a task to core 1 trips the FreeRTOS core-id assert.
+
+    config BIRDIEBOT_DAP_TCP_TASK_STACK
+        int "Stack size of the DAP TCP server task (bytes)"
+        depends on BIRDIEBOT_DAP_TCP_ENABLE
+        range 3072 8192
+        default 4096
+        help
+            The session buffers (~2 KiB) are static, so the stack only covers
+            lwIP socket calls and the frame handling.  4096 matches the USBIP
+            front-end task on the S3; raise it if a stack overflow is observed.
+
+    config BIRDIEBOT_DAP_TCP_TASK_PRIORITY
+        int "Priority of the DAP TCP server task"
+        depends on BIRDIEBOT_DAP_TCP_ENABLE
+        range 5 24
+        default 14
+        help
+            FreeRTOS priority of the DAP TCP server task; 14 matches the USBIP
+            front-end (BIRDIEBOT_USBIP_TCP_PRIORITY).  The DAP command task
+            runs higher (16), so an accepted request still gets the SWD
+            bit-banging time slice promptly.
+
+endmenu

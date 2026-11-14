@@ -8,7 +8,9 @@
  *
  */
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "usbip_server.h"
@@ -16,24 +18,47 @@
 #include "components/USBIP/usb_descriptor.h"
 #include "components/USBIP/MSOS20_descriptor.h"
 
+#include "birdiebot_probe_identity.h"
+
 #include "lwip/err.h"
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 #endif
 
+/* USB string descriptor 3 (iSerialNumber): filled from probe_identity on the
+ * first control request.  The old hard-coded "1234" made multiple probes
+ * indistinguishable for the host tools. */
+static char usb_serial_string[64] = "";
+static bool usb_strings_bound = false;
+
 const char *strings_list[] = {
         0, // reserved: available languages  -> iInterface
         "windowsair",
         "Wireless ESP CMSIS-DAP",
-        "1234",
+        usb_serial_string,
 };
+
+/* Bind the runtime serial once (called from every control request; the first
+ * request is far before the host enumerates string descriptors). */
+static void usb_strings_bind_serial(void)
+{
+    if (usb_strings_bound) {
+        return;
+    }
+    (void)snprintf(usb_serial_string, sizeof(usb_serial_string), "%s",
+                   birdiebot_probe_serial());
+    usb_strings_bound = true;
+}
+
 // handle functions
 static void handleGetDescriptor(usbip_stage2_header *header);
 
 ////TODO: may be ok
 void handleUSBControlRequest(usbip_stage2_header *header)
 {
+    usb_strings_bind_serial();
+
     // Table 9-3. Standard Device Requests
 
     switch (header->u.cmd_submit.request.bmRequestType)

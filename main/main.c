@@ -19,6 +19,8 @@
 #include "wt_ota.h"
 #include "project_components/wt_common/wt_protocol_version.h"
 #include "components/board/include/birdiebot_board.h"
+#include "birdiebot_probe_identity.h"
+#include "dap_tcp_server.h"
 
 #include <sdkconfig.h>
 
@@ -158,6 +160,11 @@ void app_main()
 		         esp_get_idf_version());
 	}
 
+	/* Runtime probe identity: unique serial (DAP_Info / USB descriptor / mDNS
+	 * TXT) derived from the factory WiFi STA MAC.  Kept after the first log
+	 * line so docs/versioning.md §2.4 ("first log line") stays true. */
+	birdiebot_probe_identity_init();
+
 	/* PSRAM bring-up diagnostics (C5/S3 PSRAM builds): one line at boot, no
 	 * per-request logging.  heap_largest stays internal-only so the DMA /
 	 * WiFi / lwIP budget is visible after the PSRAM migrations. */
@@ -261,6 +268,21 @@ void app_main()
 
 	start_webserver();
 	BIRDIEBOT_LOG_INTERNAL_HEAP("after webserver");
+
+	/* M3: CMSIS-DAP over TCP backend (OpenOCD `cmsis-dap backend tcp`, port
+	 * 3241).  Kconfig default off; when off the call is a safe no-op.  The
+	 * current skeleton answers through the weak hook in components/dap_tcp and
+	 * does not own the DAP engine yet (docs/dap-tcp-backend.md). */
+	{
+		const esp_err_t dap_tcp_err = dap_tcp_server_start();
+		if ((dap_tcp_err != ESP_OK) &&
+		    (dap_tcp_err != ESP_ERR_NOT_SUPPORTED)) {
+			ESP_LOGW("BIRDIEBOT",
+			         "DAP TCP backend not started: %s",
+			         esp_err_to_name(dap_tcp_err));
+		}
+	}
+	BIRDIEBOT_LOG_INTERNAL_HEAP("after dap_tcp");
 
     /*
      * A3 task tuning (ESP32-S3):

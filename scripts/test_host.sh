@@ -9,7 +9,13 @@
 #                     (pure logic of project_components/wifi_manager/wifi_cred_logic.c)
 #   2. DAP ASan harness: tests/host/dap/ (N1 0x7E recursion, N6 SWJ_Pins wait,
 #                     N9 TransferBlock bounds; compiled from the repo DAP.c)
-#   3. Python tests:  tests/host/test_protocol_frame.py   JSON/WS wire contract
+#   3. C unit tests:  tests/host/test_probe_identity_format.c
+#                     (unique serial formatting from the factory WiFi MAC)
+#   4. CMSIS-DAP over TCP frame codec:
+#                     components/dap_tcp/test/host/run.sh (M3 skeleton)
+#   5. SWD ultra-fast engine plan:
+#                     components/DAP/test/host/run.sh (M4 level/timing model)
+#   6. Python tests:  tests/host/test_protocol_frame.py   JSON/WS wire contract
 #                     tests/host/test_ota_sha.py         OTA upload contract
 #                     tests/host/test_partitions.py      frozen partition tables
 #                     tests/host/test_security_regressions.py  N2/N8/N9 guards
@@ -152,7 +158,89 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Python unittest suites (contract tests, stdlib only)
+# 3. Probe identity serial formatting (pure C, ESP-IDF-free)
+#    components/probe_identity/birdiebot_probe_identity_format.c is the single
+#    source for the runtime serial "WiFi-Dap-<12 uppercase hex MAC>".
+# ---------------------------------------------------------------------------
+identity_bin="$BUILD_DIR/test_probe_identity_format"
+rm -f "$identity_bin"
+if "$CC_BIN" "${cflags[@]}" -I"$ROOT/components/probe_identity/include" \
+        "$HOST_DIR/test_probe_identity_format.c" \
+        "$ROOT/components/probe_identity/birdiebot_probe_identity_format.c" \
+        -o "$identity_bin" >"$LOG_DIR/identity-build.log" 2>&1; then
+    if ASAN_OPTIONS="detect_leaks=0" "$identity_bin" >"$LOG_DIR/identity-run.log" 2>&1; then
+        identity_status=0
+    else
+        identity_status=$?
+    fi
+    identity_summary="$(grep -m1 -oE 'checks=[0-9]+ failed=[0-9]+' "$LOG_DIR/identity-run.log" || true)"
+    diag "probe identity: ${identity_summary:-no summary line}"
+    if [ "$identity_status" -eq 0 ]; then
+        tap_ok "probe identity serial formatting (WiFi-Dap-<12HEX>)"
+    else
+        tap_fail "probe identity serial formatting (WiFi-Dap-<12HEX>)"
+        sed 's/^/#   /' "$LOG_DIR/identity-run.log" | tail -40
+    fi
+else
+    tap_fail "probe identity serial formatting build"
+    sed 's/^/#   /' "$LOG_DIR/identity-build.log" | tail -40
+fi
+
+# ---------------------------------------------------------------------------
+# 4. CMSIS-DAP over TCP frame codec (M3 skeleton, pure C, host-testable)
+#    components/dap_tcp: 8-byte "DAP\0" frame header used by OpenOCD's
+#    `cmsis-dap backend tcp` and the XRDAP probes (see docs/dap-tcp-backend.md).
+# ---------------------------------------------------------------------------
+dap_tcp_runner="$ROOT/components/dap_tcp/test/host/run.sh"
+dap_tcp_log="$LOG_DIR/dap_tcp.log"
+if [ -x "$dap_tcp_runner" ]; then
+    if SANITIZE="$use_sanitize" BUILD_DIR="$BUILD_DIR/dap_tcp" \
+            ASAN_OPTIONS="detect_leaks=0" "$dap_tcp_runner" >"$dap_tcp_log" 2>&1; then
+        dap_tcp_status=0
+    else
+        dap_tcp_status=$?
+    fi
+    dap_tcp_summary="$(grep -m1 -oE '[0-9]+ checks?, [0-9]+ failure' "$dap_tcp_log" || true)"
+    diag "DAP TCP frame codec: ${dap_tcp_summary:-no summary line}"
+    if [ "$dap_tcp_status" -eq 0 ]; then
+        tap_ok "CMSIS-DAP over TCP frame codec (M3 skeleton, host)"
+    else
+        tap_fail "CMSIS-DAP over TCP frame codec (M3 skeleton, host)"
+        sed 's/^/#   /' "$dap_tcp_log" | tail -60
+    fi
+else
+    tap_fail "DAP TCP frame codec runner missing (components/dap_tcp/test/host/run.sh)"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. SWD ultra-fast engine plan (M4, pure C, host-testable)
+#    components/DAP/test/host: level table (CPU 160/240 MHz), never-exceed-host
+#    level selection, request/ACK/parity models and the per-half-cycle wire
+#    budget for the ESP32-S3 dedicated-GPIO engine (docs/swd-23mhz-engine.md).
+# ---------------------------------------------------------------------------
+swd_fast_runner="$ROOT/components/DAP/test/host/run.sh"
+swd_fast_log="$LOG_DIR/swd_fast.log"
+if [ -x "$swd_fast_runner" ]; then
+    if SANITIZE="$use_sanitize" BUILD_DIR="$BUILD_DIR/swd_fast" \
+            ASAN_OPTIONS="detect_leaks=0" "$swd_fast_runner" >"$swd_fast_log" 2>&1; then
+        swd_fast_status=0
+    else
+        swd_fast_status=$?
+    fi
+    swd_fast_summary="$(grep -m1 -oE '[0-9]+ checks passed, [0-9]+ failed' "$swd_fast_log" || true)"
+    diag "SWD ultra-fast plan: ${swd_fast_summary:-no summary line}"
+    if [ "$swd_fast_status" -eq 0 ]; then
+        tap_ok "SWD ultra-fast engine plan (M4: 20/24 MHz levels, host)"
+    else
+        tap_fail "SWD ultra-fast engine plan (M4: 20/24 MHz levels, host)"
+        sed 's/^/#   /' "$swd_fast_log" | tail -40
+    fi
+else
+    tap_fail "SWD ultra-fast plan runner missing (components/DAP/test/host/run.sh)"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Python unittest suites (contract tests, stdlib only)
 # ---------------------------------------------------------------------------
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -m unittest discover \
     -s "$HOST_DIR" -p 'test_*.py' -v >"$LOG_DIR/py.log" 2>&1

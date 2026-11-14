@@ -62,6 +62,11 @@
  * Requires "board" and "esp_timer" in components/DAP/CMakeLists.txt REQUIRES. */
 #include "birdiebot_board.h"
 
+/* Runtime probe identity (unique serial, chip/board/fw strings).  The serial is
+ * used by DAP_GetSerNumString() below so that host tools can select one probe
+ * among several (OpenOCD `adapter serial`, pyOCD `-u`, Keil). */
+#include "birdiebot_probe_identity.h"
+
 #include "cmsis-dap/include/cmsis_compiler.h"
 #include "cmsis-dap/include/gpio_op.h"
 #include "cmsis-dap/include/spi_switch.h"
@@ -280,8 +285,19 @@ __STATIC_INLINE uint8_t DAP_GetProductString(char *str)
  */
 __STATIC_INLINE uint8_t DAP_GetSerNumString(char *str)
 {
-  strcpy(str, "1234");
-  return (sizeof("1234"));
+  /* Unique per-device serial (WiFi-Dap-<12HEX>) from probe_identity.
+   * The old hard-coded "1234" made several probes indistinguishable for
+   * OpenOCD `adapter serial` / pyOCD `-u` / Keil.  DAP_Info strings are
+   * limited to 60 characters + NUL. */
+  const char *serial = birdiebot_probe_serial();
+  size_t len = strlen(serial);
+
+  if (len > 60U) {
+    len = 60U;
+  }
+  memcpy(str, serial, len);
+  str[len] = '\0';
+  return (uint8_t)(len + 1U);
 }
 
 /**

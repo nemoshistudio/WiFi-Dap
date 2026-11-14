@@ -30,7 +30,7 @@ scripts/test_host.sh                 # full host suite (includes this harness)
 Expected tail:
 
 ```
-== 51 checks passed, 0 failed ==
+== 67 checks passed, 0 failed ==
 ```
 
 ## Coverage
@@ -42,6 +42,7 @@ Expected tail:
 | `test_n1_execute_entry_0x7e` | `DAP_ExecuteCommand(0x7E)` accepted at entry (N1 fix) |
 | `test_n9_*` (6 cases) | `TransferBlock` direction-aware caps: read 127 / write 126; 127 write and 128 read rejected; batch (0x7F) and 0x7E-alias paths |
 | `test_n6_swj_pins_wait_microseconds` | `SWJ_Pins` wait is µs (100 µs ≈ 100 ticks) and 3 s clamp still holds (N6 conclusion: previous conversion was a false positive) |
+| `test_info_capabilities_one_byte` | CMSIS-DAP v2.1 `DAP_Info(CAPABILITIES)` is one byte when `DAP_UART` is unsupported (OpenOCD 0.11 compatibility; same approach as XRDAP-ESP) |
 
 The Python `tests/host/test_security_regressions.py` adds source-level guards
 (N2/N8/N9 fix markers) and models the N8 short-OUT tail clearing; the C harness

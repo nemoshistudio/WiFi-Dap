@@ -462,6 +462,27 @@ static void test_w5_batch_read_block_overflow_rejected(void)
     free(req); free(resp);
 }
 
+/* CMSIS-DAP v2.1 DAP_Info(CAPABILITIES) length contract:
+ * when DAP_UART is not supported the response is one data byte; the second
+ * (UART capabilities) byte must not be sent.  Stock OpenOCD 0.11 treats a
+ * two-byte response as malformed ("SWD not supported"). */
+static void test_info_capabilities_one_byte(void)
+{
+    uint8_t req[2] = {ID_DAP_Info, DAP_ID_CAPABILITIES};
+    uint8_t resp[8] = {0};
+    uint32_t n;
+
+    n = DAP_ProcessCommand(req, resp);
+    printf("[INFO] capabilities -> len=%u caps=0x%02X\n",
+           (unsigned)resp[1], (unsigned)resp[2]);
+
+    CHECK(resp[0] == ID_DAP_Info);
+    CHECK(resp[1] == 1U); /* one-byte capabilities when DAP_UART == 0 */
+    CHECK(resp[2] == (uint8_t)((1U << 0) | (1U << 1) | (1U << 4) | (1U << 5)));
+    CHECK((resp[2] & (1U << 7)) == 0U); /* UART capability bit must be clear */
+    CHECK(resp_len(n) == 3U);           /* echo + length + one data byte */
+}
+
 int main(void)
 {
     DAP_Setup();
@@ -484,6 +505,7 @@ int main(void)
     test_w5_batch_exact_write_packing();
     test_w5_batch_exact_read_packing();
     test_w5_batch_read_block_overflow_rejected();
+    test_info_capabilities_one_byte();
 
     printf("== %d checks passed, %d failed ==\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

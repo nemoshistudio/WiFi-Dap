@@ -39,6 +39,8 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 
+#include "sdkconfig.h"
+
 #include "DAP_handle.h"
 #include "tcp_server.h"
 #include "wt_target_flash.h"
@@ -255,13 +257,26 @@ static void curve_dap_release(void)
     ESP_LOGI(CURVE_TAG, "DAP released (USBIP/WS data path restored)");
 }
 
-/** Link the DAP to SWD: auto probe 4M/2M/1M/500k, H7 boards in the field
+/** Link the DAP to SWD: auto probe the clock ladder, H7 boards in the field
  *  only answer at <= 1 MHz.  A manual clock (tf_swd_set_forced_clock) is a
  *  single-shot attempt, and the actually reached clock is reported as
- *  status.link_hz. */
+ *  status.link_hz.
+ *
+ *  M4 (XRDAP-ESP learning): when the ESP32-S3 ultra-fast SWD engine is built
+ *  in (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST, default y), try 24 MHz / 10 MHz first
+ *  and fall back to the proven 4/2/1/0.5 MHz ladder on link-init failure.  The
+ *  engine itself selects the ultra path for requests >= the configured
+ *  threshold; on C3/ESP32/C5 builds the symbol is unset and the legacy ladder
+ *  is unchanged.  NOTE: the 24 MHz tier is not hardware-validated yet (HIL
+ *  pending); a failed init falls through, and the reached clock is reported. */
 static esp_err_t curve_link_up(uint32_t *clock_hz, uint32_t *dpidr)
 {
+#if defined(CONFIG_BIRDIEBOT_SWD_ULTRA_FAST)
+    static const uint32_t clock_try[] = {24000000U, 10000000U, 4000000U,
+                                         2000000U, 1000000U, 500000U};
+#else
     static const uint32_t clock_try[] = {4000000U, 2000000U, 1000000U, 500000U};
+#endif
     uint32_t forced_hz = tf_swd_get_forced_clock();
     uint32_t forced_try[1] = { forced_hz };
     const uint32_t *clocks = forced_hz != 0U ? forced_try : clock_try;

@@ -3,5 +3,5 @@ file(GLOB SOURCES *.c)
 idf_component_register(
         SRCS ${SOURCES}
         INCLUDE_DIRS "."
-        PRIV_REQUIRES dap_proxy
+        PRIV_REQUIRES dap_proxy probe_identity
 )

@@ -11,12 +11,17 @@
 file(GLOB SOURCES
         ./cmsis-dap/source/*.c
         )
+# NOTE: a plain glob is intentional (CONFIGURE_DEPENDS is rejected in IDF
+# component script mode).  Adding/removing a source file here requires a
+# reconfigure; touching this CMakeLists.txt or a clean build does that.
 
 # board/esp_timer must be PUBLIC dependencies: DAP_config.h is a public header
 # (INCLUDE_DIRS ".") and is included by components/dap_proxy (DAP task / LED),
 # which then needs the board pin header and esp_timer.h include paths.
+# probe_identity is public as well: DAP_config.h includes its header for the
+# unique DAP_Info serial number.
 idf_component_register(
         SRCS ${SOURCES}
         INCLUDE_DIRS "."
-        REQUIRES board esp_timer
+        REQUIRES board esp_timer probe_identity
 )

@@ -64,6 +64,17 @@
     #else
         #define DAP_PACKET_SIZE 1024U
     #endif
+
+    /* M3: OpenOCD's cmsis-dap TCP backend allocates a fixed 1024-byte
+     * CMSIS-DAP packet and treats a larger probe response as fatal
+     * (docs/dap-tcp-backend.md §7.3).  While the TCP backend is enabled, cap
+     * the engine packet size at 1024 even on the ESP32-S3.  This is a global
+     * engine packet size, so the USBIP transport also uses 1024 in that build;
+     * the default build (TCP backend off) keeps the 1280/1024 defaults. */
+    #if defined(CONFIG_BIRDIEBOT_DAP_TCP_ENABLE) && CONFIG_BIRDIEBOT_DAP_TCP_ENABLE
+        #undef DAP_PACKET_SIZE
+        #define DAP_PACKET_SIZE 1024U
+    #endif
 #else
     #define DAP_PACKET_SIZE 255U // 255 for USB HID
 #endif

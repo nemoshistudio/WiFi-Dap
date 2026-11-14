@@ -49,6 +49,7 @@
 #include "cmsis-dap/include/DAP.h"
 #include "cmsis-dap/include/dap_stats.h"
 #include "cmsis-dap/include/spi_switch.h"
+#include "SWD_Fast_GPIO.h" /* M4: ESP32-S3 ultra-fast SWD backend */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -146,8 +147,17 @@ static uint8_t DAP_Info(uint8_t id, uint8_t *info) {
                 ((SWO_STREAM != 0U)      ? (1U << 6) : 0U) |
                 ((DAP_UART != 0U)        ? (1U << 7) : 0U);
 
+      /* CMSIS-DAP v2.1: the capabilities response is one byte; the second
+       * byte (UART capabilities) exists only when DAP_UART is supported.
+       * Returning two bytes unconditionally made stock OpenOCD 0.11 read the
+       * response as malformed ("SWD not supported") and required a patch; the
+       * one-byte form keeps old hosts working (same approach as XRDAP-ESP). */
+#if (DAP_UART != 0U)
       info[1] = ((DAP_UART_USB_COM_PORT != 0) ? (1U << 0) : 0U);
       length = 2U;
+#else
+      length = 1U;
+#endif
       break;
     case DAP_ID_TIMESTAMP_CLOCK:
 #if (TIMESTAMP_CLOCK != 0U)
@@ -479,6 +489,33 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
 
   // Note: the supported targets are esp32 (APB 80 MHz), esp32c3 (80 MHz),
   // esp32s3 (80 MHz) and esp32c5 (80 MHz APB); see BUS_CLOCK_FIXED below.
+
+  /* M4: ESP32-S3 dedicated-GPIO ultra-fast SWD engine (docs/swd-23mhz-engine.md).
+   * Leave a previous ultra session first (idempotent no-op); then, for SWD only
+   * and only above the Kconfig threshold, route the pads to the
+   * dedicated-GPIO channels (DAP_SPI_Deinit) and let the engine pick a level
+   * that never exceeds the host request.  If it cannot serve the request
+   * (wrong core, pins not routed, CPU too slow) we fall through to the legacy
+   * selection below unchanged.  The whole block is compiled out when the
+   * engine is disabled (e.g. C3/ESP32/C5, or host unit-test builds of DAP.c),
+   * so those builds never reference the engine symbols. */
+#if defined(CONFIG_BIRDIEBOT_SWD_ULTRA_FAST) && (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST)
+  SWD_UltraFast_Exit();
+  if ((DAP_Data.debug_port != DAP_PORT_JTAG) &&
+      (clock >= (uint32_t)CONFIG_BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ)) {
+    uint32_t ultra_hz;
+
+    DAP_SPI_Deinit();                 /* map pads to CORE1 dedicated GPIO */
+    ultra_hz = SWD_UltraFast_Enter(clock);
+    if (ultra_hz != 0U) {
+      DAP_Data.fast_clock  = 1U;
+      DAP_Data.clock_delay = 1U;
+      SWD_TransferSpeed = kTransfer_GPIO_ultra_fast;
+      *response = DAP_OK;
+      return ((4U << 16) | 1U);
+    }
+  }
+#endif
 
   // clock >= 10MHz -> use 40MHz SPI
   if (clock >= 10000000) {

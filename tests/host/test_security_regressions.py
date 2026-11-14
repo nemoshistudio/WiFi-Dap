@@ -40,6 +40,7 @@ ROOT = sl.ROOT
 DAP_HANDLE_C = ROOT / "components/dap_proxy/DAP_handle.c"
 USB_HANDLE_C = ROOT / "components/USBIP/usb_handle.c"
 DAP_C = ROOT / "components/DAP/cmsis-dap/source/DAP.c"
+DAP_CONFIG_H = ROOT / "components/DAP/DAP_config.h"
 DAP_HARNESS_C = ROOT / "tests/host/dap/harness.c"
 
 DAP_PACKET_SIZE = 512
@@ -138,7 +139,10 @@ class TestN8StaleOutData(unittest.TestCase):
 
 # Mirrors usb_handle.c strings_list[]: index 1..3 are real strings (index 0 is
 # the LANGID descriptor handled separately, index 0xEE is the MS-OS special).
-STRINGS = [None, "windowsair", "Wireless ESP CMSIS-DAP", "1234"]
+# Index 3 is now the runtime serial from probe_identity ("WiFi-Dap-"
+# + 12 uppercase hex MAC); the sample below stands in for a real device.
+SAMPLE_PROBE_SERIAL = "WiFi-Dap-001122334455"
+STRINGS = [None, "windowsair", "Wireless ESP CMSIS-DAP", SAMPLE_PROBE_SERIAL]
 
 
 def clip_len(length: int, wlength: int) -> int:
@@ -295,6 +299,46 @@ class TestN9TransferBlockBounds(unittest.TestCase):
                        "test_n9_write_block_126_accepted"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, src, f"N9 ASan harness case missing: {marker}")
+
+
+# ---------------------------------------------------------------------------
+# Probe identity (XRDAP-ESP learning): unique serial for multi-probe hosts +
+# CMSIS-DAP v2.1 one-byte DAP_Info capabilities when UART is unsupported.
+# ---------------------------------------------------------------------------
+
+class TestProbeIdentityRegression(unittest.TestCase):
+    def test_usb_serial_string_is_runtime_not_hardcoded(self) -> None:
+        src = strip_c_comments(read(USB_HANDLE_C))
+        self.assertIn("usb_serial_string", src,
+                      "USBIP serial string must come from probe_identity")
+        self.assertIn("birdiebot_probe_serial", src,
+                      "USBIP must bind the runtime probe serial")
+        self.assertNotIn('"1234"', src,
+                         "USBIP serial must not be the old hard-coded 1234")
+        self.assertIn("usb_strings_bind_serial", src,
+                      "USBIP serial binding helper is missing")
+
+    def test_dap_info_serial_uses_probe_identity(self) -> None:
+        src = strip_c_comments(read(DAP_CONFIG_H))
+        self.assertIn("birdiebot_probe_serial", src,
+                      "DAP_GetSerNumString must use probe_identity")
+        self.assertNotIn('strcpy(str, "1234")', src,
+                         "DAP_Info serial must not be hard-coded 1234")
+
+    def test_usb_string_descriptor_uses_sample_serial(self) -> None:
+        data = string_descriptor_model(3)
+        self.assertEqual(data[2:], SAMPLE_PROBE_SERIAL.encode("utf-16-le"))
+        self.assertNotEqual(data[2:], "1234".encode("utf-16-le"))
+
+    def test_info_capabilities_one_byte_regression(self) -> None:
+        src = read(DAP_C)
+        self.assertIn("CMSIS-DAP v2.1: the capabilities response is one byte", src,
+                      "capabilities comment/one-byte fix marker is gone")
+        self.assertIn("#if (DAP_UART != 0U)", src,
+                      "capabilities length must depend on DAP_UART")
+        harness = read(DAP_HARNESS_C)
+        self.assertIn("test_info_capabilities_one_byte", harness,
+                      "ASan harness must cover the one-byte capabilities shape")
 
 
 if __name__ == "__main__":

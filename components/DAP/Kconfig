@@ -17,4 +17,69 @@ menu "WiFi Dap core (CMSIS-DAP command engine)"
             Production builds keep this disabled: no counters, no time reads,
             no Vendor9 handler.
 
+    config BIRDIEBOT_SWD_ULTRA_FAST
+        bool "ESP32-S3 ultra-fast dedicated-GPIO SWD engine (~20-24 MHz)"
+        default y
+        depends on IDF_TARGET_ESP32S3
+        help
+            Enable the M4 Xtensa dedicated-GPIO SWD backend
+            (components/DAP/cmsis-dap/source/SWD_Fast_GPIO.c), which replaces
+            the bit-banged SWCLK generation with fully unrolled single-
+            instruction GPIO writes.  Target: ~20 MHz on the default 160 MHz
+            CPU build and ~24 MHz when the CPU runs at 240 MHz, i.e. the same
+            class as XRDAP-ESP's hardware-validated 23.7 MHz engine.
+
+            This does NOT change the default SWD clock: the project default
+            stays 2 MHz (docs/board-pins.md), and the engine is only selected
+            when the host requests >= BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ via
+            DAP_SWJ_Clock (OpenOCD `adapter speed`, target_flash or the local
+            curve sampler).  Any failure (wrong core, pins not routed to the
+            S3 dedicated-GPIO block, unsupported request) falls back to the
+            existing GPIO fast backend.
+
+            Default is y per the M4 user request ("enable the high-speed SWD
+            engine by default"), but the engine is **not yet validated on the
+            real board** (no logic-analyzer/HIL window in this phase).  Set
+            this to n to restore the previous behaviour exactly; see
+            docs/swd-23mhz-engine.md for the HIL checklist and the rollback
+            procedure.  Only affects ESP32-S3 builds (JTAG, ESP32, C3 and C5
+            are unchanged).
+
+    config BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ
+        int "Minimum DAP_SWJ_Clock request (Hz) that selects the ultra engine"
+        default 12000000
+        depends on BIRDIEBOT_SWD_ULTRA_FAST
+        range 1000000 50000000
+        help
+            Lower bound for using the ultra-fast backend.  Requests below this
+            value keep the existing backend selection (GPIO normal / GPIO
+            fast / SPI >= 10 MHz), so low-speed debugging and the 2 MHz
+            default are completely unaffected.
+
+            12 MHz is slightly above the ~12-13 MHz effective SWCLK of the
+            legacy GPIO fast path on the 160 MHz CPU build, so the ultra
+            engine is only used where it can actually be faster.  The engine
+            never exceeds the requested clock: a request of e.g. 15 MHz picks
+            the 13.3 MHz level instead of the 20 MHz one.
+
+    config BIRDIEBOT_SWD_ULTRA_OEN_STAY_ON
+        bool "Keep SWDIO output enabled during SWD turnaround (A-fork workaround)"
+        default n
+        depends on BIRDIEBOT_SWD_ULTRA_FAST
+        help
+            SWD requires the host to release SWDIO during the turnaround and
+            the ACK/data phases driven by the target.  The ultra engine does
+            that by default (same approach as XRDAP-ESP, including the
+            GPIO_ENABLE read-back and settle delay).
+
+            The current GPIO fast path on this board keeps the SWDIO pad
+            output enabled all the time (the A 2025 fork workaround, see
+            DAP_config.h PIN_SWDIO_OUT_ENABLE/DISABLE on ESP32-S3), and that
+            is the configuration known to pass OpenOCD bring-up on this board.
+            Enable this option to make the ultra engine use the same
+            "always driven" behaviour for the HIL A/B comparison if the
+            protocol-correct turnaround fails on a particular target/wiring.
+
+            Leave it disabled unless HIL debugging says otherwise.
+
 endmenu

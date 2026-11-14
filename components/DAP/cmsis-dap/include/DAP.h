@@ -270,7 +270,12 @@ extern volatile uint8_t    DAP_TransferAbort;   // Transfer Abort Flag
 enum transfer_type {
   kTransfer_GPIO_normal,
   kTransfer_GPIO_fast,
-  kTransfer_SPI
+  kTransfer_SPI,
+  /* ESP32-S3 ultra-fast dedicated-GPIO engine (SWD_Fast_GPIO.c, M4).
+   * Selected by DAP_SWJ_Clock only when BIRDIEBOT_SWD_ULTRA_FAST is enabled
+   * and the host asked for >= BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ.  It is
+   * always the last enum value so existing values stay stable. */
+  kTransfer_GPIO_ultra_fast
 };
 
 extern uint8_t SWD_TransferSpeed;
