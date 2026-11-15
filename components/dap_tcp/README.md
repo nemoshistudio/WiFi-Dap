@@ -16,7 +16,7 @@
 
 **骨架边界（重要）**：服务器不接入 DAP 执行器。每个请求帧交给弱钩子
 `birdiebot_dap_tcp_execute()`；默认实现返回"不支持"，服务器记录告警并关闭连接。接入
-DAP 引擎的位置与步骤见 [docs/dap-tcp-backend.md](../../docs/dap-tcp-backend.md) §7。
+DAP 引擎的位置与步骤见 docs/dap-tcp-backend.md §7。
 
 自测：
 

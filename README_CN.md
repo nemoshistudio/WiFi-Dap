@@ -49,7 +49,7 @@
 - **调试链路**：USBIP/WinUSB（CMSIS-DAP v2）、elaphureLink（Keil 免驱）、WebSocket-DAP（浏览器工具）三种传输，均走 **TCP 3240**。
 - **管理链路**：内嵌单页 Web UI（Vue 3 + Vite 构建，gzip 后嵌入固件），通过 **HTTP 80** 提供设备状态、Wi-Fi 配置、UART 终端、目标检测/烧录、变量曲线与版本信息。**final slim 构建无 Web OTA / Update 页**，固件更新走 USB-JTAG / OpenOCD / UART0 ROM 下载（见 [§4.5](#45-首次烧录esp32-s3-8-mb) 与 [§6](#6-web-管理面板)）。
 - **发布目标**：**ESP32-S3 8 MB**（默认板 `BOARD_WIFI_DAP_S3`，双槽分区布局）。ESP32-C3 / ESP32（4 MB）仅做**编译验收**（单 app 分区、未做硬件验证）。
-- **ESP32-C5 变体**：IDF **v5.5.6**、**真机验证（非发布目标）、Wi-Fi-only**（`BOARD_GENERIC_C5`，8 MB 双槽分区布局）。C5 **无 USB-OTG**，物理上不可能做 USB-NCM/有线 DAP；保留 Wi-Fi USBIP + Web/曲线/UART，通过内置 USB Serial/JTAG + OpenOCD 刷写/调试；UART1 桥引脚为 **TX=GPIO25 / RX=GPIO26**（115200 回环实测通过）。见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)。
+- **ESP32-C5 变体**：IDF **v5.5.6**、**真机验证（非发布目标）、Wi-Fi-only**（`BOARD_GENERIC_C5`，8 MB 双槽分区布局）。C5 **无 USB-OTG**，物理上不可能做 USB-NCM/有线 DAP；保留 Wi-Fi USBIP + Web/曲线/UART，通过内置 USB Serial/JTAG + OpenOCD 刷写/调试；UART1 桥引脚为 **TX=GPIO25 / RX=GPIO26**（115200 回环实测通过）。见 docs/esp32-c5-port.md。
 - **final slim（2026-10-26）移除**：Web OTA/Update 页与端点、设备发现卡 + `GET /api/discover`、SSDP/UPnP、首次使用引导、在线手册入口、Ozone 兼容 PoC。分区表、回滚确认与 OTA 组件源码保留；恢复方式：tag `backup/full-features-2026-10-26` + [docs/feature-flags.md](docs/feature-flags.md)。更早移除：ESP8266 支持、KCP 实验传输、corsacOTA（3241）、Widget 仪表盘。
 
 ---
@@ -62,8 +62,8 @@
 | 目标芯片 | ESP32-C3 / ESP32 | 🧪 仅编译 | 4 MB 单 app 分区，无 OTA 分区，未做硬件验证 |
 | 目标芯片 | ESP32-C5 | ✅ 真机验证（非发布目标）、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；实验室 bring-up + final slim HIL 有记录（非发布目标） |
 | 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，引脚见 [docs/board-pins.md](docs/board-pins.md)，默认 SWD 时钟 **2 MHz** |
-| 调试协议 | SWD 全速率引擎（M5） | ✅ H723 目标验证（16 MHz 稳定；20 MHz 边缘） | ESP32-S3 专用 GPIO 引擎是**唯一 SWD 后端**：默认 160 MHz CPU 下 **100 kHz–20 MHz**，240 MHz 变体到 **24 MHz**；旧 GPIO/SPI SWD 后端在 S3 编译移除（无回退）；H723 上 100k–20M 全档验证、目标擦写与 GDB 变量通过；Web UI SWD 时钟可选 500 kHz–24 MHz，WS-DAP bring-up 自动从 24→1.9 MHz 逐档尝试；Kconfig 默认打开；见 [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
-| 管理传输 | CMSIS-DAP over TCP 后端（M3） | 🧪 默认关闭，HIL 待办 | 端口 **3241**，OpenOCD `cmsis-dap backend tcp` 帧格式 + DAP 执行器桥接（`main/dap_tcp_bridge.c`）；OpenOCD master + STM32H723 目标级联调已真机验证（2026-11-15）；见 [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
+| 调试协议 | SWD 全速率引擎（M5） | ✅ H723 目标验证（16 MHz 稳定；20 MHz 边缘） | ESP32-S3 专用 GPIO 引擎是**唯一 SWD 后端**：默认 160 MHz CPU 下 **100 kHz–20 MHz**，240 MHz 变体到 **24 MHz**；旧 GPIO/SPI SWD 后端在 S3 编译移除（无回退）；H723 上 100k–20M 全档验证、目标擦写与 GDB 变量通过；Web UI SWD 时钟可选 500 kHz–24 MHz，WS-DAP bring-up 自动从 24→1.9 MHz 逐档尝试；Kconfig 默认打开；见 docs/swd-23mhz-engine.md |
+| 管理传输 | CMSIS-DAP over TCP 后端（M3） | 🧪 默认关闭，HIL 待办 | 端口 **3241**，OpenOCD `cmsis-dap backend tcp` 帧格式 + DAP 执行器桥接（`main/dap_tcp_bridge.c`）；OpenOCD master + STM32H723 目标级联调已真机验证（2026-11-15）；见 docs/dap-tcp-backend.md |
 | 目标烧录 | Web 直接烧录 / STM32 识别 | ✅ F4/H7 实板验证 | 浏览器上传 `.bin`/`.elf`/`.hex`/`.srec`（前端转裸镜像），ESP32 经 SWD 流式写入（扇区擦除、x64/x32、SHA-256 校验 + SWD 复位）；**全 STM32 系列识别**（DEV_ID 表）；见 [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | 传输性能 | USBIP/DAP 调优 | ✅ | A3：Wi-Fi 下 64 KB 读约 43 KiB/s（延迟受限）；目标烧录时暂停 UART 桥，Wi-Fi/HTTP 保持在线 |
 | USB 传输 | USBIP / WinUSB | ✅ | CMSIS-DAP v2，TCP **3240**；Windows 推荐 usbip-win 0.3.0 `attach_ude` |
@@ -112,7 +112,7 @@
 
 > 通用 C3/ESP32 板的引脚、以及 LED 缺失板（宏为 `_`）的约定见 [docs/board-pins.md §4](docs/board-pins.md)，不要在其他代码里写死 `#ifdef CONFIG_IDF_TARGET_*` 引脚分支。
 
-**C5 UART 桥**：`UART_BRIDGE_TX_PIN=GPIO25` / `UART_BRIDGE_RX_PIN=GPIO26`（UART1 矩阵映射；115200-8N1 回环实测通过）。C5 细节见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)（由 C5 bring-up owner 维护）。
+**C5 UART 桥**：`UART_BRIDGE_TX_PIN=GPIO25` / `UART_BRIDGE_RX_PIN=GPIO26`（UART1 矩阵映射；115200-8N1 回环实测通过）。C5 细节见 docs/esp32-c5-port.md（由 C5 bring-up owner 维护）。
 
 **电源**：目标板 3V3 / GND 需与 DAP 共地；调试目标建议由目标板自供电，DAP 的 GPIO 电压为 3.3 V。
 
@@ -185,7 +185,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 
 - ❌ **不要**写 `build/esp32s3/ota_data_initial.bin`，也**不要**用 `merge_bin` 全量包首烧（会初始化 otadata，掩盖首烧回退逻辑）。
 - 串口控制台：UART0，115200（S3：GPIO43/44）。
-- **之后的固件更新（final slim）**：**没有 Web OTA**。通过 UART0 或内置 USB Serial/JTAG 重烧 `ota_0`（S3：按住 BOOT + RESET 进入 ROM 下载模式；C5：OpenOCD + 内置 USB-JTAG，见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md)）。历史 Web OTA 流程/`scripts/ota_upload.py` 仅适用于从 `backup/full-features-2026-10-26` 恢复的完整功能构建（[归档](docs/archive/removed-features/ota-local-upload.md)）。
+- **之后的固件更新（final slim）**：**没有 Web OTA**。通过 UART0 或内置 USB Serial/JTAG 重烧 `ota_0`（S3：按住 BOOT + RESET 进入 ROM 下载模式；C5：OpenOCD + 内置 USB-JTAG，见 docs/esp32-c5-port.md）。历史 Web OTA 流程/`scripts/ota_upload.py` 仅适用于从 `backup/full-features-2026-10-26` 恢复的完整功能构建（[归档](docs/archive/removed-features/ota-local-upload.md)）。
 
 ### 4.6 发布包（可选）
 
@@ -233,13 +233,13 @@ cd .. && scripts/gen_web_assets.sh --install   # 显式写入 project_components
 |---|---|---|
 | **目标烧录** | `/#/target` | 默认页：目标检测、SWD 时钟与网页端目标烧录（BIN/ELF/HEX/SREC → 裸镜像，SHA-256 + SWD 复位）。只有烧录流程 + compact 状态条，详细状态卡已迁到 `/#/status` |
 | **设备状态** | `/#/status` | 只读详情页：DAP 会话、Wi-Fi、目标检测、物理链路融合、链路健康（浏览器实测 RTT / SWD 时钟 / heap）、错误摘要，以及诊断/恢复（DAP kick、目标复位、刷新、复制 JSON）。唯一运行周期性链路轮询的页面 |
-| **变量曲线** | `/#/debug-curve` | 上传 ELF（解析 DWARF 类型：源变量名/类型/结构体成员/数组）选择变量，经 WS-DAP 最高 100 Hz 采样并实时画曲线，支持 CSV/PNG 导出（会接管 DAP 会话，见 [docs/web-variable-curve.md](docs/web-variable-curve.md)）。设备本地采样上限 **64 系列**（C4） |
+| **变量曲线** | `/#/debug-curve` | 上传 ELF（解析 DWARF 类型：源变量名/类型/结构体成员/数组）选择变量，经 WS-DAP 最高 100 Hz 采样并实时画曲线，支持 CSV/PNG 导出（会接管 DAP 会话，见 docs/web-variable-curve.md）。设备本地采样上限 **64 系列**（C4） |
 | **UART** | `/#/uart` | 串口终端（TX/RX）、波特率/数据位/校验/停止位/流控配置；数据走 WS 二进制 `RAW`/`RAW_BROADCAST` 帧 |
 | **Wi-Fi** | `/#/wifi` | STA 扫描/连接、已保存网络（最多 8 个，可增删/自动保存）、AP 名称与口令、静态 IP/DNS、AP/STA 模式与 Smart APSTA 延迟 |
 | **About** | `/#/about` | 固件版本 / 协议版本 / Web UI 版本 / 硬件版本 / SN / IDF 版本等信息 |
 
 - 语言：中文 / English 可切换（i18n 947 key，见 [docs/i18n-keys.md](docs/i18n-keys.md)）。
-- 状态页/compact 状态条说明：[docs/web-status-ui.md](docs/web-status-ui.md)；final slim HIL 证据：[docs/hil-gate.md §11](docs/hil-gate.md)。
+- 状态页/compact 状态条说明：[docs/web-status-ui.md](docs/web-status-ui.md)；final slim HIL 证据：docs/hil-gate.md §11。
 - 安全：按需求**无登录/鉴权**；Web UI 仅可在可信局域网使用（见 [§9](#9-安全默认与加固)）。
 - 图片预览：[UART 终端](web/assets/uart.png)
 - 更早移除：Widget / `#/widget` 仪表盘（2026-10-21），UART 保留数据显示器/宏命令等全部功能；slim 移除：`/#/update`（OTA）、首次引导、设备发现卡。
@@ -252,7 +252,7 @@ final slim 构建**没有浏览器 OTA / Update 页**（`POST /api/ota/upload` �
 |---|---|
 | **USB-JTAG / esptool（S3）** | 按住 **BOOT(GPIO0) + RESET** 进入 ROM 下载模式，S3 内置 USB Serial/JTAG 会枚举串口，然后按 [§4.5](#45-首次烧录esp32-s3-8-mb) 用 `esptool.py`/`idf.py -p <port> flash`。NCM/Wi-Fi slim 固件同样可用（ROM 下载模式与应用 USB 配置无关） |
 | **UART0 ROM 下载** | BOOT+RESET + UART0（GPIO43/44）配合 esptool |
-| **OpenOCD + USB-JTAG（C5）** | C5 无 USB-OTG，经内置 USB Serial/JTAG 用 OpenOCD 刷写，见 [docs/esp32-c5-port.md](docs/esp32-c5-port.md) |
+| **OpenOCD + USB-JTAG（C5）** | C5 无 USB-OTG，经内置 USB Serial/JTAG 用 OpenOCD 刷写，见 docs/esp32-c5-port.md |
 | **完整功能 OTA（历史）** | 仅在从 `backup/full-features-2026-10-26` 恢复的构建可用；契约归档 [docs/archive/removed-features/ota-local-upload.md](docs/archive/removed-features/ota-local-upload.md) |
 
 恢复/重开步骤见 [docs/feature-flags.md](docs/feature-flags.md)（A1/A2）与 [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md)。
@@ -301,7 +301,7 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
   - 默认波特率 115200（旧版 1234/74880 已废弃）；可通过 `CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE=n` 关闭。
   - 例：`nc <设备IP> 1346`。
 - **控制台 UART0**（S3：GPIO43/44，115200）只用于固件日志，不被 UART 桥/Web UART 占用。
-- Web UART 与 TCP 桥共用同一 UART 服务，可同时连接；多客户端广播语义见 [docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md)。
+- Web UART 与 TCP 桥共用同一 UART 服务，可同时连接；多客户端广播语义见 docs/hardware-test-uart-dataflow.md。
 
 ---
 
@@ -442,9 +442,9 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 
 ### 13.3 硬件验收清单与 final slim HIL
 
-- **final slim HIL（推荐）**：[docs/hil-gate.md §11](docs/hil-gate.md) —— `--profile auto` 自动识别 slim 固件、断言 OTA/discover 端点不存在、6 条 hash 路由（`/status`、`/target`、`/debug-curve`、`/uart`、`/wifi`、`/about`）、状态页 + compact 状态条、WS/mDNS（TXT `name`/`serial`/`chip`/`fw`）。设备证据：`analysis/slim-hil/` —— **S3-F407 600 s soak clean**（110 cycles，0 failures）与 **C5-H7 180 s soak clean**（33 cycles，0 failures），USBIP ×2 与 SWD 时钟矩阵 PASS。
-- **UART/DataFlow/WS 二进制**：[docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md) —— T1–T8 场景。
-- **DAP/USBIP 真机验证**：[docs/hardware-test-dap.md](docs/hardware-test-dap.md)。
+- **final slim HIL（推荐）**：docs/hil-gate.md §11 —— `--profile auto` 自动识别 slim 固件、断言 OTA/discover 端点不存在、6 条 hash 路由（`/status`、`/target`、`/debug-curve`、`/uart`、`/wifi`、`/about`）、状态页 + compact 状态条、WS/mDNS（TXT `name`/`serial`/`chip`/`fw`）。设备证据：`analysis/slim-hil/` —— **S3-F407 600 s soak clean**（110 cycles，0 failures）与 **C5-H7 180 s soak clean**（33 cycles，0 failures），USBIP ×2 与 SWD 时钟矩阵 PASS。
+- **UART/DataFlow/WS 二进制**：docs/hardware-test-uart-dataflow.md —— T1–T8 场景。
+- **DAP/USBIP 真机验证**：docs/hardware-test-dap.md。
 - **OTA（历史，仅完整构建）**：[docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md)。
 
 ---

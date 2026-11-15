@@ -51,7 +51,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 - **Debug transports**: USBIP/WinUSB (CMSIS-DAP v2), elaphureLink (driver-free Keil), and WebSocket-DAP (browser tools) — all on **TCP 3240**.
 - **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**: device status, Wi-Fi setup, UART terminal, target detection/flashing, variable curves and version info. **The final slim build has no Web OTA / Update page**; firmware updates use USB-JTAG, OpenOCD or UART0 ROM download (see [§4.5](#45-first-flash-esp32-s3-8-mb) and [§6](#6-web-ui)).
 - **Release target**: **ESP32-S3 8 MB** (default board `BOARD_WIFI_DAP_S3`, dual-slot partition layout). ESP32-C3 / ESP32 (4 MB) are **compile-only**: single-app partitions, not hardware-validated.
-- **ESP32-C5 variant**: **hardware-validated (non-release target), Wi-Fi-only** on ESP-IDF **v5.5.6** (`BOARD_GENERIC_C5`, 8 MB dual-slot partition layout). The C5 has **no USB-OTG**, so USB-NCM / wired DAP is physically impossible; it keeps Wi-Fi USBIP + Web/curve/UART and is flashed/debugged through its built-in USB Serial/JTAG (OpenOCD). UART1 bridge pins are **TX=GPIO25 / RX=GPIO26**. See [docs/esp32-c5-port.md](docs/esp32-c5-port.md).
+- **ESP32-C5 variant**: **hardware-validated (non-release target), Wi-Fi-only** on ESP-IDF **v5.5.6** (`BOARD_GENERIC_C5`, 8 MB dual-slot partition layout). The C5 has **no USB-OTG**, so USB-NCM / wired DAP is physically impossible; it keeps Wi-Fi USBIP + Web/curve/UART and is flashed/debugged through its built-in USB Serial/JTAG (OpenOCD). UART1 bridge pins are **TX=GPIO25 / RX=GPIO26**. See docs/esp32-c5-port.md.
 - **Removed in the final slim build (2026-10-26)**: Web OTA/Update page and endpoints, device discovery card + `GET /api/discover`, SSDP/UPnP, first-run guided flow, online-manual entry, Ozone compatibility PoC. Partition tables, rollback confirmation and the OTA component source are kept; restore path: tag `backup/full-features-2026-10-26` + [docs/feature-flags.md](docs/feature-flags.md). Also removed earlier: ESP8266 support, experimental KCP transport, corsacOTA (port 3241), Widget dashboard.
 
 ---
@@ -64,8 +64,8 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | SoC | ESP32-C3 / ESP32 | 🧪 compile-only | 4 MB single-app partition, no OTA partitions, not hardware-validated |
 | SoC | ESP32-C5 | ✅ hardware-validated (non-release target), Wi-Fi-only | ESP-IDF **v5.5.6**, 8 MB dual-slot layout, **no USB-OTG/NCM**; Wi-Fi USBIP + Web/curve/UART; UART1 bridge GPIO25/26; no Web OTA in slim; flashed via built-in USB Serial/JTAG + OpenOCD; lab bring-up + final-slim HIL recorded (not a release target) |
 | Debug | SWD / JTAG | ✅ | CMSIS-DAP implementation; pins in [docs/board-pins.md](docs/board-pins.md); default SWD clock **2 MHz** |
-| Debug | SWD all-rate engine (M5) | ✅ H723 target validated (16 MHz stable; 20 MHz marginal) | ESP32-S3 dedicated-GPIO engine is the **only SWD backend**: 100 kHz–20 MHz at the default 160 MHz CPU, 24 MHz with the 240 MHz variant; legacy GPIO/SPI SWD backends are compiled out on S3 (no fallback); H723: 100k–20M all validated, flash program/verify + GDB variables passed; Web UI SWD clock options 500 kHz–24 MHz and WS-DAP bring-up auto-tries 24→1.9 MHz; Kconfig default on; see [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
-| Management | CMSIS-DAP over TCP backend (M3) | 🧪 default off, HIL pending | OpenOCD `cmsis-dap backend tcp` framing on port **3241** + DAP-executor bridge (`main/dap_tcp_bridge.c`); OpenOCD master + STM32H723 target-level validation on hardware 2026-11-15; see [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
+| Debug | SWD all-rate engine (M5) | ✅ H723 target validated (16 MHz stable; 20 MHz marginal) | ESP32-S3 dedicated-GPIO engine is the **only SWD backend**: 100 kHz–20 MHz at the default 160 MHz CPU, 24 MHz with the 240 MHz variant; legacy GPIO/SPI SWD backends are compiled out on S3 (no fallback); H723: 100k–20M all validated, flash program/verify + GDB variables passed; Web UI SWD clock options 500 kHz–24 MHz and WS-DAP bring-up auto-tries 24→1.9 MHz; Kconfig default on; see docs/swd-23mhz-engine.md |
+| Management | CMSIS-DAP over TCP backend (M3) | 🧪 default off, HIL pending | OpenOCD `cmsis-dap backend tcp` framing on port **3241** + DAP-executor bridge (`main/dap_tcp_bridge.c`); OpenOCD master + STM32H723 target-level validation on hardware 2026-11-15; see docs/dap-tcp-backend.md |
 | Target flash | Web direct flashing / STM32 identify | ✅ F4/H7 flash verified | Browser uploads `.bin`/`.elf`/`.hex`/`.srec` (front-end converts to a raw image); ESP32 streams it over SWD (sector-selective erase, x64/x32, SHA-256 verify + SWD reset); **all STM32 series are identified** (DEV_ID table, H7 real-hardware ID); see [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | Transport perf | USBIP/DAP tuning | ✅ | A3: ~43 KiB/s 64 KB read over Wi-Fi (latency-bound); UART bridge is paused during target flashing while Wi-Fi/HTTP stay online |
 | USB transport | USBIP / WinUSB | ✅ | CMSIS-DAP v2 on TCP **3240**; Windows: usbip-win 0.3.0 `attach_ude` |
@@ -114,7 +114,7 @@ Key pins of the default `BOARD_WIFI_DAP_S3`:
 
 > Generic C3/ESP32/C5 pinouts and the "no LED" board convention (`_` macros) are documented in [docs/board-pins.md §4](docs/board-pins.md). Never hard-code `#ifdef CONFIG_IDF_TARGET_*` pin branches elsewhere.
 
-**C5 UART bridge**: `UART_BRIDGE_TX_PIN=GPIO25` / `UART_BRIDGE_RX_PIN=GPIO26` (UART1 matrix mapping; 115200-8N1 loopback verified on hardware). See [docs/esp32-c5-port.md](docs/esp32-c5-port.md) (maintained by the C5 bring-up owner).
+**C5 UART bridge**: `UART_BRIDGE_TX_PIN=GPIO25` / `UART_BRIDGE_RX_PIN=GPIO26` (UART1 matrix mapping; 115200-8N1 loopback verified on hardware). See docs/esp32-c5-port.md (maintained by the C5 bring-up owner).
 
 **Power**: tie 3V3/GND to the target board; probe GPIOs are 3.3 V.
 
@@ -187,7 +187,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 
 - ❌ Do **not** write `build/esp32s3/ota_data_initial.bin`, and do **not** first-flash a `merge_bin` image (it initializes otadata and defeats the fallback path).
 - Serial console: UART0, 115200 (S3: GPIO43/44).
-- **Later firmware updates (final slim)**: there is **no Web OTA**. Re-flash `ota_0` via UART0 or the built-in USB Serial/JTAG (S3: hold BOOT + RESET to enter ROM download mode; C5: OpenOCD over USB-JTAG, see [docs/esp32-c5-port.md](docs/esp32-c5-port.md)). The legacy Web-OTA flow/`scripts/ota_upload.py` only work with a full-feature build restored from `backup/full-features-2026-10-26` ([archive](docs/archive/removed-features/ota-local-upload.md)).
+- **Later firmware updates (final slim)**: there is **no Web OTA**. Re-flash `ota_0` via UART0 or the built-in USB Serial/JTAG (S3: hold BOOT + RESET to enter ROM download mode; C5: OpenOCD over USB-JTAG, see docs/esp32-c5-port.md). The legacy Web-OTA flow/`scripts/ota_upload.py` only work with a full-feature build restored from `backup/full-features-2026-10-26` ([archive](docs/archive/removed-features/ota-local-upload.md)).
 
 ### 4.6 Release package (optional)
 
@@ -235,13 +235,13 @@ The **final slim** Web UI keeps the debugging workflow and removes the former OT
 |---|---|---|
 | **Target flash** | `/#/target` | Default page: target detection, SWD clock and browser-side target flashing (BIN/ELF/HEX/SREC → raw image, SHA-256 + SWD reset). Only the flash workflow + compact strip live here; the detailed status cards were moved to `/#/status` |
 | **Device status** | `/#/status` | Read-only detail page: DAP session, Wi-Fi, target detection, physical-link fusion, link health (browser-measured RTT / SWD clock / heap), error summary, plus diagnostics/recovery (DAP kick, target reset, refresh, copy JSON). The only page that runs the periodic link-status poll |
-| **Data Curve** | `/#/debug-curve` | Upload an ELF (DWARF types parsed: source names/types/struct members/arrays), pick variables, sample at up to 100 Hz over WS-DAP and plot live curves; CSV/PNG export (takes over the DAP session; see [docs/web-variable-curve.md](docs/web-variable-curve.md)). Device-local sampling supports **≤64 series** (C4) |
+| **Data Curve** | `/#/debug-curve` | Upload an ELF (DWARF types parsed: source names/types/struct members/arrays), pick variables, sample at up to 100 Hz over WS-DAP and plot live curves; CSV/PNG export (takes over the DAP session; see docs/web-variable-curve.md). Device-local sampling supports **≤64 series** (C4) |
 | **UART** | `/#/uart` | Serial terminal (TX/RX) and baud/data-bits/parity/stop-bits/flow control; traffic uses WS binary `RAW`/`RAW_BROADCAST` frames |
 | **Wi-Fi** | `/#/wifi` | STA scan/connect, saved networks (up to 8, add/delete, auto-save), AP name/password, static IP/DNS, AP/STA mode and Smart APSTA delays |
 | **About** | `/#/about` | Firmware / protocol / Web UI / hardware versions, serial number, IDF version |
 
 - Languages: Chinese / English (947 i18n keys, see [docs/i18n-keys.md](docs/i18n-keys.md)).
-- Status page & compact strip details: [docs/web-status-ui.md](docs/web-status-ui.md); final-slim HIL evidence: [docs/hil-gate.md §11](docs/hil-gate.md).
+- Status page & compact strip details: [docs/web-status-ui.md](docs/web-status-ui.md); final-slim HIL evidence: docs/hil-gate.md §11.
 - Security: no login/auth (removed by design); the Web UI is usable from the trusted LAN only (see [§9](#9-security-defaults--hardening)).
 - Screenshots: [UART terminal](web/assets/uart.png)
 - Removed earlier: the former Widget / `#/widget` dashboard (2026-10-21); UART keeps the data viewer, macros and its full feature set. Removed in slim: `/#/update` (OTA), guided flow, device-discovery card, `/#/feedback` entry.
@@ -254,7 +254,7 @@ There is **no browser OTA / Update page** in the final slim build (`POST /api/ot
 |---|---|
 | **USB-JTAG / esptool (S3)** | Hold **BOOT (GPIO0) + RESET** to enter ROM download mode; the S3 built-in USB Serial/JTAG exposes a serial port, then `esptool.py`/`idf.py -p <port> flash` as in [§4.5](#45-first-flash-esp32-s3-8-mb). Works with the NCM/Wi-Fi slim firmware (ROM download mode is independent of the app USB configuration) |
 | **UART0 ROM download** | BOOT+RESET + UART0 (GPIO43/44) with esptool |
-| **OpenOCD + USB-JTAG (C5)** | C5 has no USB-OTG; flash via OpenOCD over its built-in USB Serial/JTAG, see [docs/esp32-c5-port.md](docs/esp32-c5-port.md) |
+| **OpenOCD + USB-JTAG (C5)** | C5 has no USB-OTG; flash via OpenOCD over its built-in USB Serial/JTAG, see docs/esp32-c5-port.md |
 | **Full-feature OTA (historical)** | Only in a build restored from `backup/full-features-2026-10-26`; contract archived at [docs/archive/removed-features/ota-local-upload.md](docs/archive/removed-features/ota-local-upload.md) |
 
 Restore/re-enable steps: [docs/feature-flags.md](docs/feature-flags.md) (A1/A2) and [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md).
@@ -303,7 +303,7 @@ The device presents itself as a standard **CMSIS-DAP v2** probe (SWD/JTAG); sele
   - Default baud is 115200 (the old 1234/74880 defaults are deprecated); disable with `CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE=n`.
   - Example: `nc <device-ip> 1346`.
 - **Console UART0** (S3: GPIO43/44, 115200) is for firmware logs only and is not used by the bridge or Web UART.
-- Web UART and the TCP bridge share the same UART service and can be connected simultaneously; multi-client broadcast semantics are covered in [docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md).
+- Web UART and the TCP bridge share the same UART service and can be connected simultaneously; multi-client broadcast semantics are covered in docs/hardware-test-uart-dataflow.md.
 
 ---
 
@@ -444,9 +444,9 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 
 ### 13.3 Hardware checklists & final slim HIL
 
-- **Final slim HIL (recommended)**: [docs/hil-gate.md §11](docs/hil-gate.md) — `--profile auto` detects slim firmware, checks absent OTA/discover endpoints, the 6 hash routes (`/status`, `/target`, `/debug-curve`, `/uart`, `/wifi`, `/about`), status page + compact strip, WS/mDNS (TXT `name`/`serial`/`chip`/`fw`). Device evidence: `analysis/slim-hil/` — **S3-F407 600 s soak clean** (110 cycles, 0 failures) and **C5-H7 180 s soak clean** (33 cycles, 0 failures), USBIP ×2 and SWD clock matrix PASS.
-- **UART/DataFlow/WS binary**: [docs/hardware-test-uart-dataflow.md](docs/hardware-test-uart-dataflow.md) — scenarios T1–T8.
-- **DAP/USBIP hardware validation**: [docs/hardware-test-dap.md](docs/hardware-test-dap.md).
+- **Final slim HIL (recommended)**: docs/hil-gate.md §11 — `--profile auto` detects slim firmware, checks absent OTA/discover endpoints, the 6 hash routes (`/status`, `/target`, `/debug-curve`, `/uart`, `/wifi`, `/about`), status page + compact strip, WS/mDNS (TXT `name`/`serial`/`chip`/`fw`). Device evidence: `analysis/slim-hil/` — **S3-F407 600 s soak clean** (110 cycles, 0 failures) and **C5-H7 180 s soak clean** (33 cycles, 0 failures), USBIP ×2 and SWD clock matrix PASS.
+- **UART/DataFlow/WS binary**: docs/hardware-test-uart-dataflow.md — scenarios T1–T8.
+- **DAP/USBIP hardware validation**: docs/hardware-test-dap.md.
 - **OTA (historical, full builds only)**: [docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md).
 
 ---

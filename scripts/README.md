@@ -284,7 +284,7 @@ dap_smoke 的 USBIP 探测会打断正在进行的调试会话——调试时请
 **只读**真机门禁（不写目标 Flash、不 OTA、不复位目标）：`GET /api/target/info`
 检测 → `target/status` 诊断字段 → `curve/start` 1 系列冒烟 → `curve/start`
 5 系列 10 s 性能窗口（计算有效帧率/丢帧/invalid）→ `curve/stop` → heap/无泄漏
-→ 页面 smoke（slim：首页 + `/#/status`、`/#/target`、`/#/debug-curve`、`/#/uart`、`/#/wifi`、`/#/about`；full 旧版含 `/#/update`，Playwright 可选）→ JSON/人体可读报告 + CI 退出码。文档：[`docs/hil-gate.md`](../docs/hil-gate.md)。
+→ 页面 smoke（slim：首页 + `/#/status`、`/#/target`、`/#/debug-curve`、`/#/uart`、`/#/wifi`、`/#/about`；full 旧版含 `/#/update`，Playwright 可选）→ JSON/人体可读报告 + CI 退出码。文档：`docs/hil-gate.md`。
 
 ```bash
 # 标准门禁（默认 <device-ip>:80；JSON 报告 + 退出码）

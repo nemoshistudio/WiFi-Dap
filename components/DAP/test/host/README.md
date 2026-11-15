@@ -32,7 +32,7 @@ The Xtensa assembly itself cannot run on the host. It is verified by:
 
 1. compiling the real `SWD_Fast_GPIO.c` with the `xtensa-esp32s3-elf`
    toolchain (the ESP-IDF Docker build does this for real), and
-2. the HIL checklist in [docs/swd-23mhz-engine.md](../../../../docs/swd-23mhz-engine.md) §6.
+2. the HIL checklist in docs/swd-23mhz-engine.md §6.
 
 ## Run
 
