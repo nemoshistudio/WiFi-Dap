@@ -411,6 +411,12 @@ if [ "$CHECK" -eq 1 ]; then
             if [ ! -f "$installed" ]; then
                 printf '%s: MISSING installed asset %s\n' "$SCRIPT_NAME" "$name" >&2
                 rc=1
+            elif [ "$name" = "build-info.json.gz" ]; then
+                # build-info embeds the commit/timestamp of the build, so it can
+                # never be byte-identical across commits in a clean clone. Its
+                # volatile fields are ignored; the stable hashes live in
+                # web_version.txt and the index/worker checks below.
+                log "check skip: $name (volatile build provenance)"
             elif [ "$(sha256sum "$installed" | awk '{print $1}')" != "${HASHES[$name]}" ]; then
                 printf '%s: HASH MISMATCH %s (installed != web build)\n' "$SCRIPT_NAME" "$name" >&2
                 rc=1
