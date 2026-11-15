@@ -26,7 +26,6 @@ From this interface you can monitor and interact with your target device.
 ## Screenshots
 
 **UART Data Viewer**
-![UART Data Viewer](assets/uart.png)
 
 ## Getting Started
 

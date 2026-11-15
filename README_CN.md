@@ -100,4 +100,4 @@ python3 scripts/ota_upload.py --host 192.168.7.1 \
 - [kerms/wireless-esp32-tools-web-host](https://github.com/kerms/wireless-esp32-tools-web-host) — MIT
 - ARM CMSIS-DAP — Apache-2.0
 
-WiFi Dap 由本项目贡献者维护；上述上游作者是依赖并被署名，不是本仓库作者。
+WiFi Dap 由本项目贡献者维护，见 [CONTRIBUTORS.md](CONTRIBUTORS.md)；开发协助：[DeepSeek](https://github.com/deepseek-ai)。上述上游作者是依赖并被署名，不是本仓库作者。

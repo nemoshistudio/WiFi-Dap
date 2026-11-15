@@ -310,7 +310,7 @@ python3 scripts/hil_gate.py --dry-run
 > `backup/full-features-2026-10-26` 恢复的 full 构建。slim 固件更新走 USB-JTAG/UART0。**
 
 Wave3 硬件验证工具（纯 Python 标准库，无需 pip）。历史文档见
-[`docs/archive/removed-features/hardware-test-ota.md`](../docs/archive/removed-features/hardware-test-ota.md)。
+`docs/archive/removed-features/hardware-test-ota.md`（归档）。
 
 ```bash
 # 上传 app 镜像（默认自动计算 SHA-256 并作为 X-SHA256 发送）

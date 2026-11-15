@@ -100,4 +100,4 @@ Project-original code is **Apache-2.0** (see [LICENSE](LICENSE)); some scripts a
 - [kerms/wireless-esp32-tools-web-host](https://github.com/kerms/wireless-esp32-tools-web-host) — MIT
 - ARM CMSIS-DAP — Apache-2.0
 
-WiFi Dap is maintained by its contributors; the upstream authors above are dependencies and are credited, not the authors of this repository.
+WiFi Dap is maintained by its contributors. See [CONTRIBUTORS.md](CONTRIBUTORS.md); development assistance by [DeepSeek](https://github.com/deepseek-ai). The upstream authors above are dependencies and are credited, not the authors of this repository.

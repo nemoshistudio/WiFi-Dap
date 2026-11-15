@@ -1895,14 +1895,10 @@ let localPollTimer = 0
 let localStatusTimer = 0
 let localDrawLoopTimer = 0
 /** task-58：UART trace 轮询/backtrace 自动抓取定时器（事件驱动 + 去抖）。 */
-let traceTimer = 0
 let tracePollInFlight = false
 /** 连续 trace 轮询失败次数（3 次后停止轮询，避免错误刷屏）。 */
 let traceErrorStreak = 0
 /** 已处理的 backtrace status 指纹（valid:count），避免 1 Hz status 轮询重复抓取。 */
-let lastBacktraceStatusKey = ''
-let backtraceTimer = 0
-let lastBacktraceFetchAt = 0
 /** 同时在途的 frames 请求数（允许 2–3 个，提升有效取帧率）。 */
 const LOCAL_POLL_MAX_IN_FLIGHT = 3
 let localPollsInFlightCount = 0

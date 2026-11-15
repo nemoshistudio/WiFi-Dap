@@ -21,7 +21,6 @@
 ## 界面截图
 
 **UART 数据显示**
-![UART 数据显示](assets/uart.png)
 
 > 当前 final slim 的页面/状态条结构见 `docs/web-status-ui.md`；设备状态页截图可由设备实机或构建产物获取。
 

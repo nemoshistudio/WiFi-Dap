@@ -260,8 +260,8 @@ __STATIC_INLINE uint8_t DAP_GetVendorString(char *str)
   // In fact, Keil can get the corresponding information through USB
   // without filling in this information.
   // (void)str;
-  strcpy(str, "windowsair");
-  return (sizeof("windowsair"));
+  strcpy(str, "WiFi Dap");
+  return (sizeof("WiFi Dap"));
 }
 
 /**
