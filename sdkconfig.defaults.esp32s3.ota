@@ -1,0 +1,7 @@
+# Optional OTA-enabled variant: re-enables the built-in POST /api/ota/upload
+# endpoint (module 5) and the rollback confirmation path. The shipped slim
+# defaults keep OTA upload disabled; use this overlay when OTA updates are
+# wanted (e.g. combined with sdkconfig.defaults.esp32s3.dap_tcp and the
+# 240 MHz overlay).
+CONFIG_BIRDIEBOT_OTA_ENABLE=y
+CONFIG_BIRDIEBOT_WEB_OTA_UPLOAD_ENABLE=y
