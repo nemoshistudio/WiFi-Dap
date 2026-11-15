@@ -27,35 +27,6 @@ export const CURVE_LOCAL_MAX_JSON_BODY = 16384
 export const CURVE_LOCAL_STOP_PATH = '/api/curve/stop'
 export const CURVE_LOCAL_STATUS_PATH = '/api/curve/status'
 export const CURVE_LOCAL_FRAMES_PATH = '/api/curve/frames'
-/** 固件 task-57 调试能力：目标 UART trace（原型）。 */
-export const CURVE_LOCAL_TRACE_START_PATH = '/api/curve/trace/start'
-export const CURVE_LOCAL_TRACE_STOP_PATH = '/api/curve/trace/stop'
-export const CURVE_LOCAL_TRACE_PATH = '/api/curve/trace'
-/**
- * 固件 task-60 trace v2：带固件侧行缓冲/时间戳/触发标记的 JSON 行接口。
- * 旧 `/api/curve/trace`（raw bytes + X-Curve-Trace-* 头）保持不变；本接口 404 时
- * Web 回退旧 raw 视图（不伪造行/时间）。
- */
-export const CURVE_LOCAL_TRACE_LINES_PATH = '/api/curve/trace/lines'
-/**
- * 单次 trace/lines 请求的最大行数。固件 task-60 FINAL：`max` 允许 1..8，
- * 固件行 ring 只保留最近 32 行；Web 每轮按 max=8 拉取，连续轮询叠加显示。
- */
-export const CURVE_LOCAL_TRACE_LINES_MAX = 8
-/** trace/lines 默认请求行数（固件上限 8）。 */
-export const CURVE_LOCAL_TRACE_LINES_DEFAULT = CURVE_LOCAL_TRACE_LINES_MAX
-/** UI 显示窗口最多保留的行数（行本身来自固件，不拼接/伪造）。 */
-export const CURVE_LOCAL_TRACE_DISPLAY_LINES = 500
-/** 固件 task-57：帧指针 backtrace（最近一次 trigger 命中）。 */
-export const CURVE_LOCAL_BACKTRACE_PATH = '/api/curve/backtrace'
-/**
- * 固件 trace ring 容量（`CURVE_TRACE_RING_BYTES`）。只用于 UI 边界说明：
- * 115200 波特下约 0.17 s 目标输出，不是全量日志。
- */
-export const CURVE_LOCAL_TRACE_RING_BYTES = 2048
-/** 固件帧指针 backtrace 最大帧数（`CURVE_BACKTRACE_MAX_FRAMES`）。 */
-export const CURVE_LOCAL_MAX_BACKTRACE_FRAMES = 8
-
 /** 固件契约限制（docs §1.1）。 */
 export const CURVE_LOCAL_MIN_SERIES = 1
 /** 单组系列上限（兼容旧接口名；v2 多组见 MAX_TOTAL_SERIES）。 */
@@ -230,7 +201,6 @@ export interface StartLocalCurveOptions {
      * 帧指针 backtrace（固件 task-57，原型；仅 breakpoint/watchpoint 触发）。
      * 命中后固件读 r7 沿 AAPCS 帧指针链展开（≤8 PC），GET /api/curve/backtrace 取回。
      */
-    backtrace?: boolean
     /** task-45 条件触发（与 periodic/breakpoint/watchpoint 组合）。 */
     triggerCondition?: CurveConditionSpec
     /** task-44 adapter 旧字段（兼容映射到 trigger_condition）。 */
@@ -324,19 +294,6 @@ export interface LocalCurveStatus {
     /** 固件 task-60：设备堆余量（旧固件缺省）。 */
     heapFree?: number
     heapLargest?: number
-    /** task-57：目标 UART trace 捕获状态（trace/start 订阅 UART RX）。 */
-    traceActive?: boolean
-    traceBytes?: number
-    traceDropped?: number
-    /** 固件 task-60：trace v2 行接口（lines/t_us/触发）状态；旧固件缺省。 */
-    traceFormat?: number
-    traceLines?: number
-    traceDroppedLines?: number
-    traceTriggered?: boolean
-    traceTriggerSeq?: number
-    /** task-57：最近一次 trigger 命中的帧指针 backtrace 摘要。 */
-    backtraceValid?: boolean
-    backtraceCount?: number
     /** task-35：固件最近一次 PC（pc_available=true 时有效）。 */
     pcAvailable?: boolean
     lastPc?: number
@@ -852,8 +809,6 @@ export interface LocalCurveCapabilities {
     sampleEvery: boolean
     /** watchpoints 数组 / 最多 4 路 DWT comparator 可用。 */
     watchpoints4: boolean
-    /** trace v2 行接口（/api/curve/trace/lines）可能可用。 */
-    traceLines: boolean
 }
 
 /**
@@ -863,14 +818,11 @@ export interface LocalCurveCapabilities {
 export function detectLocalCurveCapabilities(status: LocalCurveStatus | null | undefined): LocalCurveCapabilities {
     const sampleEveryMax = status?.sampleEveryMax
     const watchCount = status?.watchCount
-    const traceFormat = status?.traceFormat
     return {
         sampleEvery: typeof sampleEveryMax === 'number' && Number.isFinite(sampleEveryMax) && sampleEveryMax >= 1,
         watchpoints4: (typeof watchCount === 'number' && watchCount > 2)
             || status?.watchpoint3Armed !== undefined
             || status?.watchpoint4Armed !== undefined,
-        traceLines: (typeof traceFormat === 'number' && traceFormat >= 2)
-            || (typeof status?.traceLines === 'number' && status.traceLines >= 0),
     }
 }
 
@@ -941,12 +893,6 @@ export function validateStartLocalCurve(options: StartLocalCurveOptions): void {
         if (options.watch2 !== undefined) throw new CurveLocalError('watch2 requires trigger="watchpoint"')
         if (options.watch3 !== undefined || options.watch4 !== undefined || (options.watchpoints?.length ?? 0) > 0) {
             throw new CurveLocalError('watch3/watch4/watchpoints require trigger="watchpoint"')
-        }
-    }
-    if (options.backtrace !== undefined) {
-        if (typeof options.backtrace !== 'boolean') throw new CurveLocalError('backtrace must be a boolean')
-        if (options.backtrace && trigger !== 'breakpoint' && trigger !== 'watchpoint') {
-            throw new CurveLocalError('backtrace requires trigger="breakpoint" or "watchpoint"')
         }
     }
     const groups = normalizeLocalGroups(options)
@@ -1194,10 +1140,6 @@ export async function startLocalCurve(options: StartLocalCurveOptions): Promise<
             stop_after: customCondition.stopAfter ?? customCondition.stop ?? true,
         }
     }
-    if (options.backtrace === true) {
-        // task-57：仅在显式开启时下发；旧固件忽略未知字段（命中时无 backtrace 数据）。
-        payload.backtrace = true
-    }
     const body = await requestJson(CURVE_LOCAL_START_PATH, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1324,7 +1266,6 @@ export function encodeStartBinCbs1(options: StartLocalCurveOptions): Uint8Array 
     let flags = 0
     if (halt) flags |= CBS1_FLAG_HALT
     if (options.wantPc !== false) flags |= CBS1_FLAG_WANT_PC
-    if (options.backtrace === true) flags |= CBS1_FLAG_BACKTRACE
     const condition = options.triggerCondition ?? options.condition
     if (condition) flags |= CBS1_FLAG_CONDITION
     const snapshotEnabled = trigger === 'breakpoint' && options.snapshotAfter !== undefined
@@ -1487,19 +1428,6 @@ export async function getLocalCurveStatus(): Promise<LocalCurveStatus> {
         seriesStale: optionalFiniteNumber(body.series_stale),
         heapFree: optionalFiniteNumber(body.heap_free),
         heapLargest: optionalFiniteNumber(body.heap_largest),
-        // task-57：目标 UART trace 捕获状态（status 摘要；字节流本身走 GET /api/curve/trace）。
-        traceActive: optionalBoolean(body.trace_active),
-        traceBytes: optionalFiniteNumber(body.trace_bytes),
-        traceDropped: optionalFiniteNumber(body.trace_dropped),
-        // 固件 task-60：trace v2 行接口状态（旧固件缺省）。
-        traceFormat: optionalFiniteNumber(body.trace_format),
-        traceLines: optionalFiniteNumber(body.trace_lines),
-        traceDroppedLines: optionalFiniteNumber(body.trace_dropped_lines),
-        traceTriggered: optionalBoolean(body.trace_triggered),
-        traceTriggerSeq: optionalFiniteNumber(body.trace_trigger_seq),
-        // task-57：最近一次 trigger 命中的帧指针 backtrace 摘要（PC 列表走 /api/curve/backtrace）。
-        backtraceValid: optionalBoolean(body.backtrace_valid),
-        backtraceCount: optionalFiniteNumber(body.backtrace_count),
         pcAvailable: optionalBoolean(body.pc_available),
         lastPc: optionalFiniteNumber(body.last_pc),
         conditionArmed: body.condition_armed === true ? true : body.condition_armed === false ? false : undefined,
@@ -1678,338 +1606,3 @@ export async function getLocalCurveFrames(since: number, max = CURVE_LOCAL_FRAME
  *   无新字节 -> 204（仍带响应头）。
  * 本函数只搬运字节与响应头，**不生成任何目标时间戳/行边界**（只有字节序号）。
  */
-export interface CurveLocalTraceChunk {
-    /** 原始目标 UART 字节（本次新增）。 */
-    bytes: Uint8Array
-    /** 下一次请求的 since（字节序号，不是时间戳）。 */
-    nextSeq: number
-    /** 捕获是否 active；响应头不可读时为 null（不猜测）。 */
-    active: boolean | null
-    /** since 已被 ring 覆盖（存在 gap）；响应头不可读时为 null。 */
-    gap: boolean | null
-    /** 自 trace/start 起累计字节数；响应头不可读时为 null。 */
-    total: number | null
-    /** ring 已覆盖字节数；响应头不可读时为 null。 */
-    dropped: number | null
-    /** 固件 X-Curve-Trace-* 响应头是否可读（dev 跨域未 expose 时为 false）。 */
-    headersAvailable: boolean
-}
-
-export interface CurveLocalTraceStartResult {
-    active: boolean
-    /** 固件 ring 容量（字节）；固件未回传时 null。 */
-    ringBytes: number | null
-    /** 固件 task-60：trace 格式版本（1=旧 raw；2=raw+lines）；未回传时 null。 */
-    format: number | null
-}
-
-/** trace/start 可选参数（固件 task-60：行触发；旧固件忽略未知 body 字段）。 */
-export interface LocalCurveTraceStartOptions {
-    /** 行包含该 PATTERN 时置 triggered/trigger_seq（固件 task-60；空/缺省=不触发）。 */
-    trigger?: string
-    /** 触发后自动停止捕获（需 trigger；缺省 false=继续捕获）。 */
-    stopAfter?: boolean
-}
-
-/** 响应头 getter（Response.headers 兼容）。 */
-export interface HeaderGetter {
-    get(name: string): string | null
-}
-
-function headerU32(getHeader: HeaderGetter, name: string): number | null {
-    const text = getHeader.get(name)
-    if (text === null || text === undefined) return null
-    const trimmed = String(text).trim()
-    if (!/^\d{1,10}$/.test(trimmed)) return null
-    const value = Number.parseInt(trimmed, 10)
-    return Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff ? value : null
-}
-
-function headerFlag(getHeader: HeaderGetter, name: string): boolean | null {
-    const text = getHeader.get(name)
-    if (text === null || text === undefined) return null
-    const trimmed = String(text).trim()
-    if (trimmed === '1') return true
-    if (trimmed === '0') return false
-    return null
-}
-
-/**
- * 解析 trace 响应头（纯函数，便于单测）。
- * 头不可读时 `nextSeq = since + 本次字节数`（字节序号连续），并显式标记
- * `headersAvailable=false`（gap/active/dropped 不伪报，返回 null）。
- */
-export function parseTraceResponseMeta(
-    getHeader: HeaderGetter,
-    since: number,
-    byteLength: number,
-): Omit<CurveLocalTraceChunk, 'bytes'> {
-    const safeSince = Math.max(0, Math.floor(Number.isFinite(since) ? since : 0))
-    const safeLength = Math.max(0, Math.floor(Number.isFinite(byteLength) ? byteLength : 0))
-    const seq = headerU32(getHeader, 'X-Curve-Trace-Seq')
-    return {
-        nextSeq: seq ?? (safeSince + safeLength),
-        active: headerFlag(getHeader, 'X-Curve-Trace-Active'),
-        gap: headerFlag(getHeader, 'X-Curve-Trace-Gap'),
-        total: headerU32(getHeader, 'X-Curve-Trace-Total'),
-        dropped: headerU32(getHeader, 'X-Curve-Trace-Dropped'),
-        headersAvailable: seq !== null,
-    }
-}
-
-/**
- * 开始目标 UART trace 捕获（POST /api/curve/trace/start；会初始化 UART 服务）。
- * 固件 task-60：可选 body `{trigger, stop_after}` 启用行触发；无参数时保持旧行为
- * （旧固件忽略未知字段）。
- */
-export async function startLocalCurveTrace(options: LocalCurveTraceStartOptions = {}): Promise<CurveLocalTraceStartResult> {
-    const payload: Record<string, unknown> = {}
-    const trigger = typeof options.trigger === 'string' ? options.trigger : ''
-    if (trigger) {
-        payload.trigger = trigger
-        payload.stop_after = options.stopAfter === true
-    }
-    const hasBody = Object.keys(payload).length > 0
-    const body = await requestJson(CURVE_LOCAL_TRACE_START_PATH, {
-        method: 'POST',
-        ...(hasBody ? {headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)} : {}),
-    })
-    return {
-        active: body.active !== false,
-        ringBytes: optionalFiniteNumber(body.ring_bytes) ?? null,
-        format: optionalFiniteNumber(body.format) ?? null,
-    }
-}
-
-/** 停止目标 UART trace 捕获（POST /api/curve/trace/stop；未启动时固件幂等返回 ok）。 */
-export async function stopLocalCurveTrace(): Promise<void> {
-    await requestJson(CURVE_LOCAL_TRACE_STOP_PATH, {method: 'POST'})
-}
-
-/** 拉取 since 之后的原始目标 UART 字节（204 = 无新数据，不伪造空文本/时间戳）。 */
-export async function getLocalCurveTrace(since = 0): Promise<CurveLocalTraceChunk> {
-    const safeSince = Math.max(0, Math.floor(Number.isFinite(since) ? since : 0))
-    let response: Response
-    try {
-        response = await fetch(deviceApiUrl(`${CURVE_LOCAL_TRACE_PATH}?since=${safeSince}`), {
-            method: 'GET',
-            cache: 'no-store',
-        })
-    } catch (error) {
-        throw new CurveLocalError(error instanceof Error ? error.message : 'network error')
-    }
-    if (response.status !== 204 && !response.ok) {
-        let text = ''
-        try {
-            text = await response.text()
-        } catch {
-            text = ''
-        }
-        const body = parseJsonText(text)
-        throw new CurveLocalError(errorMessage(body, response.status, text), response.status, errorCode(body))
-    }
-    let bytes = new Uint8Array(0)
-    if (response.status !== 204) {
-        try {
-            bytes = new Uint8Array(await response.arrayBuffer())
-        } catch (error) {
-            throw new CurveLocalError(error instanceof Error ? error.message : 'network error')
-        }
-    }
-    return {
-        bytes,
-        ...parseTraceResponseMeta(response.headers, safeSince, bytes.length),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 固件 task-60：UART trace v2（行缓冲 + 固件时间戳 + 触发标记）
-// ---------------------------------------------------------------------------
-/**
- * 一行目标 UART 输出（固件按 '\n' 切分，超长行由固件截断）。
- * `tUs` 是固件 ESP32 侧 esp_timer 单调时间（行结束换行时刻，微秒），
- * **不是目标 MCU 时间**，UI 必须如实标注来源。
- */
-export interface CurveLocalTraceLine {
-    /** 行序号（since 游标；从 trace/start 起累计行数，非字节序号）。 */
-    seq: number
-    /** 固件 esp_timer 微秒时间戳（行结束时刻）。 */
-    tUs: number
-    /** 行文本（固件已把非可打印字节替换为 '.'；不包含换行符）。 */
-    text: string
-    /** 固件是否截断了超长行（CURVE_TRACE_LINE_FLAG_TRUNCATED）。 */
-    truncated?: boolean
-}
-
-/** GET /api/curve/trace/lines 一次响应（JSON）。 */
-export interface CurveLocalTraceLinesChunk {
-    active: boolean | null
-    /** since 已被 ring 覆盖（旧行丢弃）；null=字段缺失（不猜）。 */
-    gap: boolean | null
-    /** 下一次请求的 since（行游标）。 */
-    nextSeq: number
-    /** 自 start 起的累计行数；null=固件未提供。 */
-    totalLines: number | null
-    /** 被 ring 覆盖丢弃的行数；null=固件未提供。 */
-    droppedLines: number | null
-    /** 是否发生过行触发命中；null=固件未提供。 */
-    triggered: boolean | null
-    /** 触发命中的行序号；null=无/未提供。 */
-    triggerSeq: number | null
-    lines: CurveLocalTraceLine[]
-}
-
-export function emptyCurveTraceLinesChunk(since = 0): CurveLocalTraceLinesChunk {
-    const safeSince = Math.max(0, Math.floor(Number.isFinite(since) ? since : 0))
-    return {
-        active: null,
-        gap: false,
-        nextSeq: safeSince,
-        totalLines: null,
-        droppedLines: null,
-        triggered: null,
-        triggerSeq: null,
-        lines: [],
-    }
-}
-
-/**
- * 解析 trace/lines JSON（纯函数，便于单测）。
- * 行/时间戳只取固件字段：缺字段/类型错误抛 CurveLocalError（不补行、不造时间）。
- */
-export function parseTraceLinesResponse(
-    body: Record<string, unknown>,
-    since = 0,
-    maxLines = CURVE_LOCAL_TRACE_LINES_DEFAULT,
-): CurveLocalTraceLinesChunk {
-    const safeSince = Math.max(0, Math.floor(Number.isFinite(since) ? since : 0))
-    const safeMax = Math.max(1, Math.min(CURVE_LOCAL_TRACE_LINES_MAX, Math.floor(Number.isFinite(maxLines) ? maxLines : CURVE_LOCAL_TRACE_LINES_DEFAULT)))
-    if (!body || typeof body !== 'object') throw new CurveLocalError('trace lines response must be a JSON object')
-    const rawLines = body.lines
-    if (!Array.isArray(rawLines)) throw new CurveLocalError('trace lines response missing lines array')
-    const lines: CurveLocalTraceLine[] = []
-    let previousSeq: number | null = null
-    for (const item of rawLines) {
-        if (typeof item !== 'object' || item === null) throw new CurveLocalError('trace line entry must be an object')
-        const raw = item as Record<string, unknown>
-        const seq = raw.seq
-        const tUs = raw.t_us
-        const text = raw.text
-        if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0 || seq > 0xffffffff) {
-            throw new CurveLocalError(`trace line has invalid seq (${String(seq)})`)
-        }
-        if (typeof tUs !== 'number' || !Number.isFinite(tUs) || tUs < 0) {
-            throw new CurveLocalError(`trace line seq=${seq} has invalid t_us (${String(tUs)})`)
-        }
-        if (typeof text !== 'string') throw new CurveLocalError(`trace line seq=${seq} has invalid text`)
-        if (previousSeq !== null && seq <= previousSeq) {
-            throw new CurveLocalError(`trace lines seq not increasing (${previousSeq} -> ${seq})`)
-        }
-        previousSeq = seq
-        const truncated = raw.truncated === true ? true : raw.truncated === false ? false : undefined
-        lines.push({seq, tUs, text, ...(truncated === undefined ? {} : {truncated})})
-    }
-    const nextSeq = optionalFiniteNumber(body.next_seq)
-        ?? (lines.length > 0 ? lines[lines.length - 1].seq + 1 : safeSince)
-    return {
-        active: optionalBoolean(body.active) ?? null,
-        gap: optionalBoolean(body.gap) ?? null,
-        nextSeq,
-        totalLines: optionalFiniteNumber(body.total_lines) ?? null,
-        droppedLines: optionalFiniteNumber(body.dropped_lines) ?? null,
-        triggered: optionalBoolean(body.triggered) ?? null,
-        triggerSeq: optionalFiniteNumber(body.trigger_seq) ?? null,
-        lines: lines.slice(0, safeMax),
-    }
-}
-
-/**
- * 拉取 since 之后的行（固件 task-60）。204 → 空 chunk；404 抛 CurveLocalError
- * （httpStatus=404），调用方据此回退旧 raw 字节接口。
- */
-export async function getLocalCurveTraceLines(
-    since = 0,
-    max = CURVE_LOCAL_TRACE_LINES_DEFAULT,
-): Promise<CurveLocalTraceLinesChunk> {
-    const safeSince = Math.max(0, Math.floor(Number.isFinite(since) ? since : 0))
-    const safeMax = Math.max(1, Math.min(CURVE_LOCAL_TRACE_LINES_MAX, Math.floor(Number.isFinite(max) ? max : CURVE_LOCAL_TRACE_LINES_DEFAULT)))
-    let response: Response
-    try {
-        response = await fetch(deviceApiUrl(`${CURVE_LOCAL_TRACE_LINES_PATH}?since=${safeSince}&max=${safeMax}`), {
-            method: 'GET',
-            cache: 'no-store',
-        })
-    } catch (error) {
-        throw new CurveLocalError(error instanceof Error ? error.message : 'network error')
-    }
-    if (response.status === 204) return emptyCurveTraceLinesChunk(safeSince)
-    let text = ''
-    try {
-        text = await response.text()
-    } catch {
-        text = ''
-    }
-    const body = parseJsonText(text)
-    if (!response.ok || body?.ok === false) {
-        throw new CurveLocalError(errorMessage(body, response.status, text), response.status, errorCode(body))
-    }
-    if (!body) throw new CurveLocalError('trace lines response is not valid JSON', response.status)
-    return parseTraceLinesResponse(body, safeSince, safeMax)
-}
-
-/** 固件帧指针 backtrace（GET /api/curve/backtrace）解析结果。 */
-export interface CurveLocalBacktrace {
-    /** 最近一次 trigger 命中是否产生了合法帧指针链。 */
-    valid: boolean
-    /** 有效 PC 数（0..CURVE_LOCAL_MAX_BACKTRACE_FRAMES）。 */
-    count: number
-    /** 是否在 8 帧上限处截断（链可能更长）。 */
-    truncated: boolean
-    /** PC 列表：pcs[0] = 命中时刻 PC，其后为返回地址（Thumb bit0 已清 0）。 */
-    pcs: number[]
-}
-
-/** 单个 PC 值 -> u32（接受固件 "0x%08X" 字符串或数字；Thumb bit0 清 0）。 */
-function parseBacktracePc(value: unknown): number {
-    if (typeof value === 'number') {
-        if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
-            throw new CurveLocalError(`invalid backtrace pc ${String(value)}`)
-        }
-        return (value & 0xfffffffe) >>> 0
-    }
-    if (typeof value === 'string') {
-        const text = value.trim()
-        const match = /^(?:0[xX])?([0-9a-fA-F]{1,8})$/.exec(text)
-        if (!match) throw new CurveLocalError(`invalid backtrace pc "${value}"`)
-        return ((Number.parseInt(match[1], 16) & 0xfffffffe) >>> 0)
-    }
-    throw new CurveLocalError('invalid backtrace pc entry')
-}
-
-/**
- * 解析 backtrace JSON（纯函数）。
- * 契约：`{ok:true,valid,count,truncated,pcs:["0x08029A44", ...]}`；
- * 数据以 `pcs` 为准（count 只做交叉校验），超过 8 帧按固件上限截断并置 truncated。
- * 非法/损坏响应抛 CurveLocalError（显示原始错误，不编造帧）。
- */
-export function parseBacktraceResponse(body: Record<string, unknown>): CurveLocalBacktrace {
-    if (!body || typeof body !== 'object') throw new CurveLocalError('backtrace response must be a JSON object')
-    const rawPcs = body.pcs
-    if (rawPcs === undefined || rawPcs === null) {
-        if (body.valid === true) throw new CurveLocalError('backtrace response valid=true without pcs')
-        return {valid: false, count: 0, truncated: false, pcs: []}
-    }
-    if (!Array.isArray(rawPcs)) throw new CurveLocalError('backtrace pcs must be an array')
-    const parsed = rawPcs.map(parseBacktracePc)
-    const truncated = body.truncated === true || parsed.length > CURVE_LOCAL_MAX_BACKTRACE_FRAMES
-    const pcs = parsed.slice(0, CURVE_LOCAL_MAX_BACKTRACE_FRAMES)
-    const valid = body.valid === true && pcs.length > 0
-    if (!valid) return {valid: false, count: 0, truncated: false, pcs: []}
-    return {valid: true, count: pcs.length, truncated, pcs}
-}
-
-/** 读取最近一次 trigger 命中的帧指针 backtrace（每次 start 后最多保留最后一次命中）。 */
-export async function getLocalCurveBacktrace(): Promise<CurveLocalBacktrace> {
-    const body = await requestJson(CURVE_LOCAL_BACKTRACE_PATH, {method: 'GET'})
-    return parseBacktraceResponse(body)
-}

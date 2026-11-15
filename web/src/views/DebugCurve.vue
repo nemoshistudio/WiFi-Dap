@@ -222,7 +222,6 @@
               <el-option v-for="interval in LOCAL_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
             </el-select>
           </label>
-          <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
           <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
           <span>{{ translate('curve.localStatus') }}: <b>{{ (sampling && localStatusInfo?.running !== false) ? translate('curve.localRunning') : translate('curve.localStopped') }}</b></span>
           <span v-if="localTrigger === 'periodic'">
@@ -268,37 +267,6 @@
           </span>
           <span>{{ translate('curve.localCurrentGroup') }}: <b>{{ sampling ? ((localCurrentGroup ?? 0) + 1) + '/' + localActiveGroupCount : '-' }}</b></span>
           <span>{{ translate('curve.wsTransport') }}: <b>{{ wsTransport }}</b></span>
-        </template>
-        <template v-else>
-          <label class="flex items-center gap-2">
-            <span class="whitespace-nowrap">{{ translate('curve.samplingMode') }}</span>
-            <el-select v-model="samplingMode" size="small" style="width: 12rem" :disabled="sampling" @change="onSamplingModeChange">
-              <el-option value="live" :label="translate('curve.samplingModeLive')"/>
-              <el-option value="debug" :label="translate('curve.samplingModeDebug')"/>
-            </el-select>
-          </label>
-          <label v-if="!isDebugMode" class="flex items-center gap-2">
-            <span class="whitespace-nowrap">{{ translate('curve.sampleRate') }}</span>
-            <el-select v-model="sampleRate" size="small" style="width: 8rem" :disabled="sampling">
-              <el-option
-                  v-for="rate in SAMPLE_RATES"
-                  :key="rate"
-                  :value="rate"
-                  :label="rate === 0 ? translate('curve.sampleRateAuto') : rate + ' Hz'"
-              />
-            </el-select>
-          </label>
-          <label v-else class="flex items-center gap-2">
-            <span class="whitespace-nowrap">{{ translate('curve.debugInterval') }}</span>
-            <el-select v-model="debugIntervalMs" size="small" style="width: 7rem" :disabled="sampling">
-              <el-option v-for="interval in DEBUG_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
-            </el-select>
-          </label>
-          <span>{{ translate('curve.effectiveRate') }}: <b>{{ effectiveRate.toFixed(1) }} Hz</b></span>
-          <span v-if="!isDebugMode && sampleRate === 0">{{ translate('curve.autoRate') }}: <b>{{ autoRateDisplay }} Hz</b></span>
-          <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
-          <span>{{ translate('curve.failedCount') }}: <b>{{ failedCount }}</b></span>
-          <span>{{ translate('curve.droppedCount') }}: <b>{{ droppedCount }}</b></span>
         </template>
         <label class="flex items-center gap-2">
           <span class="whitespace-nowrap">{{ translate('curve.format') }}</span>
@@ -1067,8 +1035,6 @@ import {
 } from '@/utils/curveRecording'
 import type {SourceProject} from '@/components/source/projectLoader'
 import type {SourceVariableSelectionPayload} from '@/utils/sourceProject'
-import {CmsisDapClient, DapError, MAX_CURVE_SERIES, WsDapTransport, type DapTargetInfo} from '@/api/wsDap'
-import {kickDapSession} from '@/api/apiDap'
 import {
   formatHex32,
   parseElf32Symbols,
@@ -1104,18 +1070,6 @@ import {
   resolveBreakpointWithOffset,
   type FunctionSymbol,
 } from '@/utils/elfFunctionSymbols'
-import {buildBacktraceFrames} from '@/utils/curveBacktrace'
-import {
-  appendTraceBytes,
-  appendTraceLines,
-  decodeTraceText,
-  formatRawTraceLineView,
-  formatTraceHexDump,
-  formatTraceLinesHex,
-  formatTraceLinesText,
-  formatTraceLinesView,
-  type TraceLineLike,
-} from '@/utils/curveDebugText'
 import {
   resolveChartWebglMode,
   type ChartDrawMessage,
@@ -1138,13 +1092,9 @@ import {
   CURVE_LOCAL_FLASH_START,
   CURVE_LOCAL_FRAMES_DEFAULT,
   CURVE_LOCAL_FRAMES_PATH,
-  CURVE_LOCAL_MAX_BACKTRACE_FRAMES,
   CURVE_LOCAL_MAX_GROUP_WEIGHT,
   CURVE_LOCAL_MAX_SNAPSHOT_AFTER,
   CURVE_LOCAL_RATE_DIVISORS,
-  CURVE_LOCAL_TRACE_RING_BYTES,
-  CURVE_LOCAL_TRACE_DISPLAY_LINES,
-  CURVE_LOCAL_TRACE_LINES_MAX,
   CURVE_LOCAL_MAX_SAMPLE_EVERY,
   CURVE_LOCAL_MAX_WATCHPOINTS,
   deviceApiUrl,
@@ -1157,22 +1107,12 @@ import {
   CURVE_LOCAL_MAX_SAMPLE_BYTES,
   CURVE_LOCAL_MAX_TOTAL_SERIES,
   CurveLocalError,
-  getLocalCurveBacktrace,
-  getLocalCurveTrace,
-  getLocalCurveTraceLines,
   isDuplicateWatchpoint,
   normalizeRateDivisor,
   planLocalRateGroups,
   splitSeriesIntoGroups,
-  startLocalCurveTrace,
-  stopLocalCurveTrace,
-  type CurveLocalBacktrace,
   type CurveLocalLocationVariant,
   type CurveLocalRateDivisor,
-  type CurveLocalTraceChunk,
-  type CurveLocalTraceLine,
-  type CurveLocalTraceLinesChunk,
-  type LocalCurveTraceStartOptions,
   type LocalCurveCapabilities,
   type CurveLocalWatchAccess,
   type LocalRateGroupPlan,
@@ -1347,17 +1287,13 @@ interface VariableRow {
 const SAMPLE_RATES_DEFAULT = 100
 
 // ---- 页面状态 -------------------------------------------------------------
-const sampleRate = ref(SAMPLE_RATES_DEFAULT)
 /** 采样模式：实时（固定地址，高采样率）/ 调试（暂停读取帧/寄存器/指针，低采样率）。 */
-const samplingMode = ref<'live' | 'debug'>('live')
-const debugIntervalMs = ref(DEFAULT_DEBUG_INTERVAL_MS)
-const isDebugMode = computed(() => samplingMode.value === 'debug')
 /** 采样来源：web=现有 WebSocket-DAP 路径；local=ESP32 本地 halt→读→resume 闭环。 */
 const samplingSource = ref<SamplingSource>('local')
 const isLocalSource = computed(() => samplingSource.value === 'local')
 const localIntervalMs = ref(DEFAULT_LOCAL_INTERVAL_MS)
 /** 当前来源允许的最大曲线数：设备本地为精简版 64，Web-DAP 仍为 24。 */
-const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : MAX_CURVE_SERIES))
+const seriesLimit = computed(() => (isLocalSource.value ? CURVE_LOCAL_MAX_TOTAL_SERIES : CURVE_LOCAL_MAX_TOTAL_SERIES))
 /** 本地可采集系列（派生曲线不参与采集）。 */
 const localRateSeries = computed(() => seriesList.value.filter((item) => !item.derived))
 /** 有任意曲线设置了非全速目标（divisor≠1）→ 启用“目标率分桶 + 组权重”路径。 */
@@ -1366,7 +1302,7 @@ const hasRateOverrides = computed(() => localRateSeries.value.some((item) => nor
  * 固件能力（task-60）：从 status 回读探测。`sampleEvery` = 固件支持 series.sample_every
  * （精确每变量速率）；未知/旧固件 → 继续用 groups+weight divisor 分桶 fallback。
  */
-const localCapabilities = ref<LocalCurveCapabilities>({sampleEvery: false, watchpoints4: false, traceLines: false})
+const localCapabilities = ref<LocalCurveCapabilities>({sampleEvery: false, watchpoints4: false})
 const localCapabilitiesKnown = ref(false)
 async function refreshLocalCapabilities(): Promise<void> {
   try {
@@ -1617,7 +1553,6 @@ const localCurrentGroup = ref<number | null>(null)
 /** 本地选中的系列上限（精简版 v2 总 64；每组 ≤64，自动切分）。 */
 const localSeriesLimit = CURVE_LOCAL_MAX_TOTAL_SERIES
 /** Auto 模式下当前实际使用的目标采样率（自动调整，UI 显示）。 */
-const autoRate = ref(AUTO_MAX_RATE)
 const globalFormat = ref<CurveFormat>('auto')
 /** B/A 渲染模式：B（默认）只绘制前 drawCap 条可见曲线；A 绘制全部可见（降采样）。 */
 const renderAll = ref(false)
@@ -1711,41 +1646,6 @@ const watchpoint4Hits = ref<number | null>(null)
 /** 最近一次 watchpoint start 失败时固件返回的原文（资源不足，不改写/不复述为猜测）。 */
 const watchStartError = ref('')
 /** task-58：帧指针 backtrace（固件 task-57；仅 breakpoint/watchpoint 命中后可用）。 */
-const backtraceEnabled = ref(false)
-const backtraceLoading = ref(false)
-const backtraceError = ref('')
-const backtraceData = shallowRef<CurveLocalBacktrace | null>(null)
-/** task-58：目标 UART trace（文本/hex 只是显示；字节序号来自固件，无目标时间戳）。 */
-const traceActive = ref(false)
-const traceBusy = ref(false)
-const traceError = ref('')
-const traceSeq = ref(0)
-const traceGap = ref(false)
-const traceTotal = ref<number | null>(null)
-const traceDropped = ref<number | null>(null)
-/** 固件 X-Curve-Trace-* 响应头是否可读（不可读时不伪报 gap/active/dropped）。 */
-const traceHeadersAvailable = ref(true)
-const traceView = ref<'text' | 'hex' | 'line'>('text')
-const tracePollMs = ref(250)
-const traceBuffer = shallowRef(new Uint8Array(0))
-/** traceBuffer 第一个字节的字节序号（buffer 会被裁到显示窗口，序号仍真实）。 */
-const traceBaseSeq = ref(0)
-// ---- task-62：固件 task-60 trace v2（/api/curve/trace/lines，JSON 行 + 固件时间戳） ----
-/** trace 数据源：raw=旧字节流（兼容）；lines=固件行接口（行/时间来自固件）。 */
-const traceSource = ref<'raw' | 'lines'>('raw')
-/** 行游标（固件 line seq；不是字节序号）。 */
-const traceLineSeq = ref(0)
-const traceLines = shallowRef<TraceLineLike[]>([])
-const traceTotalLines = ref<number | null>(null)
-const traceDroppedLines = ref<number | null>(null)
-const traceTriggered = ref(false)
-const traceTriggerSeq = ref<number | null>(null)
-/** trace v2 行触发配置（start body；仅 lines 模式/固件支持时下发）。 */
-const traceTriggerPattern = ref('')
-const traceTriggerStopAfter = ref(false)
-const traceLinesSupported = ref(false)
-const traceLinesError = ref('')
-/** task-45 条件触发 UI/状态（可与 periodic/breakpoint/watchpoint 组合）。 */
 const conditionEnabled = ref(false)
 const conditionAddressInput = ref('')
 const conditionSize = ref<1 | 2 | 4>(4)
@@ -1965,22 +1865,13 @@ watch(elfView, (view) => {
   if (view === 'source') sourceViewEverOpened.value = true
   if (view === 'objects') objectsViewEverOpened.value = true
 }, {immediate: true})
-const connecting = ref(false)
-const connected = ref(false)
 const sampling = ref(false)
 const everSampled = ref(false)
 const statusError = ref(false)
-const haltedSuspected = ref(false)
-const resuming = ref(false)
-const resetting = ref(false)
-const targetInfo = shallowRef<DapTargetInfo | null>(null)
 const notice = ref<CurveNotice | null>(null)
-const kickWarning = ref('')
 const sampleCount = ref(0)
 const failedCount = ref(0)
 const droppedCount = ref(0)
-const effectiveRate = ref(0)
-const autoRateDisplay = computed(() => Math.round(autoRate.value))
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const chartWrapRef = ref<HTMLDivElement | null>(null)
@@ -1995,13 +1886,8 @@ const darkTheme = ref(document.documentElement.classList.contains('dark'))
 let chartPaletteCache: { bg: string; grid: string; text: string; axis: string } | null = null
 let themeObserver: MutationObserver | null = null
 
-let client: CmsisDapClient | null = null
-let transport: WsDapTransport | null = null
 let nextSeriesId = 1
 let sampleTimer = 0
-let debugTimer = 0
-let debugRunId = 0
-let debugInFlight = false
 // 设备本地采样状态
 let localRunId = 0
 /** 固定节拍轮询定时器 + 独立状态刷新/绘制定时器（task-33）。 */
@@ -2054,20 +1940,12 @@ let localGroupEntries: Array<Array<{index: number; item: CurveSeries; size: numb
 let localLatestValues = new Map<number, Uint8Array>()
 let sampleSeq = 0
 let sampleEpochMs = 0
-let nextSampleAt = 0
 let consecutiveFailures = 0
 let recentCompletions: number[] = []
 /** 采样运行代次：停止/重启后忽略迟到的完成回调。 */
-let samplingRunId = 0
 /** 已发出、尚未完成的采样请求数。 */
 let inflightSamples = 0
 // Auto 速率控制窗口统计
-let autoWindowStart = 0
-let autoWindowBeats = 0
-let autoWindowSkipped = 0
-let autoWindowCompletions = 0
-let autoWindowInflightSum = 0
-let autoWindowInflightCount = 0
 /** Auto 连续“差/好”窗口计数：避免偶发抖动导致速率被棘轮式压低。 */
 let autoBadWindows = 0
 let autoGoodWindows = 0
@@ -2130,240 +2008,18 @@ const f32U32 = new Uint32Array(f32Buffer.buffer)
 const f64Buffer = new Float64Array(1)
 const f64U32 = new Uint32Array(f64Buffer.buffer)
 
-// ---- 连接状态 -------------------------------------------------------------
+// ---- 采样状态 -------------------------------------------------------------
 const statusTagType = computed<'primary' | 'success' | 'info' | 'warning' | 'danger'>(() => {
-  if (isLocalSource.value) {
-    if (sampling.value) return 'success'
-    if (statusError.value) return 'danger'
-    if (localActive.value) return 'warning'
-    return 'info'
-  }
-  if (connecting.value) return 'warning'
-  if (!connected.value) return 'info'
   if (sampling.value) return 'success'
   if (statusError.value) return 'danger'
-  if (everSampled.value) return 'warning'
-  return 'primary'
+  if (localActive.value) return 'warning'
+  return 'info'
 })
-
 const statusText = computed(() => {
-  if (isLocalSource.value) {
-    if (sampling.value) return translate('curve.statusSampling')
-    if (statusError.value) return translate('curve.statusError')
-    return translate('curve.localStopped')
-  }
-  if (connecting.value) return translate('curve.statusConnecting')
-  if (!connected.value) return translate('curve.statusIdle')
   if (sampling.value) return translate('curve.statusSampling')
   if (statusError.value) return translate('curve.statusError')
-  if (everSampled.value) return translate('curve.statusStopped')
-  return translate('curve.statusConnected')
+  return translate('curve.localStopped')
 })
-
-function dapHost(): string {
-  if (import.meta.env.VITE_APP_MODE === 'dev') {
-    const override = import.meta.env.VITE_DEVICE_HOST_NAME
-    if (override) return override.replace(/^https?:\/\//, '').split('/')[0].split(':')[0]
-  }
-  return window.location.hostname || 'dap.local'
-}
-
-const endpointText = computed(() => WsDapTransport.urlForHost(dapHost()))
-
-function handleTransportClosed(reason: string): void {
-  stopSampling()
-  connected.value = false
-  client = null
-  transport = null
-  targetInfo.value = null
-  notice.value = {type: 'error', title: translate('curve.reconnectHint')}
-  if (import.meta.env.VITE_APP_MODE === 'dev') {
-    console.warn('[curve] transport closed:', reason)
-  }
-  scheduleDraw()
-}
-
-/** 接管后 WS 握手重试：USBIP 会话断开后设备需要一点时间重新接受 3240 连接。 */
-async function openDapTransportWithRetry(): Promise<WsDapTransport> {
-  const deadline = performance.now() + 2200
-  let lastError: unknown = null
-  while (performance.now() < deadline) {
-    const candidate = new WsDapTransport(WsDapTransport.urlForHost(dapHost()))
-    try {
-      await candidate.open(800)
-      return candidate
-    } catch (error) {
-      lastError = error
-      candidate.close('connect retry')
-      await new Promise<void>((resolve) => setTimeout(resolve, 200))
-    }
-  }
-  const finalTransport = new WsDapTransport(WsDapTransport.urlForHost(dapHost()))
-  try {
-    await finalTransport.open(1200)
-    return finalTransport
-  } catch (error) {
-    finalTransport.close('connect failed')
-    throw lastError ?? error
-  }
-}
-
-async function onConnect(): Promise<void> {
-  if (connecting.value || connected.value) return
-  const confirmed = await ElMessageBox.confirm(
-      translate('curve.takeoverHint'),
-      translate('curve.takeoverConfirmTitle'),
-      {
-        confirmButtonText: translate('common.confirm'),
-        cancelButtonText: translate('common.cancel'),
-        type: 'warning',
-      },
-  ).then(() => true).catch(() => false)
-  if (!confirmed) return
-
-  connecting.value = true
-  notice.value = null
-  kickWarning.value = ''
-  statusError.value = false
-  let pendingTransport: WsDapTransport | null = null
-  try {
-    // 接管：先 POST /api/dap/kick 让固件断开占用中的 USBIP（或 elaphureLink）会话，
-    // 等 ~300ms 后再连 WS；USBIP 仍占用时首次 WS 握手会超时，故最多重试 ~2s。
-    const kick = await kickDapSession()
-    if (!kick.ok) {
-      kickWarning.value = translate('curve.kickFailed')
-    } else {
-      await new Promise<void>((resolve) => setTimeout(resolve, 300))
-    }
-
-    pendingTransport = await openDapTransportWithRetry()
-    pendingTransport.onClose = (reason) => handleTransportClosed(reason)
-    const nextClient = new CmsisDapClient(pendingTransport)
-    const info = await nextClient.connect()
-    // bring-up 全部串行完成后再开启采样管线（connect/info/config 保持串行语义）。
-    nextClient.setPipelineDepth(PIPELINE_DEPTH)
-    transport = pendingTransport
-    pendingTransport = null
-    client = nextClient
-    targetInfo.value = info
-    connected.value = true
-    kickWarning.value = ''
-    resetConstantTracking()
-    haltedSuspected.value = !info.resumed
-    globalNotify(translate('curve.statusConnected'), 'success')
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error'
-    if (pendingTransport) {
-      pendingTransport.close('connect failed')
-      pendingTransport = null
-    }
-    const failedTransport = transport
-    transport = null
-    client = null
-    connected.value = false
-    if (failedTransport) {
-      failedTransport.close('connect failed')
-    }
-    notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
-  } finally {
-    connecting.value = false
-  }
-}
-
-async function onDisconnect(): Promise<void> {
-  stopSampling()
-  const current = client
-  const currentTransport = transport
-  client = null
-  transport = null
-  connected.value = false
-  targetInfo.value = null
-  statusError.value = false
-  resetConstantTracking()
-  if (current) {
-    await current.disconnect()
-  }
-  if (currentTransport) {
-    currentTransport.close('user disconnect')
-  }
-  notice.value = {type: 'info', title: translate('curve.usbipReattachHint')}
-  scheduleDraw()
-}
-
-async function onResetTarget(): Promise<void> {
-  const current = client
-  if (!current || resetting.value) return
-  resetting.value = true
-  try {
-    await current.resetAndRun()
-    haltedSuspected.value = false
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error'
-    globalNotify(translate('curve.connectFailed', {err: message}), 'error')
-  } finally {
-    resetting.value = false
-  }
-}
-
-// ---- 采样循环（节拍调度与完成事件解耦，WS-DAP 管线化） -------------------
-function currentTargetRate(): number {
-  if (sampleRate.value === SAMPLE_RATE_AUTO) return autoRate.value
-  return sampleRate.value
-}
-
-function resetAutoWindow(now: number): void {
-  autoWindowStart = now
-  autoWindowBeats = 0
-  autoWindowSkipped = 0
-  autoWindowCompletions = 0
-  autoWindowInflightSum = 0
-  autoWindowInflightCount = 0
-}
-
-/**
- * Auto 自适应：每个窗口（约 1.5s）评估一次。
- *  - 窗口内出现被跳过的发送节拍 → 目标速率 *0.85（减少丢弃）；
- *  - 否则完成数 ≥ 0.9*目标速率且平均在途数 < depth/2 → *1.10（尝试提高）。
- */
-function maybeAdjustAutoRate(now: number): void {
-  if (sampleRate.value !== SAMPLE_RATE_AUTO) return
-  if (now - autoWindowStart < AUTO_RATE_WINDOW_MS) return
-  let next = autoRate.value
-  const skipRatio = autoWindowBeats > 0 ? autoWindowSkipped / autoWindowBeats : 0
-  const averageInflight = autoWindowInflightCount > 0
-      ? autoWindowInflightSum / autoWindowInflightCount
-      : 0
-  if (skipRatio > 0.03) {
-    autoBadWindows += 1
-    autoGoodWindows = 0
-    // 连续两个窗口管线都吃紧才降速，避免单个抖动窗口造成“棘轮降速”。
-    if (autoBadWindows >= 2) {
-      next = Math.max(AUTO_MIN_RATE, autoRate.value * 0.90)
-      autoBadWindows = 0
-    }
-  } else {
-    autoGoodWindows += 1
-    autoBadWindows = 0
-    const canRise = skipRatio <= 0.005 &&
-        autoWindowCompletions >= 0.9 * autoRate.value &&
-        averageInflight < PIPELINE_DEPTH * 0.5
-    if (canRise && autoGoodWindows >= 3) {
-      // 连续干净窗口：小幅升速（优先把丢弃点压到接近 0）。
-      next = Math.min(AUTO_MAX_RATE, autoRate.value * 1.05)
-    }
-  }
-  resetAutoWindow(now)
-  if (Math.abs(next - autoRate.value) > 0.01) {
-    autoRate.value = next
-    // 速率变化后按新周期重新对齐下一个节拍。
-    if (sampleTimer) {
-      window.clearTimeout(sampleTimer)
-      sampleTimer = 0
-    }
-    nextSampleAt = performance.now()
-    scheduleBeat(samplingRunId, 1000 / Math.max(currentTargetRate(), 1))
-  }
-}
 
 /** 以约 8 Hz 刷新采样统计显示，避免每个样本都触发响应式重渲染。 */
 function scheduleStatsFlush(): void {
@@ -2413,13 +2069,9 @@ function flushStats(): void {
   if (cursorA.value || cursorB.value) cursorPulse.value += 1
   if (seriesList.value.some((item) => item.derived)) updateDerivedValues()
   if (isLocalSource.value) {
-    const rate = localRateTimestamps.length
-    if (effectiveRate.value !== rate) effectiveRate.value = rate
-    // task-62：1 Hz 刷新 per-series valid/stale 显示（计数本身在帧路径里非响应式累加）。
     validCountVersion.value += 1
     return
   }
-  effectiveRate.value = recentCompletions.length
   if (droppedPending > 0) {
     droppedCount.value += droppedPending
     droppedPending = 0
@@ -2432,281 +2084,6 @@ interface WordWaiter {
   reject: (error: unknown) => void
 }
 
-class WordPrefetcher {
-  /**
-   * 同一地址可能被多个待求值表达式同时请求（例如多个成员都基于同一个指针
-   * `*[r13+4]`）。必须为每个地址保存一个 waiter 列表；旧实现用 Map<地址, waiter>
-   * 后写覆盖先写，会让前一个 Promise 永远不 resolve，调试采样首拍即永久挂起
-   * （表现为 Samples 0 / Failures 0 / 0 Hz）。
-   */
-  private pending = new Map<number, WordWaiter[]>()
-  private scheduled = false
-
-  constructor(private readonly target: CmsisDapClient) {}
-
-  read(address: number): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
-      const key = address >>> 0
-      // 失效的栈帧/指针值可能落在 0/PPB 等不可访问地址；直接返回 0，
-      // 不要向 DAP 发非法读（否则 ACK=FAULT，整个调试采样链会被打断）。
-      if (!isPlausibleTargetAddress(key)) {
-        resolve(0)
-        return
-      }
-      const waiters = this.pending.get(key)
-      if (waiters) waiters.push({resolve, reject})
-      else this.pending.set(key, [{resolve, reject}])
-      if (!this.scheduled) {
-        this.scheduled = true
-        queueMicrotask(() => { void this.flush() })
-      }
-    })
-  }
-
-  private async flush(): Promise<void> {
-    this.scheduled = false
-    const batch = [...this.pending.entries()]
-    this.pending = new Map()
-    if (batch.length === 0) return
-    try {
-      const raws = await this.target.sampleRaw(batch.map(([address]) => ({address, size: 4})))
-      batch.forEach(([, waiters], index) => {
-        const raw = raws[index] ?? new Uint8Array(4)
-        let value = 0
-        for (let byte = 0; byte < 4; byte++) value |= (raw[byte] ?? 0) << (byte * 8)
-        const word = value >>> 0
-        for (const waiter of waiters) waiter.resolve(word)
-      })
-    } catch (error) {
-      for (const [, waiters] of batch) for (const waiter of waiters) waiter.reject(error)
-    }
-    if (this.pending.size > 0) {
-      this.scheduled = true
-      queueMicrotask(() => { void this.flush() })
-    }
-  }
-}
-
-/** 异步求值地址表达式（指针解引用通过 WordPrefetcher 批量读取）。 */
-async function resolveAddressAsync(
-    expr: AddressExpr,
-    registers: ReadonlyMap<number, number>,
-    prefetcher: WordPrefetcher,
-): Promise<number> {
-  switch (expr.kind) {
-    case 'addr':
-      return expr.address >>> 0
-    case 'reg': {
-      const value = registers.get(expr.reg)
-      if (value === undefined) throw new Error(`missing core register r${expr.reg}`)
-      return (value + expr.offset) >>> 0
-    }
-    case 'cfa': {
-      const value = registers.get(13)
-      if (value === undefined) throw new Error('missing core register SP (r13) for CFA')
-      return (value + expr.offset) >>> 0
-    }
-    case 'add':
-      return ((await resolveAddressAsync(expr.inner, registers, prefetcher)) + expr.offset) >>> 0
-    case 'deref': {
-      const pointerAddress = await resolveAddressAsync(expr.inner, registers, prefetcher)
-      return ((await prefetcher.read(pointerAddress)) + expr.offset) >>> 0
-    }
-    default:
-      throw new Error('unsupported DWARF address expression')
-  }
-}
-
-/**
- * 实时采样读取：普通叶子直接读固定地址；指针链成员需要先读指针（两阶段），
- * 仍不需要暂停目标，因此实时模式也可采样固定地址指针的成员。
- */
-async function fetchLiveRawValues(snapshot: readonly CurveSeries[]): Promise<Uint8Array[]> {
-  const current = client
-  if (!current) throw new Error('not connected')
-  if (!snapshot.some((item) => item.location)) {
-    return current.sampleRaw(snapshot.map((item) => ({address: item.sample.address, size: item.sample.size})))
-  }
-  const prefetcher = new WordPrefetcher(current)
-  const emptyRegisters = new Map<number, number>()
-  const addresses = await Promise.all(snapshot.map((item) => (
-    item.location
-      ? resolveAddressAsync(item.location, emptyRegisters, prefetcher)
-      : Promise.resolve(item.sample.address >>> 0)
-  )))
-  const results = snapshot.map((item, index) => ({
-    value: new Uint8Array(Math.max(1, Math.min(8, item.sample.size))),
-    read: {address: addresses[index], size: item.sample.size},
-    valid: isPlausibleTargetAddress(addresses[index]),
-  }))
-  const reads = results.filter((item) => item.valid).map((item) => item.read)
-  if (reads.length > 0) {
-    const raws = await current.sampleRaw(reads)
-    let slot = 0
-    for (const item of results) {
-      if (item.valid) item.value = raws[slot++] ?? item.value
-    }
-  }
-  return results.map((item) => item.value)
-}
-
-/**
- * 调试采样：haltTarget → 读需要的一次性核心寄存器 → 批量指针/内存读取 → resume。
- * 每次采样独立 halt/resume，约 5–20 Hz；出错时立即停止采样并在 finally 恢复目标。
- */
-function isTransientDebugError(error: unknown): boolean {
-  if (error instanceof DapError) {
-    // ack/target/protocol 通常来自“读到了失效的栈帧/指针地址”或目标暂时
-    // 未就绪；不应立刻停止采样。ws-* 表示连接已经坏了，必须停止/重连。
-    return error.code === 'ack' || error.code === 'target' || error.code === 'protocol'
-  }
-  return false
-}
-
-function noteDebugSampleSuccess(): void {
-  consecutiveFailures = 0
-  const completedAt = performance.now()
-  recentCompletions.push(completedAt)
-  const cutoff = completedAt - 1000
-  while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
-  scheduleStatsFlush()
-  scheduleDraw()
-}
-
-/**
- * 调试采样：haltTarget → 读需要的一次性核心寄存器 → 批量指针/内存读取 → resume。
- * 纯实时变量（固定地址/固定指针链）在调试模式下不 halt，直接走实时路径，
- * 避免为了全局变量也付出暂停目标的代价。
- *
- * 失效地址（栈帧未命中/指针垃圾）返回 0 并跳过，不再让单个坏读取终止整场采样；
- * 偶发 DAP ACK=FAULT 计入 Failures 后继续下一拍，连续 5 次才停止。
- */
-async function debugSampleTick(runId: number): Promise<void> {
-  debugTimer = 0
-  if (!sampling.value || runId !== debugRunId || !client) return
-  const current = client
-  const begin = performance.now()
-  let halted = false
-  let snapshot: CurveSeries[] = []
-  debugInFlight = true
-  try {
-    snapshot = seriesList.value.slice()
-    if (snapshot.length === 0) {
-      stopSampling()
-      return
-    }
-    const needsHalt = snapshot.some((item) => item.register !== undefined || (item.location && !addressExprIsLive(item.location)))
-    if (!needsHalt) {
-      const rawValues = await fetchLiveRawValues(snapshot)
-      if (!sampling.value || runId !== debugRunId) return
-      pushSample((begin - sampleEpochMs) / 1000, rawValues, snapshot)
-      noteDebugSampleSuccess()
-    } else {
-      halted = await current.haltTarget(false)
-      if (!halted) throw new DapError('target', 'target halt failed')
-      const registerIds = new Set<number>()
-      for (const item of snapshot) {
-        if (item.register !== undefined) registerIds.add(item.register)
-        if (item.location) {
-          for (const reg of addressExprRegisters(item.location)) registerIds.add(reg)
-        }
-      }
-      const orderedRegs = [...registerIds].sort((left, right) => left - right)
-      const registers = new Map<number, number>()
-      if (orderedRegs.length > 0) {
-        const values = await current.readCoreRegs(orderedRegs)
-        orderedRegs.forEach((reg, index) => registers.set(reg, values[index] ?? 0))
-      }
-      const prefetcher = new WordPrefetcher(current)
-      const addresses = await Promise.all(snapshot.map((item) => (
-        item.location
-          ? resolveAddressAsync(item.location, registers, prefetcher)
-          : Promise.resolve(item.sample.address >>> 0)
-      )))
-      const values: Uint8Array[] = new Array(snapshot.length)
-      const memoryReads: Array<{address: number; size: number}> = []
-      const memoryIndices: number[] = []
-      for (let index = 0; index < snapshot.length; index++) {
-        const item = snapshot[index]
-        if (item.register !== undefined) {
-          const size = Math.max(1, Math.min(8, item.sample.size))
-          const bytes = new Uint8Array(size)
-          let value = registers.get(item.register) ?? 0
-          for (let byte = 0; byte < size; byte++) {
-            bytes[byte] = value & 0xff
-            value = Math.floor(value / 256)
-          }
-          values[index] = bytes
-          continue
-        }
-        const address = addresses[index]
-        if (!isPlausibleTargetAddress(address)) {
-          values[index] = new Uint8Array(Math.max(1, Math.min(8, item.sample.size)))
-          continue
-        }
-        memoryReads.push({address, size: item.sample.size})
-        memoryIndices.push(index)
-      }
-      if (memoryReads.length > 0) {
-        const raws = await current.sampleRaw(memoryReads)
-        memoryIndices.forEach((seriesIndex, slot) => {
-          values[seriesIndex] = raws[slot] ?? new Uint8Array(1)
-        })
-      }
-      if (!sampling.value || runId !== debugRunId) return
-      pushSample((begin - sampleEpochMs) / 1000, values, snapshot)
-      noteDebugSampleSuccess()
-    }
-  } catch (error) {
-    if (!sampling.value || runId !== debugRunId) return
-    failedCount.value += 1
-    consecutiveFailures += 1
-    const message = error instanceof Error ? error.message : 'unknown error'
-    // 失效地址会让 AHB-AP 进入 sticky FAULT；不清除的话后续 halt/读寄存器
-    // 全部失败，只能刷新页面。这里先 ABORT+SELECT+CSW 恢复再继续下一拍。
-    if (error instanceof DapError && error.code === 'ack') {
-      try {
-        await current.recoverFromFault()
-      } catch {
-        /* 连接已断时由 transport 关闭流程处理 */
-      }
-    }
-    if (consecutiveFailures >= 5 || !isTransientDebugError(error) || transport === null || transport.isClosed) {
-      stopSampling()
-      statusError.value = true
-      if (transport === null || transport.isClosed) {
-        notice.value = {type: 'error', title: translate('curve.reconnectHint')}
-      } else {
-        notice.value = {type: 'error', title: translate('curve.debugSampleFailed', {err: message})}
-      }
-    }
-    scheduleDraw()
-  } finally {
-    debugInFlight = false
-    if (halted) {
-      try {
-        await current.resumeTarget(false)
-      } catch {
-        try {
-          await current.resumeTarget(false)
-        } catch {
-          // 恢复失败时连接层会报错；下一拍重试。
-        }
-      }
-    }
-  }
-  if (sampling.value && runId === debugRunId) {
-    const elapsed = performance.now() - begin
-    if (elapsed > debugIntervalMs.value * 1.5) droppedPending += 1
-    // 按“目标周期”而不是“tick 结束后再等一个周期”调度；否则实际周期是
-    // tick 耗时 + interval（WiFi 下 tick 可达 40–100 ms，6 Hz 的主要来源）。
-    const delay = Math.max(0, debugIntervalMs.value - elapsed)
-    debugTimer = window.setTimeout(() => { void debugSampleTick(runId) }, delay)
-    scheduleStatsFlush()
-  }
-}
-
-// ---- 设备本地采样（ESP32 halt→read→resume 闭环，Web 只轮询批量帧） ----
 function localErrorText(error: unknown): string {
   if (error instanceof CurveLocalError) return error.httpStatus > 0 ? `${error.message} (HTTP ${error.httpStatus})` : error.message
   return error instanceof Error ? error.message : 'unknown error'
@@ -2783,19 +2160,6 @@ async function refreshLocalStatus(): Promise<void> {
   watchpoint4Address.value = status.watchpoint4Address ?? null
   watchpoint4Hits.value = status.watchpoint4Hits ?? null
   lastWatchIndex.value = status.lastWatchIndex ?? null
-  if (status.traceActive !== undefined) traceActive.value = status.traceActive
-  if (status.seriesStale !== undefined) localSeriesStale.value = status.seriesStale
-  if (status.traceBytes !== undefined) traceTotal.value = status.traceBytes
-  if (status.traceDropped !== undefined) traceDropped.value = status.traceDropped
-  if (status.traceActive === true && !traceTimer) scheduleTracePoll()
-  // task-58：backtrace 摘要变化（valid/count）才抓取 PC 列表，避免 1 Hz 轮询重复请求。
-  if (status.backtraceValid !== undefined) {
-    const backtraceKey = `${status.backtraceValid}:${status.backtraceCount ?? 0}`
-    if (backtraceKey !== lastBacktraceStatusKey) {
-      lastBacktraceStatusKey = backtraceKey
-      if (status.backtraceValid) scheduleBacktraceFetch()
-    }
-  }
   conditionArmed.value = status.conditionArmed ?? null
   conditionMet.value = status.conditionMet ?? null
   conditionHits.value = status.conditionHits ?? null
@@ -2874,219 +2238,8 @@ function stopLocalSampling(postStop = true): void {
  * 调度下一次 trace 轮询（只在 active 时自循环）。
  * 轮询快照语义；raw 模式只有字节序号，lines 模式的行/时间戳全部来自固件字段。
  */
-function scheduleTracePoll(): void {
-  if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
-  if (!traceActive.value) return
-  traceTimer = window.setTimeout(() => {
-    traceTimer = 0
-    void pollTraceOnce()
-  }, Math.max(100, Math.round(tracePollMs.value)))
-}
-
-/** 拉取一次 since 之后的 trace 数据；失败显示固件/网络原文，不伪造空数据。 */
-async function pollTraceOnce(): Promise<void> {
-  if (tracePollInFlight || !traceActive.value) return
-  tracePollInFlight = true
-  try {
-    if (traceSource.value === 'lines') {
-      const chunk = await getLocalCurveTraceLines(traceLineSeq.value, CURVE_LOCAL_TRACE_LINES_MAX)
-      traceErrorStreak = 0
-      applyTraceLinesChunk(chunk)
-      traceError.value = ''
-    } else {
-      const chunk = await getLocalCurveTrace(traceSeq.value)
-      traceErrorStreak = 0
-      applyTraceChunk(chunk)
-      traceError.value = ''
-    }
-  } catch (error) {
-    traceErrorStreak += 1
-    traceError.value = translate('curve.traceReadFailed', {err: localErrorText(error)})
-    // 404 = 固件无 trace 接口（旧固件/未启用）：停止轮询并保留原文，不显示伪数据。
-    const missingEndpoint = error instanceof CurveLocalError && error.httpStatus === 404
-    if (missingEndpoint || traceErrorStreak >= 3) {
-      traceActive.value = false
-      if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
-    } else if (traceActive.value) {
-      scheduleTracePoll()
-    }
-  } finally {
-    tracePollInFlight = false
-  }
-}
-
-/** 合并固件 lines 响应：行/时间戳/seq 全部用固件字段；gap 时清空显示窗口（不补缺失行）。 */
-function applyTraceLinesChunk(chunk: CurveLocalTraceLinesChunk): void {
-  if (chunk.active !== null) traceActive.value = chunk.active
-  if (chunk.totalLines !== null) traceTotalLines.value = chunk.totalLines
-  if (chunk.droppedLines !== null) traceDroppedLines.value = chunk.droppedLines
-  if (chunk.triggered !== null && chunk.triggered) traceTriggered.value = true
-  if (chunk.triggerSeq !== null) traceTriggerSeq.value = chunk.triggerSeq
-  const previousLast = traceLines.value.length > 0 ? traceLines.value[traceLines.value.length - 1].seq : -1
-  const firstIncoming = chunk.lines.length > 0 ? chunk.lines[0].seq : null
-  const jumped = chunk.gap === true
-    || (firstIncoming !== null && firstIncoming > previousLast + 1)
-  if (jumped) traceGap.value = true
-  traceLines.value = appendTraceLines(
-    jumped ? [] : traceLines.value,
-    chunk.lines,
-    CURVE_LOCAL_TRACE_DISPLAY_LINES,
-  )
-  traceLineSeq.value = chunk.nextSeq
-  if (traceActive.value) scheduleTracePoll()
-}
-
-/** 把一次响应并入显示窗口（gap/序号不连续时重置窗口，仍按真实字节序号标注）。 */
-function applyTraceChunk(chunk: CurveLocalTraceChunk): void {
-  traceHeadersAvailable.value = chunk.headersAvailable
-  if (chunk.active !== null) traceActive.value = chunk.active
-  if (chunk.total !== null) traceTotal.value = chunk.total
-  if (chunk.dropped !== null) traceDropped.value = chunk.dropped
-  if (chunk.gap !== null) traceGap.value = chunk.gap
-  if (chunk.bytes.length > 0) {
-    const incomingBase = chunk.nextSeq - chunk.bytes.length
-    const previousEnd = traceBaseSeq.value + traceBuffer.value.length
-    const reset = chunk.gap === true || traceBuffer.value.length === 0 || incomingBase !== previousEnd
-    const merged = appendTraceBytes(
-      reset ? new Uint8Array(0) : traceBuffer.value,
-      chunk.bytes,
-      TRACE_DISPLAY_MAX_BYTES,
-    )
-    traceBuffer.value = merged
-    traceBaseSeq.value = Math.max(0, chunk.nextSeq - merged.length)
-  }
-  traceSeq.value = chunk.nextSeq
-  // active 从 status/header 回读为 false（例如固件侧 stop）时停止轮询。
-  if (traceActive.value) scheduleTracePoll()
-}
-
-async function startTraceCapture(): Promise<void> {
-  if (traceBusy.value) return
-  traceBusy.value = true
-  traceError.value = ''
-  traceLinesError.value = ''
-  try {
-    // task-62：行触发配置只在非空时下发（旧固件忽略未知 body 字段）。
-    const options: LocalCurveTraceStartOptions = {}
-    const pattern = traceTriggerPattern.value.trim()
-    if (pattern) {
-      options.trigger = pattern
-      options.stopAfter = traceTriggerStopAfter.value
-    }
-    const started = await startLocalCurveTrace(options)
-    traceErrorStreak = 0
-    traceActive.value = started.active
-    traceSeq.value = 0
-    traceBuffer.value = new Uint8Array(0)
-    traceBaseSeq.value = 0
-    traceLineSeq.value = 0
-    traceLines.value = []
-    traceGap.value = false
-    traceTotal.value = 0
-    traceDropped.value = 0
-    traceTotalLines.value = null
-    traceDroppedLines.value = null
-    traceTriggered.value = false
-    traceTriggerSeq.value = null
-    traceHeadersAvailable.value = true
-    // 探测固件 task-60 行接口：成功则用 lines（行/时间戳来自固件），404 回退旧 raw。
-    try {
-      const probe = await getLocalCurveTraceLines(0, CURVE_LOCAL_TRACE_LINES_MAX)
-      traceLinesSupported.value = true
-      traceSource.value = 'lines'
-      // probe 只用于探测接口：真实游标从 0 开始按 next_seq 连续拉取（probe 的行不丢弃）。
-      if (probe.lines.length > 0) {
-        traceLines.value = probe.lines.slice(0, CURVE_LOCAL_TRACE_DISPLAY_LINES)
-        traceLineSeq.value = probe.nextSeq
-      }
-    } catch (probeError) {
-      traceLinesSupported.value = false
-      traceSource.value = 'raw'
-      if (!(probeError instanceof CurveLocalError && probeError.httpStatus === 404)) {
-        traceLinesError.value = localErrorText(probeError)
-      }
-    }
-    scheduleTracePoll()
-    globalNotify(translate('curve.traceStarted') + (traceSource.value === 'lines' ? ' (lines)' : ' (raw bytes)'), 'success')
-  } catch (error) {
-    // 旧固件无该接口时返回 404 "unknown /api/curve action"：原样展示固件 error。
-    traceActive.value = false
-    traceError.value = translate('curve.traceStartFailed', {err: localErrorText(error)})
-  } finally {
-    traceBusy.value = false
-  }
-}
-
-async function stopTraceCapture(): Promise<void> {
-  if (traceBusy.value) return
-  traceBusy.value = true
-  if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
-  try {
-    await stopLocalCurveTrace()
-    traceError.value = ''
-  } catch (error) {
-    traceError.value = translate('curve.traceStopFailed', {err: localErrorText(error)})
-  } finally {
-    traceActive.value = false
-    traceBusy.value = false
-  }
-}
-
-/** 清空显示窗口（不改变固件 trace 状态/字节序号）。 */
-function clearTraceView(): void {
-  // raw：从当前字节游标重新显示；lines：从当前行游标继续（固件不重发旧行，不伪造）。
-  traceBuffer.value = new Uint8Array(0)
-  traceBaseSeq.value = traceSeq.value
-  traceLines.value = []
-  traceGap.value = false
-}
-
-/** 轮询间隔改变后按新周期重新调度（仅捕获中）。 */
-watch(tracePollMs, () => {
-  if (traceActive.value) scheduleTracePoll()
-})
-
-// ---- task-58：帧指针 backtrace（固件 task-57 原型） --------------------------
-/** task-58：命中后延迟去抖抓取一次 backtrace（固件在 halt 时已保存最近一次链）。 */
-function scheduleBacktraceFetch(): void {
-  if (!backtraceEnabled.value || !backtraceTriggerAvailable.value) return
-  if (backtraceTimer) return
-  const wait = Math.max(300, 800 - (performance.now() - lastBacktraceFetchAt))
-  backtraceTimer = window.setTimeout(() => {
-    backtraceTimer = 0
-    void fetchBacktrace(false)
-  }, wait)
-}
-/** 抓取 GET /api/curve/backtrace；自动抓取静默失败（设备忙），手动抓取展示原文。 */
-async function fetchBacktrace(manual: boolean): Promise<void> {
-  if (backtraceLoading.value) return
-  backtraceLoading.value = true
-  lastBacktraceFetchAt = performance.now()
-  if (manual) backtraceError.value = ''
-  try {
-    const result = await getLocalCurveBacktrace()
-    backtraceData.value = result
-    if (manual) backtraceError.value = ''
-  } catch (error) {
-    if (manual) backtraceError.value = translate('curve.backtraceLoadFailed', {err: localErrorText(error)})
-  } finally {
-    backtraceLoading.value = false
-  }
-}
-
-/** 清空 backtrace 显示（切换触发模式/重新 Start 时，避免旧命中误导）。 */
-function resetBacktraceState(): void {
-  if (backtraceTimer) { window.clearTimeout(backtraceTimer); backtraceTimer = 0 }
-  backtraceData.value = null
-  backtraceError.value = ''
-  lastBacktraceStatusKey = ''
-}
-
 async function startLocalSampling(): Promise<void> {
   if (sampling.value || seriesList.value.length === 0) return
-  if (connected.value || connecting.value) {
-    await onDisconnect()
-  }
   const snapshot = seriesList.value.filter((item) => !item.derived)
   if (snapshot.length === 0) {
     notice.value = {type: 'error', title: translate('curve.derivedNeedTwo')}
@@ -3215,8 +2368,6 @@ async function startLocalSampling(): Promise<void> {
     watch3,
     watch4,
     watchpoints: watchpointsArray,
-    // task-58：帧指针 backtrace（仅 breakpoint/watchpoint；固件 task-57 原型）。
-    backtrace: backtraceEnabled.value && backtraceTriggerAvailable.value ? true : undefined,
     triggerCondition: conditionEnabled.value ? (conditionSpec.value ?? undefined) : undefined,
     // 函数快照（task-55）：仅在 breakpoint + armed + 固件一次性快照开关时下发
     // snapshot_after；旧固件忽略未知字段 → 仍按“首帧冻结”降级。
@@ -3232,7 +2383,6 @@ async function startLocalSampling(): Promise<void> {
   localStartTransport.value = null
   localStartRequestBytes.value = null
   localStartFallbackReason.value = ''
-  resetBacktraceState()
   let started
   // P0-1：优先 CBS1 start-bin（精简版 ≤64 series 流式、不占 16 KiB 连续堆）；旧固件
   // 404/400/415/405/501 时函数内部自动回退旧 JSON start（16384 上限），结果带 transport。
@@ -3492,7 +2642,6 @@ function handleLocalFramesPage(page: CurveLocalFramesPage): void {
   if (page.triggered) {
     watchFramesTriggered.value = true
     // task-58：breakpoint/watchpoint 命中的同一时刻固件已保存帧指针 backtrace。
-    scheduleBacktraceFetch()
     void refreshLocalStatus()
   }
   if (page.conditionTriggered) {
@@ -3551,37 +2700,6 @@ function handleLocalFramesPage(page: CurveLocalFramesPage): void {
 }
 
 /** 切换采样来源：本地方案不建立 WS-DAP；从 Web 切到本地时先断开 DAP。 */
-async function onSamplingSourceChange(): Promise<void> {
-  if (sampling.value) return
-  statusError.value = false
-  everSampled.value = false
-  notice.value = null
-  if (isLocalSource.value) {
-    if (connected.value || connecting.value) {
-      await onDisconnect()
-    }
-    const removable = seriesList.value.filter((item) => item.register !== undefined
-      || (!item.location && !item.sample.address))
-    for (const item of removable) removeSeries(item.id)
-    if (removable.length > 0) {
-      globalNotify(translate('curve.localSeriesRemoved', {count: removable.length}), 'info')
-    }
-    localStatusInfo.value = null
-    localFramesReceived.value = 0
-    localInvalidCount.value = 0
-    localOverwrittenCount.value = 0
-    localHits.value = null
-    localSampled.value = null
-    localOutOfScopeCount.value = 0
-    localGap.value = false
-  } else if (hasRateOverrides.value) {
-    // 每变量目标刷新率依赖设备本地 groups+weights；Web-DAP 路径没有分组协议。
-    globalNotify('Per-variable target refresh rates only apply to Device-local sampling; Web DAP mode ignores them.', 'info')
-  }
-  scheduleDraw()
-}
-
-/** 函数选择器：选中后自动填 0x%08X（bit0 清 0），地址仍可手工改。 */
 function onFunctionSelected(address: number | null | undefined): void {
   if (address === null || address === undefined) return
   const symbol = chooseBreakpointFunction(elfFunctionSymbols.value, address)
@@ -3603,11 +2721,6 @@ function onLocalTriggerChange(): void {
   localStatusInfo.value = null
   // 函数快照只在 breakpoint 触发下有意义；切走后清空 arm/命中标记避免误导。
   if (localTrigger.value !== 'breakpoint') resetSnapshotState()
-  // task-58：backtrace 仅对 breakpoint/watchpoint 有效；离开时清除显示但保留开关偏好。
-  if (!backtraceTriggerAvailable.value) {
-    backtraceEnabled.value = false
-    resetBacktraceState()
-  }
   watchStartError.value = ''
   scheduleDraw()
 }
@@ -3717,160 +2830,17 @@ function clearSnapshotMark(): void {
 }
 
 function startSampling(): void {
-  if (isLocalSource.value) {
-    void startLocalSampling()
-    return
-  }
-  if (!connected.value || !client || seriesList.value.length === 0) return
   if (sampling.value) return
-  statusError.value = false
-  notice.value = null
-  failedCount.value = 0
-  consecutiveFailures = 0
-  recentCompletions = []
-  effectiveRate.value = 0
-  inflightSamples = 0
-  if (sampleRate.value === SAMPLE_RATE_AUTO) {
-    autoRate.value = AUTO_MAX_RATE
-  }
-  resetConstantTracking()
-  const lastT = ringCount > 0 ? timestamps[(ringHead - 1 + MAX_POINTS) % MAX_POINTS] : 0
-  sampleEpochMs = performance.now() - lastT * 1000
-  nextSampleAt = performance.now()
-  autoBadWindows = 0
-  autoGoodWindows = 0
-  resetAutoWindow(performance.now())
-  sampling.value = true
-  everSampled.value = true
-  if (samplingMode.value === 'debug') {
-    debugRunId += 1
-    samplingRunId = debugRunId
-    debugTimer = 0
-    void debugSampleTick(debugRunId)
-    return
-  }
-  debugRunId += 1
-  const runId = ++samplingRunId
-  scheduleBeat(runId, 0)
+  void startLocalSampling()
 }
 
-function stopWebSampling(): void {
-  sampling.value = false
-  samplingRunId += 1
-  debugRunId += 1
-  if (sampleTimer) {
-    window.clearTimeout(sampleTimer)
-    sampleTimer = 0
-  }
-  if (debugTimer) {
-    window.clearTimeout(debugTimer)
-    debugTimer = 0
-  }
-  // 调试模式停止时确保目标恢复运行（正在进行的 tick 会在 finally 里恢复）。
-  const current = client
-  if (isDebugMode.value && !debugInFlight && current && connected.value) {
-    void current.resumeTarget().catch(() => { /* ignore */ })
-  }
-  inflightSamples = 0
-  flushStats()
-}
-
-/** 统一停止入口：本地采样 POST /api/curve/stop，Web-DAP 保持原有停止逻辑。 */
 function stopSampling(): void {
-  if (isLocalSource.value || localActive.value) {
-    stopLocalSampling()
-    return
-  }
-  stopWebSampling()
+  if (!sampling.value) return
+  stopLocalSampling(false)
+  sampling.value = false
+  localActive.value = false
 }
 
-/** 切换采样模式：实时模式不能采样依赖寄存器的调试帧变量，切回时移除这些曲线。 */
-function onSamplingModeChange(): void {
-  if (sampling.value) return
-  if (samplingMode.value === 'live') {
-    const removable = seriesList.value.filter((item) => !!item.location && !addressExprIsLive(item.location))
-    for (const item of removable) removeSeries(item.id)
-    if (removable.length > 0) {
-      globalNotify(translate('curve.haltSeriesRemoved', {count: removable.length}), 'info')
-    }
-  }
-  scheduleDraw()
-}
-
-function scheduleBeat(runId: number, delay: number): void {
-  if (!sampling.value || runId !== samplingRunId) return
-  sampleTimer = window.setTimeout(() => samplingBeat(runId), Math.max(0, delay))
-}
-
-/** 固定节拍：先排下一拍，再视管线容量决定“发起采样”还是“跳过并计入 dropped”。 */
-function samplingBeat(runId: number): void {
-  sampleTimer = 0
-  if (!sampling.value || runId !== samplingRunId || !client) return
-  const period = 1000 / Math.max(currentTargetRate(), 1)
-  const now = performance.now()
-  nextSampleAt += period
-  if (nextSampleAt < now) {
-    // 浏览器定时器/主线程抖动会让节拍迟到；迟到只是采样时刻轻微漂移，本拍仍会
-    // 发一个采样请求，没有“丢样本”。因此这里只重新对齐相位、不计 dropped。
-    // dropped 只统计“管线已满、主动跳过的采样节拍”（真正的采样点缺失）。
-    nextSampleAt = now + period
-  }
-  scheduleBeat(runId, nextSampleAt - now)
-  autoWindowBeats += 1
-
-  if (inflightSamples >= PIPELINE_DEPTH) {
-    // 管线已满：跳过这一拍（没有数据丢失，只是少发一个采样请求）。
-    droppedPending += 1
-    autoWindowSkipped += 1
-    scheduleStatsFlush()
-    maybeAdjustAutoRate(now)
-    return
-  }
-
-  const snapshot = seriesList.value.slice()
-  const begin = now
-  inflightSamples += 1
-  autoWindowInflightSum += inflightSamples
-  autoWindowInflightCount += 1
-  fetchLiveRawValues(snapshot).then((rawValues) => {
-    if (!sampling.value || runId !== samplingRunId) return
-    inflightSamples = Math.max(0, inflightSamples - 1)
-    // 时间戳使用“发起请求”的时刻（管线化后完成时刻会晚于采样时刻）。
-    const date = (begin - sampleEpochMs) / 1000
-    pushSample(date, rawValues, snapshot)
-    trackConstantValues(rawValues)
-    consecutiveFailures = 0
-    const completedAt = performance.now()
-    recentCompletions.push(completedAt)
-    const cutoff = completedAt - 1000
-    while (recentCompletions.length > 0 && recentCompletions[0] < cutoff) recentCompletions.shift()
-    scheduleStatsFlush()
-    autoWindowCompletions += 1
-    maybeAdjustAutoRate(completedAt)
-    scheduleDraw()
-  }).catch((error) => {
-    if (!sampling.value || runId !== samplingRunId) return
-    inflightSamples = Math.max(0, inflightSamples - 1)
-    handleSampleError(error)
-  })
-}
-
-function handleSampleError(error: unknown): void {
-  failedCount.value += 1
-  consecutiveFailures += 1
-  if (consecutiveFailures < 3) return
-  stopSampling()
-  statusError.value = true
-  const message = error instanceof Error ? error.message : 'unknown error'
-  if (transport === null || transport.isClosed) {
-    notice.value = {type: 'error', title: translate('curve.reconnectHint')}
-  } else {
-    notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
-  }
-  scheduleDraw()
-}
-
-/** 把 DWARF 叶子读到的字节转换成 64-bit 原始值（含位域抽取）。 */
 function extractSampleBits(bytes: Uint8Array, leaf: SampleLeaf): {lo: number; hi: number} {
   if (leaf.bitSize > 0) {
     let value = 0n
@@ -3940,7 +2910,6 @@ function clearData(): void {
   sampleCount.value = 0
   failedCount.value = 0
   droppedCount.value = 0
-  effectiveRate.value = 0
   everSampled.value = sampling.value
   statusError.value = false
   recentCompletions = []
@@ -3954,7 +2923,6 @@ function clearData(): void {
 function resetConstantTracking(): void {
   constantReference = null
   constantSamples = 0
-  haltedSuspected.value = false
 }
 
 /** 目标 halt 时所有变量值恒定（真机接管后常见 DHCSR.S_HALT）。 */
@@ -3982,31 +2950,12 @@ function trackConstantValues(rawValues: Uint8Array[]): void {
   }
   if (same) {
     constantSamples += 1
-    if (constantSamples >= 25) haltedSuspected.value = true
   } else {
     constantReference = rawValues.map((bytes) => bytes.slice())
     constantSamples = 0
-    haltedSuspected.value = false
-  }
+    }
 }
 
-async function onResumeTarget(): Promise<void> {
-  const current = client
-  if (!current || resuming.value) return
-  resuming.value = true
-  try {
-    await current.resumeTarget()
-    resetConstantTracking()
-    globalNotify(translate('common.success'), 'success')
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error'
-    notice.value = {type: 'error', title: translate('curve.connectFailed', {err: message})}
-  } finally {
-    resuming.value = false
-  }
-}
-
-// ---- 变量树 / 曲线管理 ----------------------------------------------------
 function nodeKey(path: string, node: VariableNode): string {
   return `${path}@${node.address.toString(16)}`
 }
@@ -4085,7 +3034,7 @@ function nodeSelectable(node: VariableNode): boolean {
   if (isLocalSource.value) {
     return !!localExprForNode(node)
   }
-  if (samplingMode.value === 'debug') {
+  if (false) {
     return !!node.sampleable && (!!node.sample || !!node.location)
   }
   return !!node.sample && (node.sample.address !== 0 || !!node.liveSamplable)
@@ -4149,7 +3098,7 @@ const variableRows = computed<VariableRow[]>(() => {
     if (currentFunctionOnly.value && activePc.value !== null && !nodeInActiveFunction(node)) return false
     if (!onlySampleable.value) return true
     if (isLocalSource.value) return !!localExprForNode(node)
-    return samplingMode.value === 'debug' ? node.sampleable : node.liveSamplable
+    return false ? node.sampleable : node.liveSamplable
   })
   if (groupBy.value === 'none') {
     for (const node of base) visit(node, 0, '', rows, false)
@@ -4242,7 +3191,7 @@ function makeSeries(name: string, key: string, typeName: string, node: VariableN
     color: COLORS[seriesList.value.length % COLORS.length],
     visible: true,
     startSeq: sampleSeq + (sampling.value ? 1 : 0),
-    mode: samplingMode.value === 'debug' ? 'halt' : 'live',
+    mode: false ? 'halt' : 'live',
     location,
     register,
     loclistMulti: node.loclistMulti === true,
@@ -4266,8 +3215,8 @@ function newSeries(name: string, key: string, typeName: string, node: VariableNo
     globalNotify(translate('curve.localSeriesLimit', {count: CURVE_LOCAL_MAX_TOTAL_SERIES}), 'warning')
     return null
   }
-  if (!isLocalSource.value && seriesList.value.length >= MAX_CURVE_SERIES) {
-    globalNotify(translate('curve.maxSeries', {max: MAX_CURVE_SERIES}), 'warning')
+  if (!isLocalSource.value && seriesList.value.length >= CURVE_LOCAL_MAX_TOTAL_SERIES) {
+    globalNotify(translate('curve.maxSeries', {max: CURVE_LOCAL_MAX_TOTAL_SERIES}), 'warning')
     return null
   }
   const series = makeSeries(name, key, typeName, node)
@@ -4329,7 +3278,7 @@ function showMoreVariables(): void {
 }
 
 function selectionLimitForSource(): number {
-  return isLocalSource.value ? localSeriesLimit : MAX_CURVE_SERIES
+  return isLocalSource.value ? localSeriesLimit : CURVE_LOCAL_MAX_TOTAL_SERIES
 }
 
 /** 批量选择（一次操作只提示一次上限）：仍复用 newSeries 的采样表达式/PC/variants 构建。 */
@@ -4869,39 +3818,6 @@ const watchpointError = computed(() => {
   }
   return ''
 })
-/** task-58：backtrace 仅对 breakpoint/watchpoint 触发有效（固件契约）。 */
-const backtraceTriggerAvailable = computed(() => localTrigger.value === 'breakpoint' || localTrigger.value === 'watchpoint')
-/** trace text 视图：lines 模式用固件行；raw 模式 UTF-8 尽力解码字节流。 */
-const traceTextContent = computed(() => (traceSource.value === 'lines'
-  ? formatTraceLinesText(traceLines.value)
-  : decodeTraceText(traceBuffer.value)))
-/** trace hex 视图：lines 模式逐行显示固件 t_us + 行字节；raw 模式按字节序号 dump。 */
-const traceHexContent = computed(() => (traceSource.value === 'lines'
-  ? formatTraceLinesHex(traceLines.value)
-  : formatTraceHexDump(traceBuffer.value, traceBaseSeq.value)))
-/** trace 行视图：lines 模式 = 固件行 seq + Δt(固件 esp_timer)；raw 模式 = 目标 '\n' 切分 + 字节序号。 */
-const traceLineContent = computed(() => (traceSource.value === 'lines'
-  ? formatTraceLinesView(traceLines.value)
-  : formatRawTraceLineView(traceBuffer.value, traceBaseSeq.value)))
-/** 当前 trace 视图内容（text/hex/line）。 */
-const traceContent = computed(() => {
-  if (traceView.value === 'hex') return traceHexContent.value
-  if (traceView.value === 'line') return traceLineContent.value
-  return traceTextContent.value
-})
-/** 当前是否有可显示 trace 数据（lines 行数或 raw 字节数）。 */
-const traceHasContent = computed(() => (traceSource.value === 'lines' ? traceLines.value.length > 0 : traceBuffer.value.length > 0))
-/** trace 行/字节统计文案（不统一混用 seq 语义）。 */
-const traceCounterText = computed(() => (traceSource.value === 'lines'
-  ? `lines: ${traceLines.value.length} / total ${traceTotalLines.value ?? '-'} · seq ${traceLineSeq.value}`
-  : `bytes: ${traceBuffer.value.length} · seq ${traceSeq.value}`))
-/** backtrace PC -> ELF 函数/源码行（纯函数映射；无符号/无行表时如实留空）。 */
-const backtraceFrames = computed(() => {
-  const data = backtraceData.value
-  if (!data || !data.valid) return []
-  return buildBacktraceFrames(data.pcs, elfFunctionSymbols.value, lineIndex.value, CURVE_LOCAL_MAX_BACKTRACE_FRAMES)
-})
-
 function jumpToTriggerSeq(targetSeq: number | null, preTrigger: boolean): void {
   if (targetSeq === null || ringCount === 0) {
     globalNotify(translate('curve.watchpointNoTrigger'), 'warning')
@@ -5083,7 +3999,6 @@ function ringSlotToOrder(slot: number): number {
 // ---- task-37 / task-55：group weight / 每变量刷新率 / 预设 / watch / 光标 / 派生 / 诊断 ----
 /** 总帧率（Hz）：采样中优先用实测帧率（≈），否则用名义值 1000/interval。 */
 const localTotalFrameRateHz = computed(() => {
-  if (sampling.value && effectiveRate.value > 0) return effectiveRate.value
   return localIntervalMs.value > 0 ? 1000 / localIntervalMs.value : 0
 })
 /**
@@ -5706,48 +4621,6 @@ const diagnosticsData = computed(() => {
       // 固件 start 失败原文（DWT 资源不足等）；未失败为 null。
       startError: watchStartError.value || null,
     },
-    // task-58：固件 task-57 调试能力摘要（不含伪造的 SWO/RTOS 数据）。
-    uartTrace: {
-      source: traceSource.value,
-      active: traceActive.value,
-      nextByteSeq: traceSeq.value,
-      totalBytes: traceTotal.value,
-      droppedBytes: traceDropped.value,
-      gap: traceGap.value,
-      headersAvailable: traceHeadersAvailable.value,
-      displayBytes: traceBuffer.value.length,
-      // task-62：固件 task-60 lines 接口（行/时间来自固件，不是 Web 生成）。
-      linesSupported: traceLinesSupported.value,
-      nextLineSeq: traceLineSeq.value,
-      displayLines: traceLines.value.length,
-      totalLines: traceTotalLines.value,
-      droppedLines: traceDroppedLines.value,
-      triggered: traceTriggered.value,
-      triggerSeq: traceTriggerSeq.value,
-      triggerPattern: traceTriggerPattern.value || null,
-      view: traceView.value,
-      pollMs: tracePollMs.value,
-    },
-    backtrace: {
-      enabled: backtraceEnabled.value,
-      valid: backtraceData.value?.valid ?? null,
-      count: backtraceData.value?.count ?? null,
-      truncated: backtraceData.value?.truncated ?? null,
-      frames: backtraceFrames.value.map((frame) => ({
-        pc: `0x${frame.pc.toString(16).toUpperCase()}`,
-        lookupPc: `0x${frame.lookupPc.toString(16).toUpperCase()}`,
-        returnAddress: frame.returnAddress,
-        function: frame.functionName,
-        functionOffset: frame.functionOffset,
-        functionExact: frame.functionExact,
-        file: frame.file,
-        line: frame.line,
-      })),
-    },
-    unavailableFeatures: [
-      'SWO/ITM trace (no SWO pin; SWO_FUNCTION_ENABLE=0)',
-      'RTOS task awareness (not implemented)',
-    ],
     playbackState: {active: playbackMode.value, index: playbackIndex.value},
     cursor: {a: cursorA.value?.time ?? null, b: cursorB.value?.time ?? null},
     // task-55：每变量刷新率计划（divisor 分桶 + 权重份额）与函数快照状态。
@@ -6531,7 +5404,7 @@ function addManualAddress(): void {
       addressError.value = translate('curve.invalidAddress')
       continue
     }
-    const addLimit = isLocalSource.value ? localSeriesLimit : MAX_CURVE_SERIES
+    const addLimit = isLocalSource.value ? localSeriesLimit : CURVE_LOCAL_MAX_TOTAL_SERIES
     if (seriesList.value.length >= addLimit) {
       const message = isLocalSource.value
         ? translate('curve.localSeriesLimit', {count: addLimit})
@@ -7775,9 +6648,6 @@ function installDebugSnapshot(): void {
     startRequestBytes: localStartRequestBytes.value,
     validSamples: totalValidCount.value,
     staleSamples: totalStaleCount.value,
-    traceSource: traceSource.value,
-    traceLines: traceLines.value.length,
-    traceLinesSupported: traceLinesSupported.value,
     lastDrawMs: Math.round(perfCounter.lastDrawMs * 100) / 100,
     avgDrawMs: perfCounter.draws > 0 ? Math.round((perfCounter.drawMsTotal / perfCounter.draws) * 100) / 100 : 0,
     drawn: drawnSeriesList.value.length,
@@ -7801,20 +6671,8 @@ onMounted(() => {
   initFramesWorker()
   initChartWorker()
   void refreshTargetInfo()
-  // task-62：探测固件能力（sample_every / 4 路 watchpoint / trace lines）；失败保持 fallback。
-  void refreshLocalCapabilities()
   // task-62 P1-17：先发布空命令索引（本页 ELF 状态是组件内状态；无 ELF 时命令面板不显示变量段）。
   publishCommandIndex()
-  // task-58：设备上若已有 UART trace 捕获（其他客户端/上一会话启动），按 status 如实
-  // 显示并继续轮询；读不到 status 时保持 Stopped 默认态，不伪报 active/字节数。
-  void getLocalCurveStatus().then((status) => {
-    if (status.traceActive !== true) return
-    traceActive.value = true
-    if (status.traceBytes !== undefined) traceTotal.value = status.traceBytes
-    if (status.traceDropped !== undefined) traceDropped.value = status.traceDropped
-    traceSeq.value = 0
-    if (!traceTimer) scheduleTracePoll()
-  }).catch(() => { /* 设备离线/旧固件：保持 Stopped，不伪报 */ })
   window.addEventListener('keydown', onGlobalKeydown)
   // task-62 P1-17：接收命令面板/其他页面的变量聚焦事件。
   window.addEventListener(DAP_FOCUS_VARIABLE_EVENT, onDapFocusVariable as EventListener)
@@ -7836,11 +6694,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopSampling()
-  // task-58：清理 trace/backtrace 定时器；页面离开时结束本页启动的 UART trace 捕获
-  // （避免设备一直占用 UART RX 订阅），best-effort 且不阻塞卸载。
-  if (traceTimer) { window.clearTimeout(traceTimer); traceTimer = 0 }
-  if (backtraceTimer) { window.clearTimeout(backtraceTimer); backtraceTimer = 0 }
-  if (traceActive.value) void stopLocalCurveTrace().catch(() => { /* best effort */ })
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener(DAP_FOCUS_VARIABLE_EVENT, onDapFocusVariable as EventListener)
@@ -7863,9 +6716,6 @@ onBeforeUnmount(() => {
   themeObserver = null
   chartPaletteCache = null
   delete (window as unknown as {__curveDebug?: () => Record<string, unknown>}).__curveDebug
-  if (transport) transport.close('page unmount')
-  transport = null
-  client = null
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
