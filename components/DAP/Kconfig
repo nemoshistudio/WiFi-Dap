@@ -18,49 +18,51 @@ menu "WiFi Dap core (CMSIS-DAP command engine)"
             no Vendor9 handler.
 
     config BIRDIEBOT_SWD_ULTRA_FAST
-        bool "ESP32-S3 ultra-fast dedicated-GPIO SWD engine (~20-24 MHz)"
+        bool "ESP32-S3 dedicated-GPIO SWD engine (all SWD rates, 100 kHz-20 MHz)"
         default y
         depends on IDF_TARGET_ESP32S3
         help
-            Enable the M4 Xtensa dedicated-GPIO SWD backend
-            (components/DAP/cmsis-dap/source/SWD_Fast_GPIO.c), which replaces
-            the bit-banged SWCLK generation with fully unrolled single-
-            instruction GPIO writes.  Target: ~20 MHz on the default 160 MHz
-            CPU build and ~24 MHz when the CPU runs at 240 MHz, i.e. the same
-            class as XRDAP-ESP's hardware-validated 23.7 MHz engine.
+            Enable the M5 Xtensa dedicated-GPIO SWD engine
+            (components/DAP/cmsis-dap/source/SWD_Fast_GPIO.c) and make it the
+            ONLY SWD backend on the ESP32-S3: SWD_Transfer at every adapter
+            speed, SWJ_Sequence (line reset / JTAG-to-SWD / dormant wake-up)
+            and SWD_Sequence (capture) all run on it.  The legacy GPIO
+            normal/fast and 40 MHz SPI SWD backends are compiled out for this
+            target; if the engine cannot run (wrong core, pins not routed,
+            CPU < 150 MHz) the SWD entry points return DAP errors instead of
+            silently falling back.
 
-            This does NOT change the default SWD clock: the project default
-            stays 2 MHz (docs/board-pins.md), and the engine is only selected
-            when the host requests >= BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ via
-            DAP_SWJ_Clock (OpenOCD `adapter speed`, target_flash or the local
-            curve sampler).  Any failure (wrong core, pins not routed to the
-            S3 dedicated-GPIO block, unsupported request) falls back to the
-            existing GPIO fast backend.
+            Rate coverage: 100 kHz .. 20 MHz on the default 160 MHz CPU build,
+            up to 24 MHz on a 240 MHz CPU build.  The engine picks a level
+            that is never faster than the host request (the mapping keeps the
+            error within 0 .. -25 %); high rates use fully unrolled assembly,
+            low rates use cycle-counter paced loops.
 
-            Default is y per the M4 user request ("enable the high-speed SWD
-            engine by default"), but the engine is **not yet validated on the
-            real board** (no logic-analyzer/HIL window in this phase).  Set
-            this to n to restore the previous behaviour exactly; see
-            docs/swd-23mhz-engine.md for the HIL checklist and the rollback
-            procedure.  Only affects ESP32-S3 builds (JTAG, ESP32, C3 and C5
-            are unchanged).
+            On hardware: 12/16 MHz were stable on an STM32H723, 20 MHz was
+            marginal on that target/wiring - OpenOCD `adapter speed 16000` is
+            the recommended setting there (docs/swd-23mhz-engine.md §6).
+
+            Default is y per the M4/M5 user requests.  The engine is not yet
+            validated on every target/wiring combination: set this to n to
+            restore the legacy GPIO/SPI backend selection exactly, and read
+            docs/swd-23mhz-engine.md for the HIL checklist and rollback.
+            Only affects ESP32-S3 SWD; JTAG, ESP32, C3 and C5 are unchanged.
 
     config BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ
-        int "Minimum DAP_SWJ_Clock request (Hz) that selects the ultra engine"
-        default 12000000
+        int "DEPRECATED: minimum DAP_SWJ_Clock request (Hz, 0 = engine for all rates)"
+        default 0
         depends on BIRDIEBOT_SWD_ULTRA_FAST
-        range 1000000 50000000
+        range 0 50000000
         help
-            Lower bound for using the ultra-fast backend.  Requests below this
-            value keep the existing backend selection (GPIO normal / GPIO
-            fast / SPI >= 10 MHz), so low-speed debugging and the 2 MHz
-            default are completely unaffected.
+            Deprecated in M5 and kept only for build compatibility with the M4
+            DAP_SWJ_Clock wiring: the engine now covers every SWD rate, so the
+            default 0 means "no minimum - the engine is used for all adapter
+            speeds".  It will be removed once DAP_SWJ_Clock no longer
+            references it (see docs/swd-23mhz-engine.md §4).
 
-            12 MHz is slightly above the ~12-13 MHz effective SWCLK of the
-            legacy GPIO fast path on the 160 MHz CPU build, so the ultra
-            engine is only used where it can actually be faster.  The engine
-            never exceeds the requested clock: a request of e.g. 15 MHz picks
-            the 13.3 MHz level instead of the 20 MHz one.
+            A non-zero value would make DAP_SWJ_Clock fall through to the
+            legacy backend selection below that request; do not set it on a
+            build with M5 wiring.
 
     config BIRDIEBOT_SWD_ULTRA_OEN_STAY_ON
         bool "Keep SWDIO output enabled during SWD turnaround (A-fork workaround)"

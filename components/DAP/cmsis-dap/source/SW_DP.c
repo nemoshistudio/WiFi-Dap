@@ -40,6 +40,13 @@
  *              dedicated-GPIO engine (SWD_Fast_GPIO.c).  Opt-in behind
  *              BIRDIEBOT_SWD_ULTRA_FAST; silently falls back to the GPIO fast
  *              path if the engine is not active.  See docs/swd-23mhz-engine.md.
+ *    2026-11   M5: full migration on the ESP32-S3 - SWD_Transfer, SWJ_Sequence
+ *              and SWD_Sequence all use the dedicated-GPIO engine at every
+ *              adapter speed (fast levels + cycle-counter paced low rates).
+ *              The legacy GPIO normal/fast/SPI SWD transfer backends are
+ *              compiled out for that target and there is no fallback: if the
+ *              engine is unavailable the entry points report an error.  JTAG
+ *              and the non-S3 targets keep the legacy paths unchanged.
  * @version 0.2
  * @date 2026-10-20
  *
@@ -122,12 +129,25 @@ void SWJ_Sequence (uint32_t count, const uint8_t *data) {
   //   return;
   // }
 
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+  /* M5: full migration on ESP32-S3.  In SWD mode every SWJ sequence (line
+   * reset, 0xE79E JTAG-to-SWD, dormant wake-up) runs on the dedicated-GPIO
+   * engine; the sequence speed is clamped by the engine (SW_ULTRA_SEQ_MIN_HALF)
+   * and the engine reports 0 when it cannot run (wrong core / pins not
+   * routed) - there is no legacy SWD fallback.  JTAG (and a disconnected
+   * port) keep the legacy GPIO path because the engine is SWD-only. */
+  if (DAP_Data.debug_port != DAP_PORT_JTAG) {
+    (void)SWD_UltraFast_SequenceWrite(count, data);
+    return;
+  }
+  SWJ_Sequence_GPIO(count, data, 1);
+#else
   if(SWD_TransferSpeed == kTransfer_SPI) {
     SWJ_Sequence_SPI(count, data);
   } else {
     SWJ_Sequence_GPIO(count, data, 1);
   }
-
+#endif
 }
 
 void IRAM_ATTR SWJ_Sequence_GPIO (uint32_t count, const uint8_t *data, uint8_t need_delay) {
@@ -164,11 +184,26 @@ void SWJ_Sequence_SPI (uint32_t count, const uint8_t *data) {
 //   return: none
 #if (DAP_SWD != 0)
 void SWD_Sequence (uint32_t info, const uint8_t *swdo, uint8_t *swdi) {
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+  /* M5: ESP32-S3 SWD sequences (including the DIN capture of SWDIO) run on
+   * the dedicated-GPIO engine.  The engine releases SWDIO for a capture and
+   * re-drives it afterwards.  No legacy fallback. */
+  uint32_t n = info & SWD_SEQUENCE_CLK;
+  if (n == 0U) {
+    n = 64U;
+  }
+  if ((info & SWD_SEQUENCE_DIN) != 0U) {
+    (void)SWD_UltraFast_SequenceRead(n, swdi);
+  } else {
+    (void)SWD_UltraFast_SequenceWrite(n, swdo);
+  }
+#else
   if (SWD_TransferSpeed == kTransfer_SPI) {
     SWD_Sequence_SPI(info, swdo, swdi);
   } else {
     SWD_Sequence_GPIO(info, swdo, swdi);
   }
+#endif
 }
 
 void IRAM_ATTR SWD_Sequence_GPIO (uint32_t info, const uint8_t *swdo, uint8_t *swdi) {
@@ -229,6 +264,12 @@ void SWD_Sequence_SPI (uint32_t info, const uint8_t *swdo, uint8_t *swdi) {
 //   request: A[3:2] RnW APnDP
 //   data:    DATA[31:0]
 //   return:  ACK[2:0]
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+/* M5: on the ESP32-S3 the legacy SWD transfer backends (40 MHz SPI and the
+ * GPIO normal/fast bit-bang below) are compiled out: every SWD transfer uses
+ * the dedicated-GPIO engine (SWD_Fast_GPIO.c).  They stay for the other
+ * targets (ESP32/C3/C5), where the engine stubs report "unavailable". */
+#else
 static uint8_t SWD_Transfer_SPI (uint32_t request, uint32_t *data) {
   //// FIXME: overrun detection
   // SPI transfer mode does not require operations such as PIN_DELAY
@@ -386,6 +427,9 @@ static uint8_t SWD_Transfer_SPI (uint32_t request, uint32_t *data) {
   return DAP_TRANSFER_ERROR;
 }
 
+#endif /* SWD_ULTRA_FAST_ENGINE_ENABLED: SPI transfer */
+
+#if !SWD_ULTRA_FAST_ENGINE_ENABLED
 static uint8_t IRAM_ATTR SWD_Transfer_GPIO (uint32_t request, uint32_t *data, uint8_t need_delay) {
   uint32_t ack;
   uint32_t bit;
@@ -512,6 +556,8 @@ static uint8_t IRAM_ATTR SWD_Transfer_GPIO (uint32_t request, uint32_t *data, ui
   return ((uint8_t)ack);
 }
 
+#endif /* !SWD_ULTRA_FAST_ENGINE_ENABLED: legacy transfer backends */
+
 // SWD Transfer I/O
 //   request: A[3:2] RnW APnDP
 //   data:    DATA[31:0]
@@ -521,21 +567,22 @@ uint8_t  SWD_Transfer(uint32_t request, uint32_t *data) {
 
   DAP_STATS_SWD_XFER();
 
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+  /* M5: the ESP32-S3 has exactly one SWD backend - the dedicated-GPIO engine.
+   * Lazy-configure it for the default clock if the host transfers before
+   * DAP_SWJ_Clock (DAP_SWJ_Clock always calls SWD_UltraFast_Enter, so in
+   * normal operation the requested speed is already active).  If the engine
+   * cannot run (wrong core / pins not routed / Kconfig disabled) report an
+   * error: no fallback to the old GPIO/SPI SWD paths by contract. */
+  if (SWD_UltraFast_EnsureConfigured() == 0) {
+    ret = DAP_TRANSFER_ERROR;
+  } else {
+    ret = SWD_Transfer_Ultra(request, data);
+  }
+#else
   switch (SWD_TransferSpeed) {
     case kTransfer_SPI:
       ret = SWD_Transfer_SPI(request, data);
-      break;
-    case kTransfer_GPIO_ultra_fast:
-      /* M4 opt-in backend: ESP32-S3 dedicated-GPIO engine (SWD_Fast_GPIO.c).
-       * It is only selected by DAP_SWJ_Clock after SWD_UltraFast_Available()
-       * said yes, but re-check at transfer time so a lost engine (e.g. a
-       * task running on the wrong core) degrades to the proven GPIO fast
-       * path instead of producing garbage on the wire. */
-      if (SWD_UltraFast_Active()) {
-        ret = SWD_Transfer_Ultra(request, data);
-      } else {
-        ret = SWD_Transfer_GPIO(request, data, 0);
-      }
       break;
     case kTransfer_GPIO_fast:
       ret = SWD_Transfer_GPIO(request, data, 0);
@@ -545,6 +592,7 @@ uint8_t  SWD_Transfer(uint32_t request, uint32_t *data) {
       ret = SWD_Transfer_GPIO(request, data, 1);
       break;
   }
+#endif
 
   DAP_STATS_SWD_RESULT(ret);
   return ret;

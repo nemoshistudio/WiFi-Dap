@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 #
-# Host-side test for the pure logic of the ESP32-S3 ultra-fast SWD engine
-# (components/DAP/cmsis-dap/source/SWD_Fast_GPIO.h): request-header bytes,
-# parity, ACK decoding and the timing level table / level selection safety
-# rules documented in docs/swd-23mhz-engine.md.
+# Host-side tests for the ESP32-S3 dedicated-GPIO SWD engine
+# (components/DAP/cmsis-dap/source/SWD_Fast_GPIO.h/.c, M5: all SWD rates):
 #
-# Plain host compiler only: no ESP-IDF, no Docker, no target hardware.  The
-# Xtensa assembly itself is compile-checked with the xtensa-esp32s3-elf
-# toolchain and validated on the bench (HIL checklist in the doc).
+#   1. test_swd_ultra_plan.c  - request-header bytes, parity, ACK decoding,
+#      fast/paced level plan for 100 kHz .. 24 MHz (never faster than the
+#      request, within -25 %, monotone) and the timing-budget arithmetic.
+#   2. test_swd_ultra_routing.py - source-level routing contract: S3 SWD_Transfer
+#      / SWJ_Sequence / SWD_Sequence use the engine, the legacy SWD transfer
+#      backends are compiled out for S3, Kconfig defaults (engine on, MIN_CLOCK
+#      deprecated to 0) and the DAP.c wiring status.
+#
+# Plain host compiler / Python only: no ESP-IDF, no Docker, no target hardware.
+# The Xtensa assembly itself is compile-checked with the xtensa-esp32s3-elf
+# toolchain and validated on the bench (HIL checklist in
+# docs/swd-23mhz-engine.md).
 #
 # Usage:
 #   components/DAP/test/host/run.sh                # build + run
@@ -56,3 +63,18 @@ if ! "$CC_BIN" "${cflags[@]}" \
 fi
 
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" "$BIN"
+c_rc=$?
+
+PYTHON_BIN="${PYTHON:-python3}"
+if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    "$PYTHON_BIN" "$HERE/test_swd_ultra_routing.py"
+    py_rc=$?
+else
+    echo "python3 not found: routing contract test skipped" >&2
+    py_rc=0
+fi
+
+if [ "$c_rc" -ne 0 ] || [ "$py_rc" -ne 0 ]; then
+    exit 1
+fi
+exit 0

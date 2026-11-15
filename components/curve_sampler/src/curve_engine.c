@@ -262,18 +262,19 @@ static void curve_dap_release(void)
  *  single-shot attempt, and the actually reached clock is reported as
  *  status.link_hz.
  *
- *  M4 (XRDAP-ESP learning): when the ESP32-S3 ultra-fast SWD engine is built
- *  in (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST, default y), try 24 MHz / 10 MHz first
- *  and fall back to the proven 4/2/1/0.5 MHz ladder on link-init failure.  The
- *  engine itself selects the ultra path for requests >= the configured
- *  threshold; on C3/ESP32/C5 builds the symbol is unset and the legacy ladder
- *  is unchanged.  NOTE: the 24 MHz tier is not hardware-validated yet (HIL
- *  pending); a failed init falls through, and the reached clock is reported. */
+ *  M5: when the ESP32-S3 all-rate SWD engine is built in
+ *  (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST, default y), try the fast tiers first
+ *  (24/20/16 MHz) and fall back to the proven 10/4/2/1/0.5 MHz ladder on
+ *  link-init failure.  On C3/ESP32/C5 builds the symbol is unset and the
+ *  legacy ladder is unchanged.  Hardware H723: 16 MHz stable, 20 MHz
+ *  marginal on long SWD wires; a failed init falls through and the reached
+ *  clock is reported. */
 static esp_err_t curve_link_up(uint32_t *clock_hz, uint32_t *dpidr)
 {
 #if defined(CONFIG_BIRDIEBOT_SWD_ULTRA_FAST)
-    static const uint32_t clock_try[] = {24000000U, 10000000U, 4000000U,
-                                         2000000U, 1000000U, 500000U};
+    static const uint32_t clock_try[] = {24000000U, 20000000U, 16000000U,
+                                         10000000U, 4000000U, 2000000U,
+                                         1000000U, 500000U};
 #else
     static const uint32_t clock_try[] = {4000000U, 2000000U, 1000000U, 500000U};
 #endif

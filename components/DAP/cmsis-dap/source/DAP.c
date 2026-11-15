@@ -490,30 +490,28 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
   // Note: the supported targets are esp32 (APB 80 MHz), esp32c3 (80 MHz),
   // esp32s3 (80 MHz) and esp32c5 (80 MHz APB); see BUS_CLOCK_FIXED below.
 
-  /* M4: ESP32-S3 dedicated-GPIO ultra-fast SWD engine (docs/swd-23mhz-engine.md).
-   * Leave a previous ultra session first (idempotent no-op); then, for SWD only
-   * and only above the Kconfig threshold, route the pads to the
-   * dedicated-GPIO channels (DAP_SPI_Deinit) and let the engine pick a level
-   * that never exceeds the host request.  If it cannot serve the request
-   * (wrong core, pins not routed, CPU too slow) we fall through to the legacy
-   * selection below unchanged.  The whole block is compiled out when the
-   * engine is disabled (e.g. C3/ESP32/C5, or host unit-test builds of DAP.c),
-   * so those builds never reference the engine symbols. */
-#if defined(CONFIG_BIRDIEBOT_SWD_ULTRA_FAST) && (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST)
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+  /* M5: on the ESP32-S3 the dedicated-GPIO engine is the only SWD backend, at
+   * every adapter speed (100 kHz .. 20 MHz at 160 MHz CPU).  Leave a previous
+   * session first, map the pads to the CORE1 dedicated-GPIO channels and
+   * configure the requested rate; if that fails, report DAP_ERROR instead of
+   * falling through to the legacy GPIO/SPI ladder (no SWD fallback on S3).
+   * JTAG keeps the legacy handling below. */
   SWD_UltraFast_Exit();
-  if ((DAP_Data.debug_port != DAP_PORT_JTAG) &&
-      (clock >= (uint32_t)CONFIG_BIRDIEBOT_SWD_ULTRA_MIN_CLOCK_HZ)) {
+  if (DAP_Data.debug_port != DAP_PORT_JTAG) {
     uint32_t ultra_hz;
 
     DAP_SPI_Deinit();                 /* map pads to CORE1 dedicated GPIO */
     ultra_hz = SWD_UltraFast_Enter(clock);
-    if (ultra_hz != 0U) {
-      DAP_Data.fast_clock  = 1U;
-      DAP_Data.clock_delay = 1U;
-      SWD_TransferSpeed = kTransfer_GPIO_ultra_fast;
-      *response = DAP_OK;
+    if (ultra_hz == 0U) {
+      *response = DAP_ERROR;          /* engine unavailable: no SWD fallback */
       return ((4U << 16) | 1U);
     }
+    DAP_Data.fast_clock  = 1U;
+    DAP_Data.clock_delay = 1U;
+    SWD_TransferSpeed = kTransfer_GPIO_ultra_fast;
+    *response = DAP_OK;
+    return ((4U << 16) | 1U);
   }
 #endif
 
@@ -589,8 +587,15 @@ static uint32_t DAP_SWJ_Sequence(const uint8_t *request, uint8_t *response) {
   }
 
 #if ((DAP_SWD != 0) || (DAP_JTAG != 0))
-  SWJ_Sequence(count, request);
-  *response = DAP_OK;
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+  if ((DAP_Data.debug_port != DAP_PORT_JTAG) && (SWD_UltraFast_Available() == 0)) {
+    *response = DAP_ERROR;
+  } else
+#endif
+  {
+    SWJ_Sequence(count, request);
+    *response = DAP_OK;
+  }
 #else
   *response = DAP_ERROR;
 #endif
@@ -636,7 +641,11 @@ static uint32_t DAP_SWD_Sequence(const uint8_t *request, uint8_t *response) {
   uint32_t count;
 
 #if (DAP_SWD != 0)
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+  *response++ = (SWD_UltraFast_Available() != 0) ? DAP_OK : DAP_ERROR;
+#else
   *response++ = DAP_OK;
+#endif
 #else
   *response++ = DAP_ERROR;
 #endif

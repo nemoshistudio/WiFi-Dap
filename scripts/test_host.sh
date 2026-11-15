@@ -13,7 +13,7 @@
 #                     (unique serial formatting from the factory WiFi MAC)
 #   4. CMSIS-DAP over TCP frame codec:
 #                     components/dap_tcp/test/host/run.sh (M3 skeleton)
-#   5. SWD ultra-fast engine plan:
+#   5. SWD all-rate engine plan + routing:
 #                     components/DAP/test/host/run.sh (M4 level/timing model)
 #   6. Python tests:  tests/host/test_protocol_frame.py   JSON/WS wire contract
 #                     tests/host/test_ota_sha.py         OTA upload contract
@@ -213,7 +213,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. SWD ultra-fast engine plan (M4, pure C, host-testable)
+# 5. SWD all-rate engine plan + routing (M5, pure C + static contract)
 #    components/DAP/test/host: level table (CPU 160/240 MHz), never-exceed-host
 #    level selection, request/ACK/parity models and the per-half-cycle wire
 #    budget for the ESP32-S3 dedicated-GPIO engine (docs/swd-23mhz-engine.md).
@@ -228,11 +228,11 @@ if [ -x "$swd_fast_runner" ]; then
         swd_fast_status=$?
     fi
     swd_fast_summary="$(grep -m1 -oE '[0-9]+ checks passed, [0-9]+ failed' "$swd_fast_log" || true)"
-    diag "SWD ultra-fast plan: ${swd_fast_summary:-no summary line}"
+    diag "SWD all-rate engine plan/routing: ${swd_fast_summary:-no summary line}"
     if [ "$swd_fast_status" -eq 0 ]; then
-        tap_ok "SWD ultra-fast engine plan (M4: 20/24 MHz levels, host)"
+        tap_ok "SWD all-rate engine plan + routing (M5: 100k-24M, no legacy SWD)"
     else
-        tap_fail "SWD ultra-fast engine plan (M4: 20/24 MHz levels, host)"
+        tap_fail "SWD all-rate engine plan + routing (M5: 100k-24M, no legacy SWD)"
         sed 's/^/#   /' "$swd_fast_log" | tail -40
     fi
 else

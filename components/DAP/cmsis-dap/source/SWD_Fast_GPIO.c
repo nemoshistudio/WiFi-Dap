@@ -1,99 +1,80 @@
 /**
  * @file SWD_Fast_GPIO.c
- * @brief ESP32-S3 ultra-fast SWD bit engine (Xtensa dedicated GPIO, opt-in).
+ * @brief ESP32-S3 dedicated-GPIO SWD engine - all SWD rates (M5).
  *
- * M4 (user request): a dedicated-GPIO SWD engine in the same class as
- * XRDAP-ESP's 23.7 MHz `swd_fast.cpp`, wired into the CMSIS-DAP core as a
- * new transfer backend selected by DAP_SWJ_Clock (see docs/swd-23mhz-engine.md
- * for the exact integration patch, timing budget and HIL checklist).
+ * M5 (user request): the ESP32-S3 no longer uses the old GPIO/SPI SWD
+ * backends.  Every SWD transfer (about 100 kHz .. 20 MHz on the project's
+ * 160 MHz CPU build, up to 24 MHz at 240 MHz), every SWDJ line reset /
+ * JTAG-to-SWD / dormant wake-up sequence and every SWD_Sequence capture goes
+ * through this engine.  Full rationale, timing budget, wiring patch and HIL
+ * checklist: docs/swd-23mhz-engine.md.
  *
- * Why this is fast (and why it is deterministic)
- * ----------------------------------------------
- *  - DAP_SPI_Deinit() (spi_switch.c) routes the SWD pads to the S3 per-core
- *    dedicated GPIO block: SWCLK -> CORE1_GPIO_OUT1 (bit 1), SWDIO ->
- *    CORE1_GPIO_OUT0 (bit 0), SWDIO input -> CORE1_GPIO_IN0 (bit 0).  The
- *    Xtensa instructions `wur.gpio_out` (write all dedicated outputs) and
- *    `ee.get_gpio_in` (read all dedicated inputs) are single CPU
- *    instructions that bypass the GPIO matrix.
- *  - One `wur.gpio_out` writes SWCLK *and* SWDIO together, so every edge is
- *    one instruction with no host/target skew and a 50 % duty cycle.
- *  - All bit loops are unrolled at assembly time (`asm volatile` + `.rept`);
- *    each SWCLK half period is exactly `half` instructions, so the bit clock
- *    is CPU_CLOCK / (2 * half) independent of compiler scheduling.  The
- *    half-period instruction budget is fixed the same way XRDAP does it.
- *  - The fastest level is chosen so that one half period is always
- *    >= 20 ns (SWD_ULTRA_MIN_HALF_NS).  On the project's 160 MHz CPU build
- *    that is half = 4 cycles -> 20 MHz; on a 240 MHz build half = 5 cycles
- *    -> 24 MHz (XRDAP measured 23.7 MHz for the same 5-cycle half period).
- *    Levels: 160 MHz {20, 16, 13.33, 10} MHz, 240 MHz {24, 20, 15, 12} MHz.
- *  - The engine never exceeds the host's adapter-speed request (unlike the
- *    legacy SPI backend, which always runs at 40 MHz).
+ * Two bit engines, one protocol layer
+ * -----------------------------------
+ * 1. Fast path - fully unrolled Xtensa assembly for half periods of
+ *    4..20 CPU cycles.  One `wur.gpio_out` writes SWCLK and SWDIO together, so
+ *    every edge is one instruction and the bit clock is exactly
+ *    CPU_CLOCK / (2 * half_cycles).  The level set is chosen so that a host
+ *    request is served by the fastest level that is not faster than the
+ *    request; above the fastest level the fastest level is used and below the
+ *    slowest level the paced path takes over.
+ * 2. Paced path - C loops for all slower rates (and for every protocol clock
+ *    that is not part of a data bit: turnaround, idle cycles, WAIT/FAULT dummy
+ *    phases, error back-off).  Every half period is scheduled from the actual
+ *    previous edge (`t_next = t_edge + half`), and the cycle counter is only
+ *    used to wait, so a delayed edge (interrupt) can never produce a too-short
+ *    next half period: the engine is always *slower* than requested, never
+ *    faster.  Frequency error from the loop overhead is a few percent down to
+ *    ~15-20 % at the boundary (about 3.5 MHz), inside the "0 .. -25 %" budget.
  *
- * Protocol coverage (same semantics as SWD_Transfer_GPIO in SW_DP.c)
- * ------------------------------------------------------------------
- *  - 8-bit request header (start/APnDP/RnW/A2/A3/parity/stop/park, LSB first);
- *  - DAP_Data.swd_conf.turnaround turnaround clocks (host releases SWDIO);
- *  - 3 ACK bits sampled just before the rising edge;
- *  - read: 32 data bits + parity sampled, parity checked, data returned even
- *    on a parity error (ACK becomes DAP_TRANSFER_ERROR), then turnaround;
- *  - write: turnaround, 32 data bits + parity driven by the host;
- *  - DAP_TRANSFER_TIMESTAMP captured at the same point as the GPIO backend;
- *  - DAP_Data.transfer.idle_cycles clocked low after a completed transfer;
- *  - WAIT/FAULT: optional dummy data phase (data_phase), turnaround and the
- *    idle level; no timestamp, same ACK returned;
- *  - protocol error (ACK not OK/WAIT/FAULT): turnaround + 33 back-off clocks
- *    with SWDIO released, then the idle level.
+ * Protocol coverage (semantics of the legacy SWD_Transfer_GPIO / SWJ_Sequence /
+ * SWD_Sequence, documented in doc comments below):
+ *  - 8-bit request header, turnaround, 3 ACK bits, 32-bit data + parity,
+ *    parity check, timestamp, idle cycles, WAIT/FAULT and protocol-error
+ *    handling;
+ *  - SWJ_Sequence: 1..256 bits, LSB first, host drives SWDIO (line reset,
+ *    0xE79E JTAG-to-SWD, dormant wake-up);
+ *  - SWD_Sequence (DIN): 1..64 captured bits, host releases SWDIO.
  *
- * Fail-safe / fallback
- * --------------------
- *  - Compiled only for ESP32-S3 with BIRDIEBOT_SWD_ULTRA_FAST enabled; every
- *    other target (ESP32/C3/C5) and a disabled Kconfig build get the small
- *    stub implementation at the bottom of this file, so SW_DP.c can always
- *    reference the API.
- *  - SWD_UltraFast_Available() validates the dedicated-GPIO pin routing in
- *    the GPIO matrix registers and the calling core; DAP_SWJ_Clock must call
- *    it before selecting the backend, otherwise the existing GPIO fast path
- *    is kept (Lead wiring in docs/swd-23mhz-engine.md).
+ * Fail-safe: `SWD_UltraFast_Available()` validates the CORE1 dedicated-GPIO
+ * pin routing and the calling core.  If it fails, the SWD entry points report
+ * errors (DAP_TRANSFER_ERROR / 0) and there is **no** fallback to the legacy
+ * GPIO backends on the ESP32-S3.  On other targets (ESP32/C3/C5), when the
+ * Kconfig option is off or on JTAG this file compiles to stubs and the legacy
+ * paths in SW_DP.c are used unchanged.
  *
- * Hardware status: **not yet validated on the real board**.  The code follows
- * XRDAP-ESP's hardware-proven approach (same SoC, same dedicated-GPIO
- * mechanism, same per-half instruction counts) and the repo's existing
- * dedicated-GPIO mapping, but the actual waveform/clock/stability on this
- * board must be measured - see the HIL checklist in docs/swd-23mhz-engine.md.
- * The engine is opt-in per clock request; the project default SWD clock
- * remains 2 MHz, and setting BIRDIEBOT_SWD_ULTRA_FAST=n restores the old
- * behaviour exactly.
+ * Hardware status: the fast path 12/16 MHz levels were validated on an
+ * STM32H723 in the M4/M5 hardware window (docs/dap-tcp-backend.md §12);
+ * 20 MHz is marginal on that target/wiring (recommended max 16 MHz), and the
+ * paced low-rate path plus the sequence migration are **not yet HIL
+ * validated** - see the checklist in docs/swd-23mhz-engine.md.
  */
 
 #include "sdkconfig.h"
 
 #include <stdint.h>
 
-/* The engine is only built for the ESP32-S3 and only makes sense at >=150 MHz
- * CPU (the half-period safety floor needs at least 4 cycles).  Everything
- * else - other targets, Kconfig off, slow CPU - uses the stubs below. */
-#if defined(CONFIG_IDF_TARGET_ESP32S3) && defined(CONFIG_BIRDIEBOT_SWD_ULTRA_FAST) && \
-    (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST) && (CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ >= 150)
-#define SWD_UD_ENABLED 1
-#else
-#define SWD_UD_ENABLED 0
-#endif
+#include "SWD_Fast_GPIO.h"
 
-#if SWD_UD_ENABLED
-/* DAP_config.h must come first: DAP.h keys its SWD members and prototypes off
+#if SWD_ULTRA_FAST_ENGINE_ENABLED
+/* DAP_config.h must come first: DAP.h keys its SWD members/prototypes off
  * DAP_SWD (defined in DAP_config.h), exactly like SW_DP.c does. */
 #include "DAP_config.h"
 #endif
 
 #include "cmsis-dap/include/DAP.h"
-#include "SWD_Fast_GPIO.h"
 
 /* ======================================================================== */
-/* Stub implementation (all other targets / Kconfig disabled)               */
+/* Stub implementation (other targets / Kconfig disabled / CPU < 150 MHz)   */
 /* ======================================================================== */
-#if !SWD_UD_ENABLED
+#if !SWD_ULTRA_FAST_ENGINE_ENABLED
 
 int SWD_UltraFast_Available(void)
+{
+    return 0;
+}
+
+int SWD_UltraFast_EnsureConfigured(void)
 {
     return 0;
 }
@@ -122,21 +103,33 @@ uint8_t SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
 {
     (void)request;
     (void)data;
-    /* Never selected by SWD_Transfer(): DAP_SWJ_Clock only picks the ultra
-     * backend after SWD_UltraFast_Available() said yes.  Keep the value
-     * harmless if a future caller gets it wrong. */
     return DAP_TRANSFER_ERROR;
 }
 
-#else /* SWD_UD_ENABLED */
+int SWD_UltraFast_SequenceWrite(uint32_t count_bits, const uint8_t *data)
+{
+    (void)count_bits;
+    (void)data;
+    return 0;
+}
+
+int SWD_UltraFast_SequenceRead(uint32_t count_bits, uint8_t *data)
+{
+    (void)count_bits;
+    (void)data;
+    return 0;
+}
+
+#else /* SWD_ULTRA_FAST_ENGINE_ENABLED */
 
 /* ======================================================================== */
-/* ESP32-S3 dedicated-GPIO ultra-fast engine                                */
+/* ESP32-S3 dedicated-GPIO SWD engine                                       */
 /* ======================================================================== */
 
-#include "cmsis-dap/include/gpio_common.h"  /* soc/..., hal/gpio_ll.h               */
-#include "esp_attr.h"                       /* IRAM_ATTR                            */
-#include "esp_cpu.h"                        /* esp_cpu_get_core_id()                */
+#include "cmsis-dap/include/gpio_common.h"  /* soc/..., hal/gpio_ll.h      */
+#include "esp_attr.h"                       /* IRAM_ATTR                   */
+#include "esp_cpu.h"                        /* esp_cpu_get_core_id(),
+                                             * esp_cpu_get_cycle_count()  */
 
 /* Dedicated-GPIO channel bits, fixed by DAP_SPI_Deinit() (spi_switch.c):
  *   bit0 = SWDIO (CORE1_GPIO_OUT0), bit1 = SWCLK (CORE1_GPIO_OUT1)
@@ -147,26 +140,37 @@ uint8_t SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
 #define SWD_UD_SWDIO_OUT 0x1u
 #define SWD_UD_SWCLK_OUT 0x2u
 #define SWD_UD_IDLE      (SWD_UD_SWDIO_OUT | SWD_UD_SWCLK_OUT)
+#define SWD_UD_SWDIO_IN  0x1u
 
-/* Number of CPU cycles to wait after re-enabling the SWDIO pad output before
- * driving the first data bit.  The GPIO_ENABLE register is on the APB bus and
- * the write takes a dozen or so CPU cycles; the read-back in swd_ud_oen()
+/* CPU cycles to wait after re-enabling the SWDIO pad output before driving the
+ * first data bit.  GPIO_ENABLE is on the APB bus; the read-back in swd_ud_oen()
  * serialises the write, this is the remaining pad/driver settle margin.  It
  * also works around the A-fork regression where per-transaction OEN toggling
  * without a settle broke the *second* SWD transaction (JUNK ACK). */
 #define SWD_UD_OEN_SETTLE_CYCLES 16u
 
+/* Default SWD clock when the host transfers before sending DAP_SWJ_Clock:
+ * the project default 2 MHz (DAP_DEFAULT_SWJ_CLOCK, board contract). */
+#ifndef DAP_DEFAULT_SWJ_CLOCK
+#define DAP_DEFAULT_SWJ_CLOCK 2000000u
+#endif
+#define SWD_UD_DEFAULT_CLOCK_HZ ((uint32_t)DAP_DEFAULT_SWJ_CLOCK)
+
+/* Paced path: cycles between the read sample and the rising edge.  Covers the
+ * wait-loop overshoot plus the sample/branch instructions so a read bit is
+ * always sampled before its rising edge. */
+#define SWD_UD_PACED_GUARD 6u
+
 /* SWDIO output-enable strategy.
  *
  * 0 (default, protocol-correct): release SWDIO during ACK/read-data/read
- *   turnaround and drive it for the header/write-data phase.  This is what
- *   XRDAP-ESP's hardware-validated engine does.
+ *   turnaround and drive it for the header/write-data phase (XRDAP-ESP's
+ *   hardware-validated approach).
  * 1 (A 2025 fork workaround): never touch the pad output enable; SWDIO stays
- *   driven all the time.  That is what the current GPIO fast path does on
- *   this board (DAP_config.h PIN_SWDIO_OUT_ENABLE/DISABLE are no-ops for S3)
- *   and it is known to pass OpenOCD bring-up, but it violates the SWD
- *   turnaround and is not what we want at 20 MHz.  Kept as a Kconfig escape
- *   hatch for the HIL A/B run.
+ *   driven all the time.  The old GPIO fast path on this board behaves like
+ *   this (DAP_config.h PIN_SWDIO_OUT_ENABLE/DISABLE are no-ops for S3) and it
+ *   is known to pass OpenOCD bring-up, but it violates the SWD turnaround.
+ *   Kept as a Kconfig escape hatch for the HIL A/B run.
  */
 #if defined(CONFIG_BIRDIEBOT_SWD_ULTRA_OEN_STAY_ON) && (CONFIG_BIRDIEBOT_SWD_ULTRA_OEN_STAY_ON)
 #define SWD_UD_OEN_STAY_ON 1
@@ -174,28 +178,249 @@ uint8_t SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
 #define SWD_UD_OEN_STAY_ON 0
 #endif
 
+/* ---- fast timing levels ------------------------------------------------- */
+/* The fastest level is limited by SWD_ULTRA_MIN_HALF_NS (>= 20 ns half): 4
+ * CPU cycles on the 160 MHz build (20 MHz), 5 on the 240 MHz build (24 MHz).
+ * The slowest fast level is 20 half cycles (4 MHz @160, 6 MHz @240); below
+ * that the paced path is used.  The set is chosen so the "pick the fastest
+ * level that is not faster than the request" rule keeps the error within
+ * 0 .. -25 % for requests >= 4 MHz. */
 #if CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ >= 230
-/* 240 MHz CPU: half periods 5/6/8/10 cycles -> 24 / 20 / 15 / 12 MHz. */
 #define SWD_UD_CPU_HZ 240000000u
-#define SWD_UD_HALF_0 5
-#define SWD_UD_HALF_1 6
-#define SWD_UD_HALF_2 8
-#define SWD_UD_HALF_3 10
+static const uint16_t s_fast_half[] = { 5, 6, 7, 8, 10, 12, 16, 20 };
+#define SWD_UD_DEFINE_ALL_LEVELS()                                                     \
+    SWD_UD_LEVEL_FUNCS(0, 5, IRAM_ATTR)                                                \
+    SWD_UD_LEVEL_FUNCS(1, 6, )                                                         \
+    SWD_UD_LEVEL_FUNCS(2, 7, )                                                         \
+    SWD_UD_LEVEL_FUNCS(3, 8, )                                                         \
+    SWD_UD_LEVEL_FUNCS(4, 10, )                                                        \
+    SWD_UD_LEVEL_FUNCS(5, 12, )                                                        \
+    SWD_UD_LEVEL_FUNCS(6, 16, )                                                        \
+    SWD_UD_LEVEL_FUNCS(7, 20, )
+#define SWD_UD_ALL_LEVEL_OPS()                                                         \
+    SWD_UD_OPS_ENTRY(0), SWD_UD_OPS_ENTRY(1), SWD_UD_OPS_ENTRY(2),                     \
+    SWD_UD_OPS_ENTRY(3), SWD_UD_OPS_ENTRY(4), SWD_UD_OPS_ENTRY(5),                     \
+    SWD_UD_OPS_ENTRY(6), SWD_UD_OPS_ENTRY(7)
 #else
-/* 160 MHz CPU (project default): 4/5/6/8 cycles -> 20 / 16 / 13.3 / 10 MHz. */
+/* 160 MHz CPU (project default). */
 #define SWD_UD_CPU_HZ 160000000u
-#define SWD_UD_HALF_0 4
-#define SWD_UD_HALF_1 5
-#define SWD_UD_HALF_2 6
-#define SWD_UD_HALF_3 8
+static const uint16_t s_fast_half[] = { 4, 5, 6, 7, 8, 10, 12, 16, 20 };
+#define SWD_UD_DEFINE_ALL_LEVELS()                                                     \
+    SWD_UD_LEVEL_FUNCS(0, 4, IRAM_ATTR)                                                \
+    SWD_UD_LEVEL_FUNCS(1, 5, )                                                         \
+    SWD_UD_LEVEL_FUNCS(2, 6, )                                                         \
+    SWD_UD_LEVEL_FUNCS(3, 7, )                                                         \
+    SWD_UD_LEVEL_FUNCS(4, 8, )                                                         \
+    SWD_UD_LEVEL_FUNCS(5, 10, )                                                        \
+    SWD_UD_LEVEL_FUNCS(6, 12, )                                                        \
+    SWD_UD_LEVEL_FUNCS(7, 16, )                                                        \
+    SWD_UD_LEVEL_FUNCS(8, 20, )
+#define SWD_UD_ALL_LEVEL_OPS()                                                         \
+    SWD_UD_OPS_ENTRY(0), SWD_UD_OPS_ENTRY(1), SWD_UD_OPS_ENTRY(2),                     \
+    SWD_UD_OPS_ENTRY(3), SWD_UD_OPS_ENTRY(4), SWD_UD_OPS_ENTRY(5),                     \
+    SWD_UD_OPS_ENTRY(6), SWD_UD_OPS_ENTRY(7), SWD_UD_OPS_ENTRY(8)
 #endif
 
-static const uint16_t s_level_half[SWD_ULTRA_LEVEL_COUNT] = {
-    SWD_UD_HALF_0, SWD_UD_HALF_1, SWD_UD_HALF_2, SWD_UD_HALF_3,
+/* ======================================================================== */
+/* State and low-level helpers                                              */
+/* ======================================================================== */
+
+typedef void (*swd_ud_write_fn)(uint32_t value, uint32_t parity_bit);
+typedef uint32_t (*swd_ud_read_fn)(uint32_t lo, uint32_t hi, uint32_t *raw);
+
+struct swd_ud_ops;
+typedef void (*swd_ud_clocks_fn)(uint32_t count, uint32_t lo, uint32_t hi);
+
+struct swd_ud_ops {
+    swd_ud_write_fn w8;     /* request header, 8 bits        */
+    swd_ud_write_fn w33;    /* write data, 32 bits + parity  */
+    swd_ud_read_fn r3;      /* ACK, 3 bits                   */
+    swd_ud_read_fn r33;     /* read data, 32 bits + parity   */
+};
+
+static volatile int s_active;                  /* engine configured              */
+static uint32_t s_actual_hz;                   /* effective SWCLK when active    */
+static uint32_t s_half;                        /* current half period (cycles)   */
+static const struct swd_ud_ops *s_ops;         /* selected bit engine            */
+#if !SWD_UD_OEN_STAY_ON
+static int s_oen_on = 1;                       /* SWDIO pad output enable state  */
+#endif
+
+/** Write the whole CORE1 dedicated-GPIO output register (one instruction). */
+static inline __attribute__((always_inline)) void swd_ud_out(uint32_t value)
+{
+    asm volatile("wur.gpio_out %0" : : "r"(value) : "memory");
+}
+
+/** Read the CORE1 dedicated-GPIO input register (one instruction). */
+static inline __attribute__((always_inline)) uint32_t swd_ud_in(void)
+{
+    uint32_t value;
+    asm volatile("ee.get_gpio_in %0" : "=r"(value) : : "memory");
+    return value;
+}
+
+/** Current CPU cycle counter (rsr.ccount); wraps every ~26 s at 160 MHz. */
+static inline __attribute__((always_inline)) uint32_t swd_ud_now(void)
+{
+    return esp_cpu_get_cycle_count();
+}
+
+/** Busy-wait until the cycle counter reaches @p target (signed diff = wrap safe). */
+static inline __attribute__((always_inline)) void swd_ud_wait_until(uint32_t target)
+{
+    while ((int32_t)(swd_ud_now() - target) < 0) {
+    }
+}
+
+/** Enable/release the SWDIO pad output (see SWD_UD_OEN_STAY_ON). */
+static inline __attribute__((always_inline)) void swd_ud_oen(int on)
+{
+#if SWD_UD_OEN_STAY_ON
+    (void)on;
+#else
+    if (s_oen_on == on) {
+        return;
+    }
+    if (on) {
+        GPIO.enable_w1ts = (1u << PIN_SWDIO_MOSI);
+    } else {
+        GPIO.enable_w1tc = (1u << PIN_SWDIO_MOSI);
+    }
+    /* Reading the same peripheral waits for the write buffer, so the pad
+     * direction is applied when this read returns. */
+    (void)GPIO.enable;
+    s_oen_on = on;
+#endif
+}
+
+/** Small settle margin after driving SWDIO again (SWD_UD_OEN_SETTLE_CYCLES). */
+static inline __attribute__((always_inline)) void swd_ud_oen_settle(void)
+{
+#if SWD_UD_OEN_STAY_ON
+    /* Nothing to settle: the pad output was never released. */
+#else
+    asm volatile(
+        "nop; nop; nop; nop; nop; nop; nop; nop;"
+        "nop; nop; nop; nop; nop; nop; nop; nop;" : : : "memory");
+#endif
+}
+
+/* ======================================================================== */
+/* Paced bit engine (cycle-counter scheduled edges)                        */
+/* ======================================================================== */
+
+/**
+ * One SWCLK cycle on the paced path.
+ * The next edge is scheduled relative to the actual current edge, so a late
+ * edge (interrupt) stretches this half period instead of shrinking the next
+ * one - the engine is always slower than requested, never faster.
+ */
+static IRAM_ATTR void swd_ud_paced_clock(uint32_t half, uint32_t lo, uint32_t hi)
+{
+    uint32_t t;
+
+    swd_ud_out(lo);                     /* falling edge */
+    t = swd_ud_now();
+    swd_ud_wait_until(t + half);
+    swd_ud_out(hi);                     /* rising edge */
+    t = swd_ud_now();
+    swd_ud_wait_until(t + half);        /* high half */
+}
+
+/** Clock `count` SWCLK cycles with SWDIO constant lo/hi (turnaround, idle,
+ *  WAIT/FAULT dummy phases, error back-off).  Uses the configured half period
+ *  so every protocol phase stays at (or slower than) the requested clock. */
+static IRAM_ATTR void swd_ud_clocks(uint32_t count, uint32_t lo, uint32_t hi)
+{
+    const uint32_t half = s_half;
+
+    while (count != 0u) {
+        swd_ud_paced_clock(half, lo, hi);
+        count--;
+    }
+}
+
+/** Write `count` bits of `value` (LSB first) + one parity bit when enabled. */
+static IRAM_ATTR void swd_ud_paced_write_bits(uint32_t half, uint32_t value,
+                                              uint32_t count, uint32_t parity_en,
+                                              uint32_t parity_bit)
+{
+    const uint32_t total = count + parity_en;
+    uint32_t i;
+
+    for (i = 0; i < total; i++) {
+        uint32_t bit = (i < count) ? ((value >> i) & 1u) : parity_bit;
+        uint32_t t;
+
+        swd_ud_out(bit);                        /* falling edge, SWDIO = bit */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half);
+        swd_ud_out(bit | SWD_UD_SWCLK_OUT);     /* rising edge, target samples */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half);            /* high half */
+    }
+}
+
+/** Read `count` bits; bits 0..31 accumulate into the return value, a 33rd bit
+ *  is stored as 0/1 into raw[0] (data-phase parity). */
+static IRAM_ATTR uint32_t swd_ud_paced_read_bits(uint32_t half, uint32_t count,
+                                                 uint32_t lo, uint32_t hi,
+                                                 uint32_t *raw)
+{
+    uint32_t acc = 0u;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        uint32_t t;
+        uint32_t bit;
+
+        swd_ud_out(lo);                         /* falling edge (SWDIO released) */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half - SWD_UD_PACED_GUARD);
+        bit = swd_ud_in() & SWD_UD_SWDIO_IN;    /* sample just before rising edge */
+        if (i < 32u) {
+            acc |= bit << i;
+        } else if (raw != 0) {
+            raw[0] = bit;
+        }
+        swd_ud_wait_until(t + half);
+        swd_ud_out(hi);                         /* rising edge */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half);            /* high half */
+    }
+    return acc;
+}
+
+/* Paced wrappers with the same signatures as the unrolled level functions. */
+static IRAM_ATTR void swd_ud_paced_w8(uint32_t value, uint32_t parity_unused)
+{
+    (void)parity_unused;
+    swd_ud_paced_write_bits(s_half, value, 8u, 0u, 0u);
+}
+
+static IRAM_ATTR void swd_ud_paced_w33(uint32_t value, uint32_t parity_bit)
+{
+    swd_ud_paced_write_bits(s_half, value, 32u, 1u, parity_bit);
+}
+
+static IRAM_ATTR uint32_t swd_ud_paced_r3(uint32_t lo, uint32_t hi, uint32_t *raw)
+{
+    (void)raw; /* the ACK phase has no parity bit */
+    return swd_ud_paced_read_bits(s_half, 3u, lo, hi, 0);
+}
+
+static IRAM_ATTR uint32_t swd_ud_paced_r33(uint32_t lo, uint32_t hi, uint32_t *raw)
+{
+    return swd_ud_paced_read_bits(s_half, 33u, lo, hi, raw);
+}
+
+static const struct swd_ud_ops s_paced_ops = {
+    swd_ud_paced_w8, swd_ud_paced_w33, swd_ud_paced_r3, swd_ud_paced_r33,
 };
 
 /* ======================================================================== */
-/* Unrolled bit engines                                                     */
+/* Unrolled bit engine (fast path)                                          */
 /*                                                                          */
 /* Every half period is exactly HW instructions.  All instructions used in    */
 /* the loops are single-cycle on the Xtensa LX7 core: `wur.gpio_out`,        */
@@ -295,105 +520,25 @@ static const uint16_t s_level_half[SWD_ULTRA_LEVEL_COUNT] = {
         return acc;                                                               \
     }
 
-/* Level 0 is the fastest level, i.e. the one used for a >= 20 MHz host
- * request, so it lives in IRAM: no instruction-cache miss can stretch a half
- * period of the hot path.  The slower levels stay in flash - an i-cache miss
- * only stretches one half period and SWD is fully synchronous, which the
- * upstream XRDAP S3 engine relies on as well. */
+/* Only the fastest level lives in IRAM: no instruction-cache miss can stretch
+ * its half period.  The slower levels stay in flash - an i-cache miss only
+ * stretches one half period and SWD is fully synchronous, which the upstream
+ * XRDAP S3 engine relies on as well (and the M4/H723 hardware window showed the
+ * 12/16 MHz levels, then flash-resident, were stable). */
 #define SWD_UD_LEVEL_FUNCS(IDX, HW, ATTR)                                         \
     SWD_UD_DEF_WRITE(HW, 8, 0, swd_ud_w8_##IDX, ATTR)                             \
     SWD_UD_DEF_WRITE(HW, 32, 1, swd_ud_w33_##IDX, ATTR)                           \
     SWD_UD_DEF_READ(HW, 3, swd_ud_r3_##IDX, ATTR)                                 \
     SWD_UD_DEF_READ(HW, 33, swd_ud_r33_##IDX, ATTR)
 
-SWD_UD_LEVEL_FUNCS(0, SWD_UD_HALF_0, IRAM_ATTR)
-SWD_UD_LEVEL_FUNCS(1, SWD_UD_HALF_1, )
-SWD_UD_LEVEL_FUNCS(2, SWD_UD_HALF_2, )
-SWD_UD_LEVEL_FUNCS(3, SWD_UD_HALF_3, )
+SWD_UD_DEFINE_ALL_LEVELS()
 
-typedef void (*swd_ud_write_fn)(uint32_t value, uint32_t parity_bit);
-typedef uint32_t (*swd_ud_read_fn)(uint32_t lo, uint32_t hi, uint32_t *raw);
+#define SWD_UD_OPS_ENTRY(IDX)                                                     \
+    { swd_ud_w8_##IDX, swd_ud_w33_##IDX, swd_ud_r3_##IDX, swd_ud_r33_##IDX }
 
-struct swd_ud_level {
-    uint16_t half;          /* CPU cycles per SWCLK half period */
-    uint16_t reserved;
-    swd_ud_write_fn w8;     /* request header, 8 bits            */
-    swd_ud_write_fn w33;    /* write data, 32 bits + parity      */
-    swd_ud_read_fn r3;      /* ACK, 3 bits                       */
-    swd_ud_read_fn r33;     /* read data, 32 bits + parity       */
+static const struct swd_ud_ops s_fast_ops[] = {
+    SWD_UD_ALL_LEVEL_OPS(),
 };
-
-static const struct swd_ud_level s_levels[SWD_ULTRA_LEVEL_COUNT] = {
-    { SWD_UD_HALF_0, 0, swd_ud_w8_0, swd_ud_w33_0, swd_ud_r3_0, swd_ud_r33_0 },
-    { SWD_UD_HALF_1, 0, swd_ud_w8_1, swd_ud_w33_1, swd_ud_r3_1, swd_ud_r33_1 },
-    { SWD_UD_HALF_2, 0, swd_ud_w8_2, swd_ud_w33_2, swd_ud_r3_2, swd_ud_r33_2 },
-    { SWD_UD_HALF_3, 0, swd_ud_w8_3, swd_ud_w33_3, swd_ud_r3_3, swd_ud_r33_3 },
-};
-
-/* ======================================================================== */
-/* Engine state and helpers                                                 */
-/* ======================================================================== */
-
-static volatile int s_active;                       /* engine configured              */
-static uint32_t s_actual_hz;                        /* effective SWCLK when active    */
-static const struct swd_ud_level *s_cur;            /* selected level                 */
-#if !SWD_UD_OEN_STAY_ON
-static int s_oen_on = 1;                            /* SWDIO pad output enable state  */
-#endif
-
-/** Write the whole CORE1 dedicated-GPIO output register (one instruction). */
-static inline __attribute__((always_inline)) void swd_ud_out(uint32_t value)
-{
-    asm volatile("wur.gpio_out %0" : : "r"(value) : "memory");
-}
-
-/** Enable/release the SWDIO pad output (see SWD_UD_OEN_STAY_ON). */
-static inline __attribute__((always_inline)) void swd_ud_oen(int on)
-{
-#if SWD_UD_OEN_STAY_ON
-    (void)on;
-#else
-    if (s_oen_on == on) {
-        return;
-    }
-    if (on) {
-        GPIO.enable_w1ts = (1u << PIN_SWDIO_MOSI);
-    } else {
-        GPIO.enable_w1tc = (1u << PIN_SWDIO_MOSI);
-    }
-    /* Reading the same peripheral waits for the write buffer, so the pad
-     * direction is applied when this read returns. */
-    (void)GPIO.enable;
-    s_oen_on = on;
-#endif
-}
-
-/** Small settle margin after driving SWDIO again (see SWD_UD_OEN_SETTLE_CYCLES). */
-static inline __attribute__((always_inline)) void swd_ud_oen_settle(void)
-{
-#if SWD_UD_OEN_STAY_ON
-    /* Nothing to settle: the pad output was never released. */
-#else
-    asm volatile(
-        "nop; nop; nop; nop; nop; nop; nop; nop;"
-        "nop; nop; nop; nop; nop; nop; nop; nop;" : : : "memory");
-#endif
-}
-
-/** Clock `count` SWCLK cycles with SWDIO constant `lo`/`hi` (idle, turnaround,
- *  WAIT/FAULT dummy phases, protocol-error back-off).  These phases have no
- *  setup/hold requirement, so a handful of cycles per half is fine and keeps
- *  the unrolled bit engines small. */
-static IRAM_ATTR void swd_ud_clocks(uint32_t count, uint32_t lo, uint32_t hi)
-{
-    while (count != 0u) {
-        swd_ud_out(lo);
-        asm volatile("nop; nop; nop; nop;" : : : "memory");
-        swd_ud_out(hi);
-        asm volatile("nop; nop; nop; nop;" : : : "memory");
-        count--;
-    }
-}
 
 /* ======================================================================== */
 /* Public API                                                               */
@@ -404,7 +549,8 @@ int SWD_UltraFast_Available(void)
     /* The dedicated-GPIO output/input registers used here are the CORE1 ones
      * (spi_switch.c maps the pads to CORE1_GPIO_OUT0/1 + CORE1_GPIO_IN0), so
      * the engine must run on core 1 of the dual-core S3 build (main.c pins
-     * the DAP task and the curve sampler there for the same reason). */
+     * the DAP task, the TCP/WS-DAP transport, the target-flash worker and the
+     * curve sampler there for the same reason). */
     if (esp_cpu_get_core_id() != 1) {
         return 0;
     }
@@ -433,20 +579,31 @@ int SWD_UltraFast_Available(void)
 
 uint32_t SWD_UltraFast_Enter(uint32_t requested_hz)
 {
-    int level;
+    swd_ultra_plan_t plan;
 
     if (SWD_UltraFast_Available() == 0) {
         return 0u;
     }
-    level = SWD_Ultra_PickLevel(s_level_half, SWD_ULTRA_LEVEL_COUNT, SWD_UD_CPU_HZ,
-                                requested_hz);
-    if (level < 0) {
+    if (requested_hz == 0u) {
+        requested_hz = SWD_UD_DEFAULT_CLOCK_HZ;
+    }
+    if (SWD_Ultra_Plan(SWD_UD_CPU_HZ, requested_hz, s_fast_half,
+                       (int)(sizeof(s_fast_half) / sizeof(s_fast_half[0])),
+                       &plan) != 0) {
         return 0u;
     }
-    s_cur = &s_levels[level];
-    s_actual_hz = SWD_Ultra_LevelHz(SWD_UD_CPU_HZ, s_cur->half);
+    if (plan.half_cycles == 0u) {
+        return 0u;
+    }
+    if (plan.fast_level >= 0) {
+        s_ops = &s_fast_ops[plan.fast_level];
+    } else {
+        s_ops = &s_paced_ops;
+    }
+    s_half = plan.half_cycles;
+    s_actual_hz = SWD_Ultra_LevelHz(SWD_UD_CPU_HZ, s_half);
 
-    /* Idle line state, same as the GPIO backend leaves it after a transfer:
+    /* Idle line state, same as the legacy backend left it after a transfer:
      * SWCLK high, SWDIO high, host driving SWDIO. */
 #if !SWD_UD_OEN_STAY_ON
     s_oen_on = 0; /* force the enable below to be applied */
@@ -458,17 +615,25 @@ uint32_t SWD_UltraFast_Enter(uint32_t requested_hz)
     return s_actual_hz;
 }
 
+int SWD_UltraFast_EnsureConfigured(void)
+{
+    if (s_active != 0) {
+        return 1;
+    }
+    return (SWD_UltraFast_Enter(SWD_UD_DEFAULT_CLOCK_HZ) != 0u) ? 1 : 0;
+}
+
 void SWD_UltraFast_Exit(void)
 {
     if (s_active == 0) {
         return;
     }
-    /* Leave a safe idle line for whatever backend runs next. */
+    /* Leave a safe idle line for whatever legacy backend runs next (JTAG). */
     swd_ud_oen(1);
     swd_ud_out(SWD_UD_IDLE);
     s_active = 0;
     s_actual_hz = 0u;
-    s_cur = NULL;
+    s_ops = 0;
 }
 
 int SWD_UltraFast_Active(void)
@@ -481,9 +646,13 @@ uint32_t SWD_UltraFast_ActualHz(void)
     return (s_active != 0) ? s_actual_hz : 0u;
 }
 
+/* ======================================================================== */
+/* SWD transfer                                                             */
+/* ======================================================================== */
+
 uint8_t IRAM_ATTR SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
 {
-    const struct swd_ud_level *lvl = s_cur;
+    const struct swd_ud_ops *ops = s_ops;
     uint32_t turnaround;
     uint32_t idle_cycles;
     uint32_t ack;
@@ -491,8 +660,8 @@ uint8_t IRAM_ATTR SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
     uint32_t parity;
     uint32_t raw = 0u;
 
-    if ((s_active == 0) || (lvl == NULL)) {
-        return DAP_TRANSFER_ERROR;
+    if ((s_active == 0) || (ops == 0)) {
+        return DAP_TRANSFER_ERROR;      /* no legacy fallback on ESP32-S3 */
     }
     if (((request & DAP_TRANSFER_RnW) == 0u) && (data == NULL)) {
         return DAP_TRANSFER_ERROR;
@@ -502,21 +671,20 @@ uint8_t IRAM_ATTR SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
 
     /* Packet request: 8 bits, host driving SWDIO. */
     swd_ud_oen(1);
-    lvl->w8(SWD_Ultra_RequestByte(request), 0u);
+    ops->w8(SWD_Ultra_RequestByte(request), 0u);
 
-    /* Turnaround: host releases SWDIO, target may start driving.
-     * The first clock also gives the pad output enable time to drop. */
+    /* Turnaround: host releases SWDIO, target may start driving. */
     swd_ud_oen(0);
     swd_ud_clocks(turnaround, SWD_UD_SWDIO_OUT, SWD_UD_IDLE);
 
     /* Acknowledge response: 3 bits sampled just before the rising edges. */
-    ack = lvl->r3(SWD_UD_SWDIO_OUT, SWD_UD_IDLE, &raw);
+    ack = ops->r3(SWD_UD_SWDIO_OUT, SWD_UD_IDLE, &raw);
 
     if (ack == DAP_TRANSFER_OK) {
         if ((request & DAP_TRANSFER_RnW) != 0u) {
             /* Read data: 32 bits + parity sampled by the host, then one
              * turnaround before the host drives again. */
-            value = lvl->r33(SWD_UD_SWDIO_OUT, SWD_UD_IDLE, &raw);
+            value = ops->r33(SWD_UD_SWDIO_OUT, SWD_UD_IDLE, &raw);
             swd_ud_clocks(turnaround, SWD_UD_SWDIO_OUT, SWD_UD_IDLE);
             swd_ud_oen(1);
             parity = raw & 1u;
@@ -535,7 +703,7 @@ uint8_t IRAM_ATTR SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
             swd_ud_oen(1);
             swd_ud_oen_settle();
             value = *data;
-            lvl->w33(value, SWD_Ultra_Parity32(value));
+            ops->w33(value, SWD_Ultra_Parity32(value));
             if ((request & DAP_TRANSFER_TIMESTAMP) != 0u) {
                 DAP_Data.timestamp = TIMESTAMP_GET();
             }
@@ -551,7 +719,8 @@ uint8_t IRAM_ATTR SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
 
     if ((ack == DAP_TRANSFER_WAIT) || (ack == DAP_TRANSFER_FAULT)) {
         /* WAIT/FAULT: no data phase unless data_phase is configured; keep the
-         * protocol timing of the GPIO backend (dummy data, turnaround, idle). */
+         * protocol timing of the legacy GPIO backend (dummy data,
+         * turnaround, idle). */
         if ((DAP_Data.swd_conf.data_phase != 0u) && ((request & DAP_TRANSFER_RnW) != 0u)) {
             swd_ud_clocks(33u, SWD_UD_SWDIO_OUT, SWD_UD_IDLE);
         }
@@ -573,4 +742,73 @@ uint8_t IRAM_ATTR SWD_Transfer_Ultra(uint32_t request, uint32_t *data)
     return (uint8_t)ack;
 }
 
-#endif /* SWD_UD_ENABLED */
+/* ======================================================================== */
+/* SWJ_Sequence / SWD_Sequence                                              */
+/* ======================================================================== */
+
+int SWD_UltraFast_SequenceWrite(uint32_t count_bits, const uint8_t *data)
+{
+    uint32_t half;
+    uint32_t i;
+
+    if ((data == NULL) || (count_bits == 0u) || (count_bits > 256u)) {
+        return 0;
+    }
+    if (SWD_UltraFast_EnsureConfigured() == 0) {
+        return 0;                       /* no legacy fallback on ESP32-S3 */
+    }
+    half = SWD_Ultra_SequenceHalf(s_half);
+    swd_ud_oen(1);
+    for (i = 0; i < count_bits; i++) {
+        uint32_t bit = (data[i >> 3] >> (i & 7u)) & 1u;
+        uint32_t t;
+
+        swd_ud_out(bit);                        /* falling edge, SWDIO = bit */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half);
+        swd_ud_out(bit | SWD_UD_SWCLK_OUT);     /* rising edge */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half);            /* high half */
+    }
+    return 1;
+}
+
+int SWD_UltraFast_SequenceRead(uint32_t count_bits, uint8_t *data)
+{
+    uint32_t half;
+    uint32_t bytes;
+    uint32_t i;
+
+    if ((data == NULL) || (count_bits == 0u) || (count_bits > 64u)) {
+        return 0;
+    }
+    if (SWD_UltraFast_EnsureConfigured() == 0) {
+        return 0;                       /* no legacy fallback on ESP32-S3 */
+    }
+    bytes = (count_bits + 7u) / 8u;
+    for (i = 0; i < bytes; i++) {
+        data[i] = 0u;
+    }
+    half = SWD_Ultra_SequenceHalf(s_half);
+    swd_ud_oen(0);                       /* host releases SWDIO for the capture */
+    for (i = 0; i < count_bits; i++) {
+        uint32_t t;
+        uint32_t bit;
+
+        swd_ud_out(SWD_UD_SWDIO_OUT);           /* falling edge, SWDIO released */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half - SWD_UD_PACED_GUARD);
+        bit = swd_ud_in() & SWD_UD_SWDIO_IN;    /* sample before the rising edge */
+        data[i >> 3] |= (uint8_t)(bit << (i & 7u));
+        swd_ud_wait_until(t + half);
+        swd_ud_out(SWD_UD_IDLE);                /* rising edge */
+        t = swd_ud_now();
+        swd_ud_wait_until(t + half);            /* high half */
+    }
+    swd_ud_oen(1);
+    swd_ud_oen_settle();
+    swd_ud_out(SWD_UD_IDLE);
+    return 1;
+}
+
+#endif /* SWD_ULTRA_FAST_ENGINE_ENABLED */

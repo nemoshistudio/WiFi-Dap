@@ -217,7 +217,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 | 探针唯一序列号 | `WiFi-Dap-<12HEX>` | 12 位 = WiFi STA MAC 大写十六进制；单一来源 `components/probe_identity/`，同时用于 CMSIS-DAP `DAP_Info(SER_NUM)`、USBIP 字符串描述符 iSerial 与 mDNS TXT `serial`；`SYSTEM/GET_SYS_INFO.sn` 仍为 12hex 无前缀（协议不变） |
 | AP SSID 前缀 | `WiFi-Dap-` | 后缀为 STA MAC 末 2 字节大写 hex（如 `WiFi-Dap-A1B2`），规则见 WiFi 多凭据契约 |
 | SWD 默认时钟 | **2 MHz** | `BIRDIEBOT_SWD_DEFAULT_CLOCK_HZ=2000000`；真机 STM32F407 验证稳定；4MHz/10MHz 无额外吞吐收益（USBIP/WiFi 延迟为瓶颈） |
-| SWD 高速引擎（M4） | S3 默认开，阈值 12 MHz | `BIRDIEBOT_SWD_ULTRA_FAST=y`（仅 S3）；host 请求 ≥12 MHz 才走专用 GPIO 高速档（160 MHz CPU→20 MHz，240 MHz 变体→24 MHz）；默认 2 MHz 与旧 GPIO/SPI 档行为不变；见 [swd-23mhz-engine.md](swd-23mhz-engine.md) |
+| SWD 引擎（M5） | S3 唯一后端，默认开 | `BIRDIEBOT_SWD_ULTRA_FAST=y`（仅 S3）：**100 kHz–20 MHz 全部走专用 GPIO 引擎**（160 MHz CPU；240 MHz 变体到 24 MHz），旧 GPIO normal/fast 与 SPI SWD 后端在 S3 编译移除；不可用时报 DAP_ERROR，不回退；见 [swd-23mhz-engine.md](swd-23mhz-engine.md) |
 | UART 桥端口 | **1346** | `BIRDIEBOT_UART_BRIDGE_PORT`（旧 A 的 1234 已废弃） |
 | UART 桥波特率 | **115200** | `UART_BRIDGE_BAUDRATE`（旧 A 的 74880 已废弃） |
 | 控制台 | UART0（S3：GPIO43/44） | 不被 UART 桥占用 |
