@@ -122,9 +122,6 @@ const child = spawn(command.file, command.args, {
     env: {
         ...process.env,
         VITE_APP_WEB_VERSION: webVersion,
-        VITE_APP_GIT_TAG: gitTag,
-        VITE_APP_GIT_COMMIT: gitCommit,
-        VITE_APP_LAST_COMMIT: lastCommit,
     },
 });
 
