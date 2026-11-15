@@ -17,7 +17,7 @@
 > USBIP/DAP、目标烧录、变量曲线、UART、WiFi、mDNS（TXT `name`/`serial`/`chip`/`fw`）
 > 与 About 保留。逐项 Kconfig 开关/恢复方式/资源收益/归档路径见
 > **[docs/feature-flags.md](docs/feature-flags.md)**；已移除功能的历史文档见
-> **[docs/archive/removed-features/](docs/archive/removed-features/README.md)**。
+> **docs/archive/removed-features/**。
 
 > ⚠️ **安全默认**：Web/JSON API、WebSocket-DAP、UART TCP 桥默认**均无鉴权**，HTTP 明文，且 slim 构建的浏览器 Host/Origin 校验**默认关闭**。请仅部署在**可信局域网**，并阅读 [§9 安全默认与加固](#9-安全默认与加固)。
 
@@ -76,7 +76,7 @@
 | Wi-Fi | 多凭据记忆 | ✅ | 最多 8 个网络，自动记忆 + 上电/断线轮换（[契约](docs/wifi-credential-memory.md)） |
 | 串口 | Web UART 终端 + WS 二进制 | ✅ | 默认 115200-8N1，可配数据位/校验/停止位/流控 |
 | 串口 | UART TCP 桥 | ✅（可关） | TCP **1346**；首包文本可切换波特率；`CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE`；C5 使用 UART1 GPIO25/26（回环实测） |
-| 发现 | 仅 mDNS | ✅（SSDP 已移除） | `_http._tcp` 服务 + TXT `name`/`serial`/`chip`/`fw`（`serial=WiFi-Dap-<12HEX>`，每台唯一）；SSDP/UPnP（H1）与 `GET /api/discover`（H3）已在 slim 移除，见 [归档索引](docs/archive/removed-features/README.md) |
+| 发现 | 仅 mDNS | ✅（SSDP 已移除） | `_http._tcp` 服务 + TXT `name`/`serial`/`chip`/`fw`（`serial=WiFi-Dap-<12HEX>`，每台唯一）；SSDP/UPnP（H1）与 `GET /api/discover`（H3）已在 slim 移除，见 归档索引 |
 | 固件更新 | USB-JTAG / OpenOCD / UART0 | ✅ | **slim 无 Web OTA**（A1/A2）；经 UART0 或内置 USB Serial/JTAG 重烧（S3：BOOT+RESET ROM 下载；C5：OpenOCD + USB-JTAG）；OTA 分区 + 10 s 回滚确认保留；完整 Web OTA 可从 `backup/full-features-2026-10-26` 恢复 |
 | 变量曲线 | Web 采样 | ✅ | 设备本地采样上限 **64 系列**（原 256，C4）；WS-DAP 模式 24 系列；协议分组格式不变 |
 | 诊断 | coredump 到 Flash | ✅ | 64 KB `coredump` 分区（`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`） |
@@ -167,7 +167,7 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 | ESP32-C3 / ESP32（4 MB） | [`partitions/partitions_4mb_single.csv`](partitions/partitions_4mb_single.csv) | nvs + phy + `factory` 3.75M + wt_nvs + coredump | ❌ 无 OTA |
 | ESP32-C5（8 MB，Wi-Fi-only） | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | 与 S3 相同的 8 MB 双槽布局 | ✅ 双槽 + 回滚布局（slim 无 Web OTA UI/端点；真机验证，非发布目标） |
 
-约束细节（app 上限、otadata、回滚语义）属完整功能构建历史契约，见 [归档 ota-local-upload.md §1](docs/archive/removed-features/ota-local-upload.md)；slim 的端点/UI 移除与恢复方式见 [docs/feature-flags.md](docs/feature-flags.md)。
+约束细节（app 上限、otadata、回滚语义）属完整功能构建历史契约，见 归档 ota-local-upload.md §1；slim 的端点/UI 移除与恢复方式见 [docs/feature-flags.md](docs/feature-flags.md)。
 
 ### 4.5 首次烧录（ESP32-S3 8 MB）
 
@@ -185,7 +185,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 
 - ❌ **不要**写 `build/esp32s3/ota_data_initial.bin`，也**不要**用 `merge_bin` 全量包首烧（会初始化 otadata，掩盖首烧回退逻辑）。
 - 串口控制台：UART0，115200（S3：GPIO43/44）。
-- **之后的固件更新（final slim）**：**没有 Web OTA**。通过 UART0 或内置 USB Serial/JTAG 重烧 `ota_0`（S3：按住 BOOT + RESET 进入 ROM 下载模式；C5：OpenOCD + 内置 USB-JTAG，见 docs/esp32-c5-port.md）。历史 Web OTA 流程/`scripts/ota_upload.py` 仅适用于从 `backup/full-features-2026-10-26` 恢复的完整功能构建（[归档](docs/archive/removed-features/ota-local-upload.md)）。
+- **之后的固件更新**：可选 OTA overlay（`sdkconfig.defaults.esp32s3.ota`）启用内置 OTA 上传（`scripts/ota_upload.py --host <设备> --file <app.bin> --info`）；不启用时通过 UART0 或内置 USB Serial/JTAG 重烧 `ota_0`（S3 按住 BOOT+RESET；C5 用 OpenOCD）。
 
 ### 4.6 发布包（可选）
 
@@ -253,9 +253,9 @@ final slim 构建**没有浏览器 OTA / Update 页**（`POST /api/ota/upload` �
 | **USB-JTAG / esptool（S3）** | 按住 **BOOT(GPIO0) + RESET** 进入 ROM 下载模式，S3 内置 USB Serial/JTAG 会枚举串口，然后按 [§4.5](#45-首次烧录esp32-s3-8-mb) 用 `esptool.py`/`idf.py -p <port> flash`。NCM/Wi-Fi slim 固件同样可用（ROM 下载模式与应用 USB 配置无关） |
 | **UART0 ROM 下载** | BOOT+RESET + UART0（GPIO43/44）配合 esptool |
 | **OpenOCD + USB-JTAG（C5）** | C5 无 USB-OTG，经内置 USB Serial/JTAG 用 OpenOCD 刷写，见 docs/esp32-c5-port.md |
-| **完整功能 OTA（历史）** | 仅在从 `backup/full-features-2026-10-26` 恢复的构建可用；契约归档 [docs/archive/removed-features/ota-local-upload.md](docs/archive/removed-features/ota-local-upload.md) |
+| **完整功能 OTA（历史）** | 仅在从 `backup/full-features-2026-10-26` 恢复的构建可用；契约归档 docs/archive/removed-features/ota-local-upload.md |
 
-恢复/重开步骤见 [docs/feature-flags.md](docs/feature-flags.md)（A1/A2）与 [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md)。
+恢复/重开步骤见 [docs/feature-flags.md](docs/feature-flags.md)（A1/A2）与 docs/archive/removed-features/README.md。
 
 ## 7. 调试工具接入
 
@@ -283,7 +283,7 @@ Windows 通过 WCID/MS OS 2.0 描述符自动绑定 WinUSB；设备在软件中�
 
 ### 7.3 WebSocket-DAP（legacy，浏览器工具）
 
-- 同样在 3240 端口：先以 HTTP `GET ` 完成 WebSocket 升级，之后的**二进制帧 payload 即 CMSIS-DAP 命令包**（见 [components/dap_proxy/](components/dap_proxy/)）。
+- 同样在 3240 端口：先以 HTTP `GET ` 完成 WebSocket 升级，之后的**二进制帧 payload 即 CMSIS-DAP 命令包**（见 components/dap_proxy/）。
 - 可通过 `CONFIG_BIRDIEBOT_DAP_WS_ENABLE=n` 关闭（USBIP/elaphureLink 不受影响，端口仍监听）。
 - 适合 [elaphure-dap.js](https://github.com/windowsair/elaphure-dap.js) 等浏览器端工具。
 
@@ -445,7 +445,7 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 - **final slim HIL（推荐）**：docs/hil-gate.md §11 —— `--profile auto` 自动识别 slim 固件、断言 OTA/discover 端点不存在、6 条 hash 路由（`/status`、`/target`、`/debug-curve`、`/uart`、`/wifi`、`/about`）、状态页 + compact 状态条、WS/mDNS（TXT `name`/`serial`/`chip`/`fw`）。设备证据：`analysis/slim-hil/` —— **S3-F407 600 s soak clean**（110 cycles，0 failures）与 **C5-H7 180 s soak clean**（33 cycles，0 failures），USBIP ×2 与 SWD 时钟矩阵 PASS。
 - **UART/DataFlow/WS 二进制**：docs/hardware-test-uart-dataflow.md —— T1–T8 场景。
 - **DAP/USBIP 真机验证**：docs/hardware-test-dap.md。
-- **OTA（历史，仅完整构建）**：[docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md)。
+- **OTA（历史，仅完整构建）**：docs/archive/removed-features/hardware-test-ota.md。
 
 ---
 
@@ -466,19 +466,19 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 | 重烧后无法启动 | 串口日志 + coredump：`idf.py coredump-info`（需与构建相同版本 IDF）；必要时 `esptool.py erase_flash` 后按 §4.5 重烧 |
 | 版本显示 `v1.0.0`/空 | 构建环境无 `vX.Y.Z` tag 且无 `version.txt`（开发构建回退属预期），见 [docs/versioning.md](docs/versioning.md) |
 
-完整构建的 OTA 错误码与回滚步骤属历史内容：[docs/archive/removed-features/hardware-test-ota.md §5/§6](docs/archive/removed-features/hardware-test-ota.md)。
+完整构建的 OTA 错误码与回滚步骤属历史内容：docs/archive/removed-features/hardware-test-ota.md §5/§6。
 
 ---
 
 ## 15. 文档、反馈与许可证
 
 - **文档索引**：[docs/README.md](docs/README.md)（当前文档地图、冻结契约、测试清单与维护规则）。
-- **当前功能状态**：[docs/feature-flags.md](docs/feature-flags.md)（final slim 移除项、Kconfig 开关、备份 tag、恢复步骤）；[docs/archive/README.md](docs/archive/README.md)（历史证据/已移除功能）。
+- **当前功能状态**：[docs/feature-flags.md](docs/feature-flags.md)（final slim 移除项、Kconfig 开关、备份 tag、恢复步骤）；docs/archive/README.md（历史证据/已移除功能）。
 - **关键契约**：[protocol.md](docs/protocol.md)（JSON/WS 协议）、[wifi-credential-memory.md](docs/wifi-credential-memory.md)、[versioning.md](docs/versioning.md)、[board-pins.md](docs/board-pins.md)、[web-status-ui.md](docs/web-status-ui.md)（状态页 + compact 状态条）。
 - **安全**：[docs/security.md](docs/security.md)（部署加固指南）；[docs/security-review-web.md](docs/security-review-web.md)（历史 full 构建 Web/OTA/WiFi 安全审查——slim 已移除 OTA/discover 端点且默认关闭 Host/Origin guard）。
 - **反馈**：请在项目仓库提 Issue。
 - **作者**：本仓库由本项目贡献者维护；下列上游项目是依赖并已署名，并非本仓库作者。
-- **许可证**（混合许可；完整声明见 [NOTICE](NOTICE)，全文见 [LICENSES/](LICENSES/)）：
+- **许可证**（混合许可；完整声明见 [NOTICE](NOTICE)，全文见 LICENSES/）：
   - **本项目原创部分**：**Apache License 2.0**（根目录 [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)）；个别文件头另行标注（如部分 `scripts/` 为 SPDX MIT）。
   - **第三方组件按各自原许可证**：
     - windowsair/wireless-esp8266-dap —— **MIT**，覆盖 `components/DAP`、`components/USBIP`、`components/elaphureLink`、`components/dap_proxy`（各目录 `LICENSE`）；

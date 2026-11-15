@@ -2,7 +2,7 @@
 
 **English** | [中文](README_CN.md)
 
-A wireless CMSIS-DAP debug probe built on the **ESP32-S3**, with an embedded Web management panel. Flash it once over USB, then debug over Wi-Fi (SWD/JTAG), bridge UART traffic, inspect device status and flash target firmware from the browser. **The final slim build has no Web OTA** — firmware updates use USB-JTAG / OpenOCD / UART0.
+A wireless CMSIS-DAP debug probe built on the **ESP32-S3**, with an embedded Web management panel. Flash it once over USB, then debug over Wi-Fi (SWD/JTAG), bridge UART traffic, inspect device status and flash target firmware from the browser. Firmware updates use the built-in OTA upload when the optional `sdkconfig.defaults.esp32s3.ota` overlay is enabled; otherwise USB-JTAG / OpenOCD / UART0.
 
 The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://github.com/windowsair/wireless-esp8266-dap) (MIT) and [kerms/wireless-esp32-tools](https://github.com/kerms/wireless-esp32-tools) (Apache-2.0 platform layer), upgraded to **ESP-IDF 5.5.6** and extended with a Web UI plus a JSON/WebSocket protocol. Full documentation index: **[docs/README.md](docs/README.md)**.
 
@@ -19,7 +19,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 > USBIP/DAP, target flashing, curves, UART, Wi-Fi, mDNS (TXT `name`/`serial`/`chip`/`fw`)
 > and About remain. Per-item Kconfig flags, restore recipes, resource savings and
 > archive paths: **[docs/feature-flags.md](docs/feature-flags.md)**; historical
-> removed-feature docs: **[docs/archive/removed-features/](docs/archive/removed-features/README.md)**.
+> removed-feature docs: **docs/archive/removed-features/**.
 
 > ⚠️ **Secure-by-default warning**: the Web/JSON API, WebSocket-DAP and UART TCP bridge are **unauthenticated by default**, all transports are plaintext, and the browser Host/Origin guard is **off by default in slim**. Deploy only on a **trusted LAN** and read [§9 Security defaults & hardening](#9-security-defaults--hardening).
 
@@ -49,7 +49,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 
 - **What it is**: an ESP32-S3 (8 MB flash) turned into a wireless CMSIS-DAP probe plus a self-hosted Web dashboard.
 - **Debug transports**: USBIP/WinUSB (CMSIS-DAP v2), elaphureLink (driver-free Keil), and WebSocket-DAP (browser tools) — all on **TCP 3240**.
-- **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**: device status, Wi-Fi setup, UART terminal, target detection/flashing, variable curves and version info. **The final slim build has no Web OTA / Update page**; firmware updates use USB-JTAG, OpenOCD or UART0 ROM download (see [§4.5](#45-first-flash-esp32-s3-8-mb) and [§6](#6-web-ui)).
+- **Management path**: an embedded single-page Web UI (Vue 3 + Vite, gzip-embedded into the firmware) served over **HTTP 80**: device status, Wi-Fi setup, UART terminal, target detection/flashing, variable curves and version info. The default build disables the OTA upload endpoint; the optional `sdkconfig.defaults.esp32s3.ota` overlay enables `POST /api/ota/upload` for built-in OTA. Without it, firmware updates use USB-JTAG, OpenOCD or UART0 ROM download (see [§4.5](#45-first-flash-esp32-s3-8-mb) and [§6](#6-web-ui)).
 - **Release target**: **ESP32-S3 8 MB** (default board `BOARD_WIFI_DAP_S3`, dual-slot partition layout). ESP32-C3 / ESP32 (4 MB) are **compile-only**: single-app partitions, not hardware-validated.
 - **ESP32-C5 variant**: **hardware-validated (non-release target), Wi-Fi-only** on ESP-IDF **v5.5.6** (`BOARD_GENERIC_C5`, 8 MB dual-slot partition layout). The C5 has **no USB-OTG**, so USB-NCM / wired DAP is physically impossible; it keeps Wi-Fi USBIP + Web/curve/UART and is flashed/debugged through its built-in USB Serial/JTAG (OpenOCD). UART1 bridge pins are **TX=GPIO25 / RX=GPIO26**. See docs/esp32-c5-port.md.
 - **Removed in the final slim build (2026-10-26)**: Web OTA/Update page and endpoints, device discovery card + `GET /api/discover`, SSDP/UPnP, first-run guided flow, online-manual entry, Ozone compatibility PoC. Partition tables, rollback confirmation and the OTA component source are kept; restore path: tag `backup/full-features-2026-10-26` + [docs/feature-flags.md](docs/feature-flags.md). Also removed earlier: ESP8266 support, experimental KCP transport, corsacOTA (port 3241), Widget dashboard.
@@ -78,7 +78,7 @@ The project is a merge/rework of [windowsair/wireless-esp8266-dap](https://githu
 | Wi-Fi | Multi-credential memory | ✅ | Up to 8 networks, auto-save + rotation on boot/disconnect ([contract](docs/wifi-credential-memory.md)) |
 | Serial | Web UART terminal + WS binary | ✅ | 115200-8N1 default; data bits / parity / stop bits / flow control configurable |
 | Serial | UART TCP bridge | ✅ (can disable) | TCP **1346**; first text packet may switch baud rate; `CONFIG_BIRDIEBOT_UART_BRIDGE_ENABLE`; C5 uses UART1 GPIO25/26 (loopback verified) |
-| Discovery | mDNS only | ✅ (SSDP removed) | `_http._tcp` service + TXT `name`/`serial`/`chip`/`fw` (`serial=WiFi-Dap-<12HEX>`, unique per probe); SSDP/UPnP (H1) and `GET /api/discover` (H3) removed in slim, see [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md) |
+| Discovery | mDNS only | ✅ (SSDP removed) | `_http._tcp` service + TXT `name`/`serial`/`chip`/`fw` (`serial=WiFi-Dap-<12HEX>`, unique per probe); SSDP/UPnP (H1) and `GET /api/discover` (H3) removed in slim, see docs/archive/removed-features/README.md |
 | Firmware update | USB-JTAG / OpenOCD / UART0 | ✅ | **No Web OTA in slim** (A1/A2); re-flash via UART0 or the built-in USB Serial/JTAG (S3: BOOT+RESET ROM download; C5: OpenOCD over USB-JTAG); OTA partitions + 10 s rollback confirmation retained; full Web-OTA flow restorable from `backup/full-features-2026-10-26` |
 | Variable curve | Web sampling | ✅ | Device-local sampler limit **64 series** (was 256, C4); WS-DAP mode 24 series; protocol group format unchanged |
 | Diagnostics | coredump to flash | ✅ | 64 KB `coredump` partition (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`) |
@@ -169,7 +169,7 @@ scripts/idf-docker.sh -B build/esp32s3 -D SDKCONFIG=build/esp32s3/sdkconfig buil
 | ESP32-C3 / ESP32 (4 MB) | [`partitions/partitions_4mb_single.csv`](partitions/partitions_4mb_single.csv) | nvs + phy + `factory` 3.75M + wt_nvs + coredump | ❌ no OTA |
 | ESP32-C5 (8 MB, Wi-Fi-only) | [`partitions/partitions_8mb_ota.csv`](partitions/partitions_8mb_ota.csv) | same 8 MB dual-slot layout as S3 | ✅ dual slot + rollback layout (Web OTA UI/endpoint removed in slim; hardware-validated, non-release target) |
 
-App-size limits, otadata rules and rollback semantics are historical full-build contract details: [archived ota-local-upload.md §1](docs/archive/removed-features/ota-local-upload.md) (partitions/rollback code is retained in slim).
+App-size limits, otadata rules and rollback semantics are historical full-build contract details: archived ota-local-upload.md §1 (partitions/rollback code is retained in slim).
 
 ### 4.5 First flash (ESP32-S3 8 MB)
 
@@ -187,7 +187,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 
 - ❌ Do **not** write `build/esp32s3/ota_data_initial.bin`, and do **not** first-flash a `merge_bin` image (it initializes otadata and defeats the fallback path).
 - Serial console: UART0, 115200 (S3: GPIO43/44).
-- **Later firmware updates (final slim)**: there is **no Web OTA**. Re-flash `ota_0` via UART0 or the built-in USB Serial/JTAG (S3: hold BOOT + RESET to enter ROM download mode; C5: OpenOCD over USB-JTAG, see docs/esp32-c5-port.md). The legacy Web-OTA flow/`scripts/ota_upload.py` only work with a full-feature build restored from `backup/full-features-2026-10-26` ([archive](docs/archive/removed-features/ota-local-upload.md)).
+- **Later firmware updates**: the optional OTA overlay enables the built-in upload path (`scripts/ota_upload.py --host <device> --file <app.bin> --info`). Without OTA, re-flash `ota_0` via UART0 or the built-in USB Serial/JTAG (S3: hold BOOT + RESET for ROM download mode; C5: OpenOCD over USB-JTAG).
 
 ### 4.6 Release package (optional)
 
@@ -246,7 +246,7 @@ The **final slim** Web UI keeps the debugging workflow and removes the former OT
 - Screenshots: [UART terminal](web/assets/uart.png)
 - Removed earlier: the former Widget / `#/widget` dashboard (2026-10-21); UART keeps the data viewer, macros and its full feature set. Removed in slim: `/#/update` (OTA), guided flow, device-discovery card, `/#/feedback` entry.
 
-### Firmware update (final slim: no Web OTA)
+### Firmware update: OTA overlay or USB re-flash
 
 There is **no browser OTA / Update page** in the final slim build (`POST /api/ota/upload` → 405, OTA JSON module 5 unregistered; the front-end Update page and OTA client were deleted).
 
@@ -255,9 +255,9 @@ There is **no browser OTA / Update page** in the final slim build (`POST /api/ot
 | **USB-JTAG / esptool (S3)** | Hold **BOOT (GPIO0) + RESET** to enter ROM download mode; the S3 built-in USB Serial/JTAG exposes a serial port, then `esptool.py`/`idf.py -p <port> flash` as in [§4.5](#45-first-flash-esp32-s3-8-mb). Works with the NCM/Wi-Fi slim firmware (ROM download mode is independent of the app USB configuration) |
 | **UART0 ROM download** | BOOT+RESET + UART0 (GPIO43/44) with esptool |
 | **OpenOCD + USB-JTAG (C5)** | C5 has no USB-OTG; flash via OpenOCD over its built-in USB Serial/JTAG, see docs/esp32-c5-port.md |
-| **Full-feature OTA (historical)** | Only in a build restored from `backup/full-features-2026-10-26`; contract archived at [docs/archive/removed-features/ota-local-upload.md](docs/archive/removed-features/ota-local-upload.md) |
+| **Full-feature OTA (historical)** | Only in a build restored from `backup/full-features-2026-10-26`; contract archived at docs/archive/removed-features/ota-local-upload.md |
 
-Restore/re-enable steps: [docs/feature-flags.md](docs/feature-flags.md) (A1/A2) and [docs/archive/removed-features/README.md](docs/archive/removed-features/README.md).
+Restore/re-enable steps: [docs/feature-flags.md](docs/feature-flags.md) (A1/A2) and docs/archive/removed-features/README.md.
 
 ## 7. Debugger transports
 
@@ -285,7 +285,7 @@ Windows binds WinUSB automatically through WCID / MS OS 2.0 descriptors; the pro
 
 ### 7.3 WebSocket-DAP (legacy, browser tools)
 
-- Also on port 3240: after an HTTP `GET ` upgrade, **binary frame payloads are CMSIS-DAP command packets** (see [components/dap_proxy/](components/dap_proxy/)).
+- Also on port 3240: after an HTTP `GET ` upgrade, **binary frame payloads are CMSIS-DAP command packets** (see components/dap_proxy/).
 - Disable with `CONFIG_BIRDIEBOT_DAP_WS_ENABLE=n` (USBIP/elaphureLink are unaffected; the port stays open for them).
 - Intended for browser-based tools such as [elaphure-dap.js](https://github.com/windowsair/elaphure-dap.js).
 
@@ -314,7 +314,7 @@ The device presents itself as a standard **CMSIS-DAP v2** probe (SWD/JTAG); sele
 | Surface | Default | Risk |
 |---|---|---|
 | Web UI / JSON API / WS data plane | no auth | any host on the LAN can read config, drive UART and operate the probe |
-| Firmware update | **no Web OTA endpoint in slim** (405); re-flash requires physical/network access via USB-JTAG/UART0 | local physical/network access can overwrite firmware; OTA is unsigned in full builds |
+| Firmware update | OTA endpoint only when the optional OTA overlay is built; otherwise re-flash via USB-JTAG/UART0 | local physical/network access can overwrite firmware; OTA uploads are unsigned |
 | USBIP / elaphureLink / WS-DAP (3240) | no auth | probe can be attached and the target chip read/written |
 | UART TCP bridge (1346) | no auth | direct access to the target's serial port |
 | Host/Origin validation | **OFF by default in slim** (M1); any Host/Origin is accepted | CSWSH / DNS-rebinding possible from a browser on the LAN |
@@ -440,14 +440,14 @@ python3 scripts/e2e_ws_client.py --host <ip> uart-echo --payload 48656c6c6f --he
 python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 ```
 
-> `e2e_ws_client.py ota-info` and `scripts/ota_upload.py` only work with a **full-feature build** (restored from `backup/full-features-2026-10-26`); on the final slim firmware the OTA endpoint/module is removed. These scripts are kept for full-build regression.
+> `e2e_ws_client.py ota-info` and `scripts/ota_upload.py` only work with a **full-feature build** (restored from `backup/full-features-2026-10-26`); on builds without the OTA overlay the endpoint/module is absent; enable `sdkconfig.defaults.esp32s3.ota` to use it.
 
 ### 13.3 Hardware checklists & final slim HIL
 
 - **Final slim HIL (recommended)**: docs/hil-gate.md §11 — `--profile auto` detects slim firmware, checks absent OTA/discover endpoints, the 6 hash routes (`/status`, `/target`, `/debug-curve`, `/uart`, `/wifi`, `/about`), status page + compact strip, WS/mDNS (TXT `name`/`serial`/`chip`/`fw`). Device evidence: `analysis/slim-hil/` — **S3-F407 600 s soak clean** (110 cycles, 0 failures) and **C5-H7 180 s soak clean** (33 cycles, 0 failures), USBIP ×2 and SWD clock matrix PASS.
 - **UART/DataFlow/WS binary**: docs/hardware-test-uart-dataflow.md — scenarios T1–T8.
 - **DAP/USBIP hardware validation**: docs/hardware-test-dap.md.
-- **OTA (historical, full builds only)**: [docs/archive/removed-features/hardware-test-ota.md](docs/archive/removed-features/hardware-test-ota.md).
+- **OTA (historical, full builds only)**: docs/archive/removed-features/hardware-test-ota.md.
 
 ---
 
@@ -459,7 +459,7 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 | `192.168.1.1` does not respond | is the client on the device AP? did Smart APSTA turn the AP off? use the device's STA-network IP |
 | `wifi-dap-XXXX.local` does not resolve | mDNS support on device/client; check TXT `name`/`serial`/`chip`/`fw`; fall back to the IP (hostname is `wifi-dap-XXXX` in `wt_mdns_config.h`, XXXX = last two MAC bytes). SSDP discovery was removed in slim |
 | Web UI opens but operations are rejected with HTTP 403 | only possible if a hardened build re-enabled the Host/Origin guard: access via IP or add the hostname to `BIRDIEBOT_WEB_ALLOWED_ORIGIN` (slim default: guard off) |
-| `/#/update` returns 404 | expected: the final slim build has no Web OTA/Update page. Re-flash via USB-JTAG/UART0 (see §4.5) or restore a full-feature build |
+| `/#/update` returns 404 | expected: the Web Update page is removed; OTA is driven by the HTTP endpoint when the OTA overlay is enabled, otherwise re-flash via USB-JTAG/UART0 |
 | `POST /api/ota/upload` returns 405/404 | expected on slim: OTA endpoint removed. Use USB-JTAG/OpenOCD/UART0 |
 | `GET /api/discover` returns HTML / 404 | expected on slim: discovery endpoint removed; mDNS is the only discovery path |
 | `usbip.exe attach_ude` fails | usbip-win 0.3.0+? device IP/network reachable? port 3240 blocked by firewall? busid is always `1-1` |
@@ -468,19 +468,19 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 | Device won't boot after re-flash | serial log + coredump: `idf.py coredump-info` (same IDF version as the build); if needed `esptool.py erase_flash` then re-flash per §4.5 |
 | Version shows `v1.0.0`/empty | build environment has no `vX.Y.Z` tag and no `version.txt` (fallback is expected for dev builds), see [docs/versioning.md](docs/versioning.md) |
 
-Full-build OTA error codes and rollback steps are historical: [docs/archive/removed-features/hardware-test-ota.md §5/§6](docs/archive/removed-features/hardware-test-ota.md).
+Full-build OTA error codes and rollback steps are historical: docs/archive/removed-features/hardware-test-ota.md §5/§6.
 
 ---
 
 ## 15. Documentation, feedback & license
 
 - **Documentation index**: [docs/README.md](docs/README.md) (current docs map, frozen contracts, test checklists and maintenance rules).
-- **Current feature state**: [docs/feature-flags.md](docs/feature-flags.md) (final slim removals, Kconfig switches, backup tag, restore steps); [docs/archive/README.md](docs/archive/README.md) (historical evidence / removed features).
+- **Current feature state**: [docs/feature-flags.md](docs/feature-flags.md) (final slim removals, Kconfig switches, backup tag, restore steps); docs/archive/README.md (historical evidence / removed features).
 - **Key contracts**: [protocol.md](docs/protocol.md) (JSON/WS protocol), [wifi-credential-memory.md](docs/wifi-credential-memory.md), [versioning.md](docs/versioning.md), [board-pins.md](docs/board-pins.md), [web-status-ui.md](docs/web-status-ui.md) (status page + compact strip).
 - **Security**: [docs/security.md](docs/security.md) (deployment hardening guide); [docs/security-review-web.md](docs/security-review-web.md) (historical full-build Web/OTA/WiFi security review — OTA/discovery endpoints are removed in slim and the Host/Origin guard is off by default).
 - **Feedback**: open an issue on the project repository (GitHub Issues).
 - **Authorship**: this repository is maintained by its own contributors; the upstream projects below are dependencies and are credited, not the authors of this repository.
-- **License** (mixed licensing; full statement in [NOTICE](NOTICE), texts in [LICENSES/](LICENSES/)):
+- **License** (mixed licensing; full statement in [NOTICE](NOTICE), texts in LICENSES/):
   - **Project-original parts**: **Apache License 2.0** (root [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)); individual files may state another SPDX license in their header (e.g. some `scripts/` are SPDX MIT).
   - **Third-party components keep their upstream licenses**:
     - windowsair/wireless-esp8266-dap — **MIT**, covering `components/DAP`, `components/USBIP`, `components/elaphureLink`, `components/dap_proxy` (per-directory `LICENSE`);
