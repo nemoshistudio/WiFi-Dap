@@ -302,7 +302,7 @@ export default {
         description: 'Flash target firmware directly over the wireless DAP',
         detect: 'Detect target',
         swdClock: 'SWD clock',
-        swdClockAuto: 'Auto (2/1/0.5 MHz probe)',
+        swdClockAuto: 'Auto (speed-ladder probe)',
         swdClockFailed: 'Failed to set SWD clock',
         swdClockApplied: 'Device applied the selected SWD clock',
         detecting: 'Detecting…',

@@ -306,7 +306,7 @@ export default {
         description: '通过无线 DAP 直接烧录目标芯片固件',
         detect: '检测目标',
         swdClock: 'SWD 时钟',
-        swdClockAuto: '自动（2/1/0.5 MHz 探测）',
+        swdClockAuto: '自动（速度档探测）',
         swdClockFailed: '设置 SWD 时钟失败',
         swdClockApplied: '设备已应用所选 SWD 时钟',
 

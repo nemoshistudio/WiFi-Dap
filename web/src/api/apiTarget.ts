@@ -282,8 +282,9 @@ export async function getSwdClock(): Promise<number | null> {
 }
 
 /**
- * POST /api/target/swd-clock. `hz=0` restores automatic 2/1/0.5 MHz probing;
- * manual values are validated by the firmware (100 kHz..10 MHz).
+ * POST /api/target/swd-clock. `hz=0` restores the automatic speed ladder;
+ * manual values are validated by the firmware (100 kHz..24 MHz on the S3 M5
+ * engine; 100 kHz..10 MHz on targets without the engine).
  */
 export async function setSwdClock(hz: number): Promise<{ok: boolean; hz: number; err?: string}> {
     try {

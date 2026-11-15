@@ -62,7 +62,7 @@
 | 目标芯片 | ESP32-C3 / ESP32 | 🧪 仅编译 | 4 MB 单 app 分区，无 OTA 分区，未做硬件验证 |
 | 目标芯片 | ESP32-C5 | ✅ 真机验证（非发布目标）、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；实验室 bring-up + final slim HIL 有记录（非发布目标） |
 | 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，引脚见 [docs/board-pins.md](docs/board-pins.md)，默认 SWD 时钟 **2 MHz** |
-| 调试协议 | SWD 全速率引擎（M5） | ✅ H723 目标验证（16 MHz 稳定；20 MHz 边缘） | ESP32-S3 专用 GPIO 引擎是**唯一 SWD 后端**：默认 160 MHz CPU 下 **100 kHz–20 MHz**，240 MHz 变体到 **24 MHz**；旧 GPIO/SPI SWD 后端在 S3 编译移除（无回退）；H723 上 100k–20M 全档验证、目标擦写与 GDB 变量通过；Kconfig 默认打开；见 [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
+| 调试协议 | SWD 全速率引擎（M5） | ✅ H723 目标验证（16 MHz 稳定；20 MHz 边缘） | ESP32-S3 专用 GPIO 引擎是**唯一 SWD 后端**：默认 160 MHz CPU 下 **100 kHz–20 MHz**，240 MHz 变体到 **24 MHz**；旧 GPIO/SPI SWD 后端在 S3 编译移除（无回退）；H723 上 100k–20M 全档验证、目标擦写与 GDB 变量通过；Web UI SWD 时钟可选 500 kHz–24 MHz，WS-DAP bring-up 自动从 24→1.9 MHz 逐档尝试；Kconfig 默认打开；见 [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
 | 管理传输 | CMSIS-DAP over TCP 后端（M3） | 🧪 默认关闭，HIL 待办 | 端口 **3241**，OpenOCD `cmsis-dap backend tcp` 帧格式 + DAP 执行器桥接（`main/dap_tcp_bridge.c`）；OpenOCD master + STM32H723 目标级联调已真机验证（2026-11-15）；见 [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
 | 目标烧录 | Web 直接烧录 / STM32 识别 | ✅ F4/H7 实板验证 | 浏览器上传 `.bin`/`.elf`/`.hex`/`.srec`（前端转裸镜像），ESP32 经 SWD 流式写入（扇区擦除、x64/x32、SHA-256 校验 + SWD 复位）；**全 STM32 系列识别**（DEV_ID 表）；见 [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | 传输性能 | USBIP/DAP 调优 | ✅ | A3：Wi-Fi 下 64 KB 读约 43 KiB/s（延迟受限）；目标烧录时暂停 UART 桥，Wi-Fi/HTTP 保持在线 |

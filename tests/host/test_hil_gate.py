@@ -288,7 +288,7 @@ class ExtendedModeTests(unittest.TestCase):
         self.assertFalse(args.ota_interrupt)
         self.assertEqual(args.soak_seconds, 0)
         self.assertFalse(args.swd_clock_matrix)
-        self.assertEqual(args.swd_clock_steps, "auto,500k,1M,2M,4M,10M")
+        self.assertEqual(args.swd_clock_steps, "auto,500k,1M,2M,4M,10M,16M,20M,24M")
         self.assertEqual(args.swd_clock_expect_ok, "")
         self.assertAlmostEqual(args.swd_clock_settle, 0.3)
         self.assertTrue(args.openocd_path.endswith("openocd"))
@@ -428,14 +428,15 @@ class ExtendedModeTests(unittest.TestCase):
     # -- SWD clock matrix (pure helpers + offline gate integration) --------
     def test_swd_clock_steps_parse(self) -> None:
         self.assertEqual(
-            hil.parse_swd_clock_steps("auto,500k,1M,2M,4M,10M"),
-            [0, 500000, 1000000, 2000000, 4000000, 10000000])
+            hil.parse_swd_clock_steps("auto,500k,1M,2M,4M,10M,16M,20M,24M"),
+            [0, 500000, 1000000, 2000000, 4000000, 10000000,
+             16000000, 20000000, 24000000])
         self.assertEqual(hil.parse_swd_clock_steps("0 100000 0x100000"),
                          [0, 100000, 0x100000])
         self.assertEqual(hil.parse_swd_clock_steps("0.5M, 1900k"),
                          [500000, 1900000])
         self.assertEqual(hil.parse_swd_clock_steps("1000000"), [1000000])
-        for bad in ("", "abc", "50k", "20M", "1M,bad"):
+        for bad in ("", "abc", "50k", "25M", "1M,bad"):
             with self.assertRaises(ValueError):
                 hil.parse_swd_clock_steps(bad)
 
@@ -475,9 +476,10 @@ class ExtendedModeTests(unittest.TestCase):
         matrix = report["extended"]["extended_swd_matrix"]
         self.assertEqual(matrix["status"], "pass")
         self.assertEqual(matrix["required_failures"], 0)
-        self.assertEqual(len(matrix["steps"]), 6)
+        self.assertEqual(len(matrix["steps"]), 9)
         self.assertEqual(matrix["steps_requested_hz"],
-                         [0, 500000, 1000000, 2000000, 4000000, 10000000])
+                         [0, 500000, 1000000, 2000000, 4000000, 10000000,
+                          16000000, 20000000, 24000000])
         self.assertEqual(matrix["steps"][3]["detected"], False)
         self.assertEqual(matrix["final_restore"]["detected"], True)
         ids = {check["id"] for check in report["checks"]}

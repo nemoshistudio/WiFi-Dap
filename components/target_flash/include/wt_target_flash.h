@@ -167,6 +167,12 @@ esp_err_t wt_tf_probe(wt_tf_info_t *info);
  * 100 kHz..10 MHz. The setting is process-wide and intentionally not
  * persisted across reboot.
  */
+/**
+ * Force the SWD clock used by the next target probe / flash session.
+ * 0 restores the automatic walk.  Accepted range: 100 kHz..10 MHz on targets
+ * without the ESP32-S3 M5 engine, 100 kHz..24 MHz when it is enabled
+ * (160 MHz CPU clamps at 20 MHz, 240 MHz variant reaches 24 MHz).
+ */
 esp_err_t wt_tf_set_swd_clock(uint32_t clock_hz);
 
 /** Currently selected manual SWD clock, or 0 for automatic probing. */

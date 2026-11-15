@@ -665,8 +665,9 @@ group_count × {
 - 自动探测顺序由 `2M→1M→500k` 扩为 **4M→2M→1M→500k**（target_flash
   `tf_probe_link()` 与 curve_sampler 本地采样 `curve_link_up()` 一致）；每个
   档位完整重跑 line reset/JTAG→SWD/DP power-up，保留首个识别成功的档位。
-- 手动 API 不变：`GET/POST /api/target/swd-clock`（`hz=0` = auto，手动
-  100 kHz..10 MHz），手动模式下不再走自动档位。
+- 手动 API 不变：`GET/POST /api/target/swd-clock`（`hz=0` = auto；手动范围
+  100 kHz..24 MHz，S3 M5 引擎；无引擎目标仍为 100 kHz..10 MHz），手动模式下不再走
+  自动档位；S3 自动档位为 16/10/4/2/1/0.5 MHz（H723 16 MHz 稳定，20/24 MHz 边缘）。
 - 实际时钟上报：`GET /api/target/info` 与 `/api/target/status` 新增
   `swd_clock_actual_hz`（最近一次成功 bring-up 实际使用值；无则省略）、
   `swd_clock_manual_hz`（0=auto）；curve 本地采样仍在 `status.link_hz` 报实际值。

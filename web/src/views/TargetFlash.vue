@@ -32,6 +32,9 @@
             <el-option :value="2000000" label="2 MHz"/>
             <el-option :value="4000000" label="4 MHz"/>
             <el-option :value="10000000" label="10 MHz"/>
+            <el-option :value="16000000" label="16 MHz"/>
+            <el-option :value="20000000" label="20 MHz"/>
+            <el-option :value="24000000" label="24 MHz"/>
           </el-select>
           <el-button type="primary" :loading="detecting" :disabled="flashing" @click="onDetect">
             {{ detecting ? translate('target.detecting') : translate('target.detect') }}

@@ -48,6 +48,7 @@
           <span class="font-mono text-xs opacity-70">{{ endpointText }}</span>
           <span v-if="targetInfo" class="font-mono text-xs opacity-70">
             IDCODE {{ formatHex32(targetInfo.idcode) }} · AP IDR {{ formatHex32(targetInfo.apIdr) }}
+            <template v-if="targetInfo.swdClockHz"> · SWD {{ (targetInfo.swdClockHz / 1_000_000).toFixed(1) }} MHz</template>
           </span>
         </template>
         <span class="flex-1"></span>

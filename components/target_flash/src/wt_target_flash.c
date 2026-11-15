@@ -607,16 +607,18 @@ static void tf_target_set_unknown(uint32_t idcode, uint32_t cpuid, uint32_t dpid
  * Link the DAP to SWD and identify the target; fills s_target/s_info.
  * The caller must already own the DAP engine.
  *
- * Automatic SWD clock probe (P0-8): 4 MHz -> 2 MHz -> 1 MHz -> 500 kHz.  The
- * STM32H7 setup in the field only answers at <=1 MHz (OpenOCD: "cannot read
- * IDR" at 2 MHz), while F4 boards usually work at the faster clocks; the first
- * clock that identifies the target is kept and reported as the actual clock.
- * A manual clock (wt_tf_set_swd_clock) skips the walk.  Each attempt re-runs
- * the full line-reset/JTAG-to-SWD/DP power-up sequence with the new clock.
+ * Automatic SWD clock probe (P0-8): on the ESP32-S3 M5 engine 16 MHz ->
+ * 10/4/2/1/0.5 MHz; elsewhere the proven 4/2/1/0.5 MHz walk.  STM32H7 field
+ * targets are verified stable at 16 MHz with the new engine (20/24 MHz are
+ * marginal on long SWD wires), while F4 boards usually work at faster clocks;
+ * the first clock that identifies the target is kept and reported as the actual
+ * clock.  A manual clock (wt_tf_set_swd_clock) skips the walk.  Each attempt
+ * re-runs the full line-reset/JTAG-to-SWD/DP power-up sequence with the new
+ * clock.
  */
 esp_err_t wt_tf_set_swd_clock(uint32_t clock_hz)
 {
-    if (clock_hz != 0U && (clock_hz < 100000U || clock_hz > 10000000U)) {
+    if (clock_hz != 0U && (clock_hz < 100000U || clock_hz > TF_SWD_CLOCK_MAX_HZ)) {
         return ESP_ERR_INVALID_ARG;
     }
     tf_swd_set_forced_clock(clock_hz);
@@ -630,10 +632,18 @@ uint32_t wt_tf_get_swd_clock(void)
 
 static esp_err_t tf_probe_link(void)
 {
+#if defined(CONFIG_BIRDIEBOT_SWD_ULTRA_FAST) && (CONFIG_BIRDIEBOT_SWD_ULTRA_FAST)
+    static const uint32_t clock_try[] = {
+        TF_SWD_CLOCK_HZ, TF_SWD_CLOCK_FALLBACK1_HZ, TF_SWD_CLOCK_FALLBACK2_HZ,
+        TF_SWD_CLOCK_FALLBACK3_HZ, TF_SWD_CLOCK_FALLBACK4_HZ,
+        TF_SWD_CLOCK_FALLBACK5_HZ
+    };
+#else
     static const uint32_t clock_try[] = {
         TF_SWD_CLOCK_HZ, TF_SWD_CLOCK_FALLBACK1_HZ, TF_SWD_CLOCK_FALLBACK2_HZ,
         TF_SWD_CLOCK_FALLBACK3_HZ
     };
+#endif
     uint32_t forced_hz = tf_swd_get_forced_clock();
     uint32_t forced_try[1] = { forced_hz };
     const uint32_t *clocks = forced_hz != 0U ? forced_try : clock_try;

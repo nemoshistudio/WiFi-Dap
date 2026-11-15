@@ -2562,7 +2562,7 @@ class FakeDevice:
                                      % (method, path))
         if path == SWD_CLOCK_PATH and method == "POST":
             hz = int((body or {}).get("hz", 0) or 0)
-            if hz != 0 and not 100000 <= hz <= 10000000:
+            if hz != 0 and not 100000 <= hz <= 24000000:
                 return self._json({"module": 6, "cmd": 5, "ok": False,
                                    "hz": hz, "mode": "manual"}, 400)
             self.swd_clock_hz = 1000000 if hz == 0 else hz
@@ -2799,7 +2799,7 @@ def _extended_enabled(args: argparse.Namespace) -> bool:
 
 #: Default SWD clock ladder for --swd-clock-matrix.  0 = the firmware's auto
 #: probe ladder (2 MHz -> 1 MHz -> 500 kHz); the rest are manual forced clocks.
-DEFAULT_SWD_CLOCK_STEPS = "auto,500k,1M,2M,4M,10M"
+DEFAULT_SWD_CLOCK_STEPS = "auto,500k,1M,2M,4M,10M,16M,20M,24M"
 
 
 def parse_swd_clock_steps(text: str) -> List[int]:
@@ -2836,9 +2836,9 @@ def parse_swd_clock_steps(text: str) -> List[int]:
                     hz = int(float(number) * multiplier)
             except ValueError:
                 raise ValueError("invalid SWD clock step: %r" % (raw,))
-        if hz != 0 and not (100000 <= hz <= 10000000):
+        if hz != 0 and not (100000 <= hz <= 24000000):
             raise ValueError(
-                "SWD clock step %r out of range (auto/0 or 100000..10000000 Hz)"
+                "SWD clock step %r out of range (auto/0 or 100000..24000000 Hz)"
                 % (raw,))
         steps.append(hz)
     if not steps:

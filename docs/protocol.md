@@ -145,7 +145,7 @@ AP SSID 默认规则：`WiFi-Dap-XXXX`，`XXXX` = `esp_read_mac(ESP_MAC_WIFI_STA
 > （`CONFIG_BIRDIEBOT_WEB_DISCOVER_ENABLE=n`，H3），请求返回 **404**；本表其余接口
 > 不变。恢复见 [feature-flags.md](feature-flags.md)。
 
-- 支持目标：**识别全部 STM32 系列**（F0/F1/F2/F3/F4/F7/G0/G4/H5/H7/L0/L1/L4/L5/U5/WB/WL/C0 等，DEV_ID 表 + DBGMCU 候选基址 + SWD 2M/1M/500k 回退），`series`/`device` 给出系列与候选型号组；**烧录**目前仅 F4/H7（`supported=true`），其余识别后 `supported=false`。H7（H72x/H73x 1MB）已真机识别验证。
+- 支持目标：**识别全部 STM32 系列**（F0/F1/F2/F3/F4/F7/G0/G4/H5/H7/L0/L1/L4/L5/U5/WB/WL/C0 等，DEV_ID 表 + DBGMCU 候选基址 + SWD 自动速度档回退：S3 M5 引擎 16M/10M/4M/2M/1M/500k，旧路径 4M/2M/1M/500k），`series`/`device` 给出系列与候选型号组；**烧录**目前仅 F4/H7（`supported=true`），其余识别后 `supported=false`。H7（H72x/H73x 1MB）已真机识别验证。
 - 错误：`400/411/415` 请求头/类型错误，`409` 忙/单会话冲突，`413` 超过目标 flash 大小，`422` 探测失败/SHA 或回读校验失败，`408` 上传超时，`500/503` 内部/超时；JSON `code` 沿用 2/3/5/6。
 - 烧录/读取期间**暂停无线串口**（UART TCP 桥 1346、UART 转发/广播），**但网络/WiFi/AP/HTTP/WS/USBIP 保持可用**，结束后自动恢复。
 - 烧录期间 DAP 被独占，不能同时用 OpenOCD/USBIP 访问探针；完成后恢复。
