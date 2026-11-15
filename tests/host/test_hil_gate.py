@@ -362,7 +362,7 @@ class ExtendedModeTests(unittest.TestCase):
             "supported": True,
             "family": "stm32h7",
             "flash_size": 1048576,
-            "uid": "<target-uid>",
+            "uid": "0123456789ABCDEF01234567",
             "device": "STM32H723/H725/H730/H733/H735",
         }
         target.update(overrides)
@@ -376,7 +376,7 @@ class ExtendedModeTests(unittest.TestCase):
         try:
             errors = hil.flash_image_precheck(
                 path, None, hil.sha256_file(path), self._target(),
-                expect_uid="1e000d00 1151333237383732",
+                expect_uid="0123456789abcdef01234567",
                 expect_flash_kib=1024)
             self.assertEqual(errors, [])
         finally:
@@ -688,8 +688,8 @@ class SlimProfileTests(unittest.TestCase):
         self.assertEqual(hil.derive_mdns_name("AA:BB:CC:DD:4B:38"),
                          "WiFi-Dap-4B38")
         # SYSTEM(0)/GET_SYS_INFO sn is a bare 12-hex STA MAC.
-        self.assertEqual(hil.derive_mdns_name("<device-serial>"),
-                         "WiFi-Dap-CA60")
+        self.assertEqual(hil.derive_mdns_name("001122334455"),
+                         "WiFi-Dap-4455")
         self.assertEqual(hil.derive_mdns_name("10BDA3F04B38"),
                          "WiFi-Dap-4B38")
         self.assertIsNone(hil.derive_mdns_name(None))
@@ -698,12 +698,12 @@ class SlimProfileTests(unittest.TestCase):
     def test_mdns_candidate_hosts(self) -> None:
         self.assertEqual(
             hil.mdns_candidate_hosts("192.168.7.1", "",
-                                     "<device-ip>"),
-            ["192.168.7.1", "<device-ip>"])
+                                     "192.168.254.2"),
+            ["192.168.7.1", "192.168.254.2"])
         self.assertEqual(
             hil.mdns_candidate_hosts("192.168.7.1", "10.0.0.5",
-                                     "<device-ip>"),
-            ["10.0.0.5", "192.168.7.1", "<device-ip>"])
+                                     "192.168.254.2"),
+            ["10.0.0.5", "192.168.7.1", "192.168.254.2"])
         self.assertEqual(hil.mdns_candidate_hosts("a", "", ""), ["a"])
 
     def _dns_record(self, name, rtype, rdata, rclass=1):

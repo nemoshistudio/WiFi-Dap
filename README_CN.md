@@ -476,7 +476,8 @@ python3 scripts/e2e_ws_client.py --host <ip> dataflow-list
 - **当前功能状态**：[docs/feature-flags.md](docs/feature-flags.md)（final slim 移除项、Kconfig 开关、备份 tag、恢复步骤）；[docs/archive/README.md](docs/archive/README.md)（历史证据/已移除功能）。
 - **关键契约**：[protocol.md](docs/protocol.md)（JSON/WS 协议）、[wifi-credential-memory.md](docs/wifi-credential-memory.md)、[versioning.md](docs/versioning.md)、[board-pins.md](docs/board-pins.md)、[web-status-ui.md](docs/web-status-ui.md)（状态页 + compact 状态条）。
 - **安全**：[docs/security.md](docs/security.md)（部署加固指南）；[docs/security-review-web.md](docs/security-review-web.md)（历史 full 构建 Web/OTA/WiFi 安全审查——slim 已移除 OTA/discover 端点且默认关闭 Host/Origin guard）。
-- **反馈**：作者主页 <https://yunsi.studio/>；项目主页 <https://yunsi.studio/wireless-debugger>。
+- **反馈**：请在项目仓库提 Issue。
+- **作者**：本仓库由本项目贡献者维护；下列上游项目是依赖并已署名，并非本仓库作者。
 - **许可证**（混合许可；完整声明见 [NOTICE](NOTICE)，全文见 [LICENSES/](LICENSES/)）：
   - **本项目原创部分**：**Apache License 2.0**（根目录 [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)）；个别文件头另行标注（如部分 `scripts/` 为 SPDX MIT）。
   - **第三方组件按各自原许可证**：

@@ -5,7 +5,6 @@ import type { IWebsocketService } from '@/composables/websocket/websocketService
 import { getWebsocketService } from '@/composables/websocket/websocketService'
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { changeFavicon } from '@/composables/importFavicon'
 import { logHelloMessage } from '@/composables/logConsoleMsg'
 import NavBar from '@/views/navigation/NavBar.vue'
 import StatusStrip from '@/components/dashboard/StatusStrip.vue'
@@ -103,7 +102,6 @@ onMounted(() => {
   ensureDashboardTelemetry()
   // P1-16: non-first-screen work waits for the first painted frame / idle time.
   runAfterPaint(() => {
-    changeFavicon()
     // P1-17 bridge: the palette reads the curve page's ELF index.
     ensureCommandIndexBridge()
   })

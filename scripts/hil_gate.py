@@ -2588,7 +2588,7 @@ class FakeDevice:
                 "device": "STM32H723/H725/H730/H733/H735",
                 "supported": True, "swd_clock_hz": self.swd_clock_hz,
                 "dpidr": "0x6ba02477", "cpuid": "0x411fc272",
-                "idcode": "0x10016483", "uid": "<target-uid>",
+                "idcode": "0x10016483", "uid": "0123456789ABCDEF01234567",
                 "flash_base": "0x08000000", "flash_size": 1048576,
                 "max_image_size": 1048576, "dev_id": 1155,
                 "flash_kib": 1024,

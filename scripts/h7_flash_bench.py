@@ -87,7 +87,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_BIN = Path("$HOME/reference firmware/firmware/reference-board/reference/firmware.bin")
+DEFAULT_BIN = Path("~/firmware/reference/firmware.bin")
 DEFAULT_OPENOCD = REPO_ROOT / "build/openocd-master-install/bin/openocd"
 DEFAULT_SCRIPTS = REPO_ROOT / "build/openocd-master-install/share/openocd/scripts"
 DEFAULT_CANDIDATE_OPENOCD = REPO_ROOT / "build/openocd-master-speed/install/bin/openocd"

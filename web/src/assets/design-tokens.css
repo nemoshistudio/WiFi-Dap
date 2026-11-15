@@ -13,7 +13,7 @@
  *   <html class="dark" data-theme="dark">   -> dark  (default, dark-first)
  *   <html data-theme="light">               -> light
  * The class is set statically in index.html for a dark first paint and
- * re-applied from localStorage ("birdiebot.theme") in main.ts / NavBar.vue.
+ * re-applied from localStorage ("wifi-dap.theme") in main.ts / NavBar.vue.
  *
  * Consuming pages (incl. DebugCurve.vue, owned by another workstream) should
  * read the --bb-* variables below instead of hard-coded colors. The

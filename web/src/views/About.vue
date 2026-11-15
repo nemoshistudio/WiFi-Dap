@@ -4,7 +4,6 @@ import {useSystemStore} from "@/stores/useSystemStore";
 import {translate} from "@/locales";
 import {globalNotify} from "@/composables/notification";
 import {PROTOCOL_VERSION} from "@/api";
-import {BRAND_MARK_64} from "@/assets/brand/brand-assets";
 import {BRAND_NAME} from "@/constants/brand";
 
 const sysStore = useSystemStore();
@@ -67,7 +66,6 @@ function copyVersionInfo() {
 <template>
   <div class="text-layout bb-page">
     <section class="bb-card about-brand">
-      <img class="about-brand__mark bb-invert-on-light" :src="BRAND_MARK_64" alt="" width="48" height="48"/>
       <div class="about-brand__text">
         <h1 class="about-brand__name">{{ BRAND_NAME }}</h1>
         <p class="about-brand__meta">{{ translate('page.about') }} · Web UI v{{ webInfo.webVersion }}</p>
@@ -170,11 +168,6 @@ function copyVersionInfo() {
   gap: var(--bb-space-4);
 }
 
-.about-brand__mark {
-  flex: 0 0 auto;
-  width: 48px;
-  height: 48px;
-}
 
 .about-brand__text {
   flex: 1 1 auto;

@@ -18,7 +18,7 @@
  * 只读：不修改仓库/设备，不打包、不 OTA、不 commit。临时产物只写 os.tmpdir()。
  *
  * 用法：node scripts/test-dwarf-loclists.mjs [elf-path]
- *   默认 ELF: $HOME/reference firmware/firmware/reference-board/reference/firmware.elf
+ *   默认 ELF: ~/firmware/reference/firmware.elf
  *   ELF/readelf 不存在时对应项输出 [skip] 并以 0 退出（不阻塞无固件环境）。
  */
 import fs from 'node:fs'
@@ -28,7 +28,7 @@ import {fileURLToPath} from 'node:url'
 import {execFileSync} from 'node:child_process'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const elfPath = process.argv[2] ?? process.env.DWARF_ELF ?? '$HOME/reference firmware/firmware/reference-board/reference/firmware.elf'
+const elfPath = process.argv[2] ?? process.env.DWARF_ELF ?? '~/firmware/reference/firmware.elf'
 
 // ---------------------------------------------------------------------------
 // 用项目自带 esbuild 打包 TS 模块（离线，避免引入额外依赖）

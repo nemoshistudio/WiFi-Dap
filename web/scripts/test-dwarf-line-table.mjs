@@ -19,8 +19,8 @@
  *
  * 用法：node scripts/test-dwarf-line-table.mjs [release.elf] [debug.elf]
  *   默认：
- *     $HOME/reference firmware/firmware/reference-board/reference/firmware.elf
- *     $HOME/reference firmware/firmware/reference-board/reference-debug-O0/firmware.elf
+ *     ~/firmware/reference/firmware.elf
+ *     ~/firmware/reference-debug/firmware.elf
  *   ELF 不存在时对应项 [skip]；readelf/addr2line 不可用时对应交叉验证 [skip]。
  */
 import fs from 'node:fs'
@@ -30,8 +30,8 @@ import {fileURLToPath} from 'node:url'
 import {execFileSync} from 'node:child_process'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const releaseElf = process.argv[2] ?? '$HOME/reference firmware/firmware/reference-board/reference/firmware.elf'
-const debugElf = process.argv[3] ?? '$HOME/reference firmware/firmware/reference-board/reference-debug-O0/firmware.elf'
+const releaseElf = process.argv[2] ?? '~/firmware/reference/firmware.elf'
+const debugElf = process.argv[3] ?? '~/firmware/reference-debug/firmware.elf'
 
 // ---------------------------------------------------------------------------
 // 打包 TS 模块（项目自带 esbuild，离线）

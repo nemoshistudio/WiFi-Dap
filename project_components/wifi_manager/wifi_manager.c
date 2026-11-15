@@ -310,7 +310,7 @@ static void wifi_manager_apply_band_mode(const char *where)
 /* beaconing, a STA association attempt on 2.4 GHz (or a different 5 GHz      */
 /* channel) cannot complete: the driver keeps the radio on the AP channel and  */
 /* the connect times out.  Real-hardware symptom (2026-10-26): the device was */
-/* stuck AP-only, a Web/WS CONNECT to <test-ssid> failed and the rotation   */
+/* stuck AP-only, a Web/WS CONNECT to WiFi Dap_2.4G failed and the rotation   */
 /* retried it endlessly against the running AP.                              */
 /*                                                                           */
 /* Policy: any STA connection attempt (manual CONNECT or the rotation task)   */

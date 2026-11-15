@@ -3,7 +3,7 @@
  * A2 解析器测试：调试采样位置（DW_OP_fbreg/breg/reg）+ 指针成员展开。
  *
  * 校验两份固件：
- *  - reference-debug-O0：accel/gyro/delay/bmi088 等局部变量得到 halt/frame 位置，
+ *  - reference-debug：accel/gyro/delay/bmi088 等局部变量得到 halt/frame 位置，
  *    指针 bmi088 展开 `->member` 子节点，帧/寄存器变量不再被当作“不可采样”；
  *  - reference（-O2）：原有 269 live 固定地址路径保持不变，固定地址指针可展开。
  *
@@ -18,8 +18,8 @@ import {fileURLToPath} from 'node:url'
 import {execFileSync} from 'node:child_process'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const releaseElf = process.argv[2] ?? '$HOME/reference firmware/firmware/reference-board/reference/firmware.elf'
-const debugElf = process.argv[3] ?? '$HOME/reference firmware/firmware/reference-board/reference-debug-O0/firmware.elf'
+const releaseElf = process.argv[2] ?? '~/firmware/reference/firmware.elf'
+const debugElf = process.argv[3] ?? '~/firmware/reference-debug/firmware.elf'
 for (const [label, elf] of [['release', releaseElf], ['debug', debugElf]]) {
   if (!fs.existsSync(elf)) {
     console.log(`[skip] ${label} ELF not found: ${elf}`)

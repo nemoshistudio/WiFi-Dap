@@ -145,7 +145,7 @@ static void test_blob_layout(void)
 	fill_cred(&rec, SSID_A, PASS_A, ts, 42);
 	CHECK_INT(wifi_cred_record_pack(&rec, buf, sizeof(buf)), 0, "record_pack succeeds");
 
-	CHECK_INT(buf[0], (uint8_t) 'B', "blob[0] is the first SSID byte");
+	CHECK_INT(buf[0], (uint8_t) SSID_A[0], "blob[0] is the first SSID byte");
 	CHECK_INT(buf[33], (uint8_t) 'p', "blob[33] is the first password byte");
 	CHECK_INT(buf[98], (uint8_t) (ts >> 0), "blob[98] is ts byte 0 (little endian)");
 	CHECK_INT(buf[99], (uint8_t) (ts >> 8), "blob[99] is ts byte 1");
@@ -683,7 +683,7 @@ static void test_ap_ssid(void)
 	memset(out, 0, sizeof(out));
 	CHECK_INT(wifi_cred_make_default_ap_ssid(mac_upper, out), 0, "AP SSID: valid MAC succeeds");
 	CHECK_STR(out, "WiFi-Dap-ABCD", "AP SSID: last two MAC bytes upper-case hex");
-	CHECK_INT((int) strlen(out), 18, "AP SSID: default length is 18 bytes");
+	CHECK_INT((int) strlen(out), 13, "AP SSID: default length is 13 bytes");
 
 	CHECK_INT(wifi_cred_make_default_ap_ssid(mac_zero, out), 0, "AP SSID: zero MAC succeeds");
 	CHECK_STR(out, "WiFi-Dap-0000", "AP SSID: zero MAC suffix");

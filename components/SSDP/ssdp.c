@@ -34,7 +34,7 @@
 #define SSDP_MANUFACTURER "允斯工作室"
 
 #ifndef SSDP_MODEL_URL
-#define SSDP_MODEL_URL "https://yunsi.studio/"
+#define SSDP_MODEL_URL "https://github.com/nemoshistudio/WiFi-Dap"
 #endif
 
 static struct ssdp_ctx_t {
@@ -370,7 +370,7 @@ int ssdp_get_schema_str(char *buf, uint32_t buf_len)
 		"<modelNumber>0000</modelNumber>"
 		"<modelURL>"SSDP_MODEL_URL"</modelURL>"
 		"<manufacturer>"SSDP_MANUFACTURER"</manufacturer>"
-		"<manufacturerURL>https://yunsi.studio</manufacturerURL>"
+		"<manufacturerURL>https://github.com/nemoshistudio/WiFi-Dap</manufacturerURL>"
 		"</device>"
 		"</root>\r\n"
 		"\r\n",

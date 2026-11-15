@@ -3,31 +3,6 @@
     <h1 class="page-title">{{ translate('page.debugCurve') }}</h1>
 
     <el-alert
-        v-if="!isLocalSource"
-        class="mb-3"
-        type="warning"
-        :title="translate('curve.takeoverHint')"
-        :closable="false"
-        show-icon
-    />
-
-    <el-alert
-        v-if="kickWarning"
-        class="mb-3"
-        type="warning"
-        :title="kickWarning"
-        :closable="false"
-        show-icon
-    />
-    <el-alert
-        v-if="haltedSuspected && !isLocalSource"
-        class="mb-3"
-        type="warning"
-        :title="translate('curve.targetHalted')"
-        :closable="false"
-        show-icon
-    />
-    <el-alert
         v-if="notice"
         class="mb-3"
         :type="notice.type"
@@ -43,58 +18,18 @@
     <section class="curve-card">
       <div class="flex flex-wrap items-center gap-2">
         <el-tag :type="statusTagType" effect="dark">{{ statusText }}</el-tag>
-        <InfoTip v-if="isLocalSource" :content="translate('curve.localTakeoverNote')" :label="translate('common.details')"/>
-        <template v-if="!isLocalSource">
-          <span class="font-mono text-xs opacity-70">{{ endpointText }}</span>
-          <span v-if="targetInfo" class="font-mono text-xs opacity-70">
-            IDCODE {{ formatHex32(targetInfo.idcode) }} · AP IDR {{ formatHex32(targetInfo.apIdr) }}
-            <template v-if="targetInfo.swdClockHz"> · SWD {{ (targetInfo.swdClockHz / 1_000_000).toFixed(1) }} MHz</template>
-          </span>
-        </template>
         <span class="flex-1"></span>
 
-        <template v-if="isLocalSource">
-          <el-button v-if="!sampling" type="primary" :disabled="localStartDisabled" @click="startSampling">
-            {{ translate('curve.start') }}
-          </el-button>
-          <el-button v-else type="warning" @click="stopSampling">
-            {{ translate('curve.stop') }}
-          </el-button>
-        </template>
-        <template v-else>
-          <el-button v-if="!connected" type="primary" :loading="connecting" @click="onConnect">
-            {{ translate('curve.connect') }}
-          </el-button>
-          <template v-else>
-            <el-button v-if="!sampling" type="primary" :disabled="seriesList.length === 0" @click="startSampling">
-              {{ translate('curve.start') }}
-            </el-button>
-            <el-button v-else type="warning" @click="stopSampling">
-              {{ translate('curve.stop') }}
-            </el-button>
-            <el-button :loading="resetting" @click="onResetTarget">{{ translate('curve.resetTarget') }}</el-button>
-            <el-button @click="onDisconnect">{{ translate('curve.disconnect') }}</el-button>
-          </template>
-          <el-button v-if="haltedSuspected" type="warning" :loading="resuming" @click="onResumeTarget">
-            {{ translate('curve.resumeTarget') }}
-          </el-button>
-        </template>
+        <el-button v-if="!sampling" type="primary" :disabled="localStartDisabled" @click="startSampling">
+          {{ translate('curve.start') }}
+        </el-button>
+        <el-button v-else type="warning" @click="stopSampling">
+          {{ translate('curve.stop') }}
+        </el-button>
         <el-button :disabled="sampleCount === 0" @click="clearData">{{ translate('curve.clear') }}</el-button>
       </div>
 
       <div class="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-        <label class="flex items-center gap-2">
-          <span class="whitespace-nowrap">{{ translate('curve.samplingSource') }}</span>
-          <InfoTip v-if="isLocalSource" :content="localModeHintText" :label="translate('common.details')"/>
-          <el-select v-model="samplingSource" size="small" style="width: 13rem" :disabled="sampling" @change="onSamplingSourceChange">
-            <el-option
-                v-for="source in SAMPLING_SOURCES"
-                :key="source"
-                :value="source"
-                :label="source === 'local' ? translate('curve.samplingSourceLocal') : translate('curve.samplingSourceWeb')"
-            />
-          </el-select>
-        </label>
         <template v-if="isLocalSource">
           <label class="flex items-center gap-2">
             <span class="whitespace-nowrap">{{ translate('curve.localTrigger') }}</span>
@@ -155,12 +90,9 @@
           <!-- task-55：函数快照（选函数/地址 → 断点 → 首个命中帧冻结/标记） -->
           <div v-if="localTrigger === 'breakpoint'" class="function-snapshot flex flex-wrap items-center gap-2 rounded border px-2 py-1 text-xs">
             <span class="font-semibold">Function snapshot</span>
-            <InfoTip
-                content="Function snapshot: select a function/address and Arm. The first FPB hit (breakpoint sampling) freezes the chart and marks that sample with cursor A. Firmware one-shot (task-57) additionally records the trigger frame and captures N post-trigger frames, then auto-stops and keeps the ring; old firmware ignores that field and Web still freezes on the first hit frame. Boundary: only the selected variables sampled at the hit (plus PC when the frame carries it) are captured — no SWO trace, no call-stack backtrace, no RTOS task awareness. Stack-frame variables are valid only while their frame is active; hits are throttled by Min interval. With multiple groups one hit samples only one group, so other groups keep their last sampled values."
-                label="Boundary"
-            />
+            
             <el-checkbox v-model="snapshotFreezeOnHit" :disabled="sampling">Freeze on hit</el-checkbox>
-            <el-checkbox v-model="snapshotFirmwareOneShot" :disabled="sampling" title="Firmware one-shot snapshot (requires new firmware; old firmware ignores the field and Web falls back to first-hit freeze)">FW one-shot</el-checkbox>
+            <el-checkbox v-model="snapshotFirmwareOneShot" :disabled="sampling" >FW one-shot</el-checkbox>
             <label v-if="snapshotFirmwareOneShot" class="flex items-center gap-1">
               <span>post frames</span>
               <el-input-number v-model="snapshotAfterFrames" :min="0" :max="CURVE_LOCAL_MAX_SNAPSHOT_AFTER" :controls="false" size="small" style="width: 4rem" :disabled="sampling"/>
@@ -204,7 +136,7 @@
             <!-- task-58：第二路 DWT comparator（固件 task-57；资源不足时原样显示固件错误） -->
             <label class="watch-second-toggle inline-flex items-center gap-1">
               <el-checkbox v-model="watchSecondEnabled" :disabled="sampling">{{ translate('curve.watchpointSecond') }}</el-checkbox>
-              <InfoTip :content="translate('curve.watchpointSecondHint')" :label="translate('common.details')"/>
+              
             </label>
             <template v-if="watchSecondEnabled">
               <span class="font-semibold text-xs">W2</span>
@@ -234,7 +166,7 @@
             <span class="watch-extra-toggle inline-flex items-center gap-1">
               <el-checkbox v-model="watchThird.enabled" :disabled="sampling">W3</el-checkbox>
               <el-checkbox v-model="watchFourth.enabled" :disabled="sampling">W4</el-checkbox>
-              <InfoTip content="Firmware task-60 supports up to 4 DWT comparators. W3/W4 are sent via the canonical watchpoints array; old firmware ignores them and arms only W1/W2 (status watch_count shows the real value). Comparator shortage is reported verbatim from firmware (DWT_CTRL / free comparator info), not guessed in the UI." label="Boundary"/>
+              
             </span>
             <template v-if="watchThird.enabled">
               <span class="font-semibold text-xs">W3</span>
@@ -332,7 +264,7 @@
             <template v-if="localStartTransport === 'json' && localStartFallbackReason"> · fallback</template>
           </span>
           <span class="inline-flex items-center gap-1">{{ translate('curve.localGroups') }}: <b>{{ localActiveGroupCount }}</b>
-            <InfoTip :content="translate('curve.localGroupingHint')" :label="translate('common.details')"/>
+            
           </span>
           <span>{{ translate('curve.localCurrentGroup') }}: <b>{{ sampling ? ((localCurrentGroup ?? 0) + 1) + '/' + localActiveGroupCount : '-' }}</b></span>
           <span>{{ translate('curve.wsTransport') }}: <b>{{ wsTransport }}</b></span>
@@ -381,7 +313,7 @@
         <span>{{ translate('curve.localFrames') }}: <b>{{ localFramesReceived }}</b></span>
         <span>{{ translate('curve.localInvalid') }}: <b>{{ localInvalidCount }}</b></span>
         <span class="inline-flex items-center gap-1">{{ translate('curve.localOutOfScope') }}: <b>{{ localOutOfScopeCount }}</b>
-          <InfoTip :content="translate('curve.localOutOfScopeHint')" :label="translate('common.details')"/>
+          
         </span>
         <span>{{ translate('curve.localOverwritten') }}: <b>{{ localOverwrittenCount }}</b></span>
         <span title="Average group rate = measured total frame rate / group count; per-group and per-variable ≈ rates are shown in the Selected rows and group-weight bar.">{{ translate('curve.localGroupRate') }}: <b>≈{{ localGroupRefreshRate.toFixed(1) }} Hz</b></span>
@@ -496,7 +428,7 @@
     <section class="curve-card">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <h2 class="inline-flex items-center gap-1 text-lg font-bold">{{ translate('curve.elfUpload') }}
-          <InfoTip :content="translate('curve.elfHint')" :label="translate('common.details')"/>
+          
         </h2>
         <el-segmented v-model="elfView" :options="elfViewOptions" size="small" class="elf-view-switch"/>
         <el-button :loading="elfParsing" :disabled="isLocalSource && sampling" @click="openElfDialog">{{ translate('curve.elfUpload') }}</el-button>
@@ -507,7 +439,7 @@
       <div v-if="elfInfo" class="mt-2">
         <p v-if="elfInfo.source === 'dwarf'" class="inline-flex items-center gap-1 text-sm">
           {{ translate('curve.dwarfParsed', {count: elfInfo.variables.length, fixed: elfInfo.dwarfWithAddress}) }}
-          <InfoTip :content="dwarfDetailsText" :label="translate('common.details')"/>
+          
         </p>
         <template v-else>
           <el-alert
@@ -523,7 +455,7 @@
           <p class="mt-1 text-sm">{{ translate('curve.elfParsed', {count: elfInfo.variables.length}) }}</p>
         </template>
         <span v-if="wideHint" class="ml-1 inline-flex align-middle">
-          <InfoTip :content="translate('curve.wideHint')" :label="translate('common.details')"/>
+          
         </span>
       </div>
       <el-alert v-if="elfError" class="mt-2" type="error" :title="elfError" :closable="false" show-icon/>
@@ -668,7 +600,7 @@
             @keyup.enter="addManualAddress"
         />
         <el-button size="small" @click="addManualAddress">{{ translate('curve.addAddress') }}</el-button>
-        <InfoTip v-if="isLocalSource && seriesList.length === 0" :content="translate('curve.localSelectHint')" :label="translate('common.details')"/>
+        
       </div>
       </div>
 
@@ -962,125 +894,6 @@
       </div>
     </section>
 
-    <!-- task-58：固件调试数据（目标 UART trace + 帧指针 backtrace，固件 task-57 原型） -->
-    <section v-if="isLocalSource" class="curve-card debug-data-panel advanced-control">
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <h2 class="inline-flex items-center gap-1 text-lg font-bold">{{ translate('curve.debugDataTitle') }}
-          <InfoTip :content="translate('curve.debugDataBoundary')" :label="translate('common.details')"/>
-        </h2>
-      </div>
-
-      <!-- 目标 UART trace：只有字节流 + 字节序号，无目标时间戳/行切分 -->
-      <div class="debug-subpanel mt-2">
-        <div class="flex flex-wrap items-center gap-2 text-xs">
-          <span class="text-sm font-semibold">{{ translate('curve.traceTitle') }}</span>
-          <el-tag size="small" :type="traceActive ? 'success' : 'info'">{{ traceActive ? translate('curve.traceActive') : translate('curve.traceInactive') }}</el-tag>
-          <el-tag size="small" type="info">{{ traceSource === 'lines' ? 'FW lines' : 'raw bytes' }}</el-tag>
-          <InfoTip :content="translate('curve.traceBoundary')" :label="translate('common.details')"/>
-          <el-button size="small" :loading="traceBusy" :disabled="traceBusy" @click="startTraceCapture">{{ translate('curve.traceStart') }}</el-button>
-          <el-button size="small" :loading="traceBusy" :disabled="traceBusy || !traceActive" @click="stopTraceCapture">{{ translate('curve.traceStop') }}</el-button>
-          <el-button size="small" :disabled="!traceHasContent" @click="clearTraceView">{{ translate('curve.traceClear') }}</el-button>
-          <label class="flex items-center gap-1">
-            <span>{{ translate('curve.traceView') }}</span>
-            <el-select v-model="traceView" size="small" style="width: 5rem">
-              <el-option value="text" :label="translate('curve.traceText')"/>
-              <el-option value="hex" :label="translate('curve.traceHex')"/>
-              <el-option value="line" label="line"/>
-            </el-select>
-          </label>
-          <label class="flex items-center gap-1">
-            <span>{{ translate('curve.tracePoll') }}</span>
-            <el-select v-model="tracePollMs" size="small" style="width: 4.8rem">
-              <el-option v-for="option in TRACE_POLL_OPTIONS" :key="option" :value="option" :label="option + ' ms'"/>
-            </el-select>
-          </label>
-          <!-- task-62：固件 task-60 行触发（仅 lines 接口支持；旧固件忽略 body 字段） -->
-          <label class="flex items-center gap-1" title="Line trigger (firmware task-60 lines interface): the line containing this pattern sets triggered/trigger_seq. Old firmware ignores the body.">
-            <span>Trigger</span>
-            <el-input v-model="traceTriggerPattern" size="small" style="width: 8rem" :disabled="traceActive" placeholder="PATTERN"/>
-            <el-checkbox v-model="traceTriggerStopAfter" :disabled="traceActive">stop after</el-checkbox>
-          </label>
-          <span v-if="traceSource === 'lines'" class="font-mono">{{ traceCounterText }}</span>
-          <template v-else>
-            <span>{{ translate('curve.traceSeq') }}: <b class="font-mono">{{ traceSeq }}</b></span>
-            <span>{{ translate('curve.traceTotal') }}: <b>{{ traceTotal ?? '-' }}</b></span>
-            <span>{{ translate('curve.traceDropped') }}: <b>{{ traceDropped ?? '-' }}</b></span>
-            <span class="opacity-60">ring {{ CURVE_LOCAL_TRACE_RING_BYTES }} B</span>
-          </template>
-          <span v-if="traceSource === 'lines' && traceTriggered" class="render-success">triggered @ line {{ traceTriggerSeq ?? '-' }}</span>
-          <span v-if="traceSource === 'lines' && traceDroppedLines !== null" class="opacity-70">dropped lines: <b>{{ traceDroppedLines }}</b></span>
-          <span v-if="traceSource === 'lines'" class="opacity-60">ring 32 lines · max 8/request</span>
-          <span v-if="traceGap" class="render-warning">{{ translate('curve.traceGap') }}</span>
-        </div>
-        <div v-if="traceError" class="mt-1 text-xs curve-field-error">{{ traceError }}</div>
-        <div v-if="traceLinesError" class="mt-1 text-xs render-warning">lines probe failed: {{ traceLinesError }} (fallback to raw bytes)</div>
-        <div v-if="traceSource === 'raw' && !traceHeadersAvailable" class="mt-1 text-xs render-warning">{{ translate('curve.traceHeadersUnavailable') }}</div>
-        <p v-if="traceSource === 'lines'" class="mt-1 text-xs opacity-70">
-          Lines and t_us come from firmware (line end time on the ESP32 esp_timer, not target MCU time); Δt in the line view is relative to the first displayed line. Missing lines are never reconstructed.
-        </p>
-        <pre v-if="traceHasContent" class="debug-pre mt-1">{{ traceContent }}</pre>
-        <p v-else class="mt-1 text-xs opacity-70">{{ traceActive ? translate('curve.traceEmptyActive') : translate('curve.traceEmpty') }}</p>
-        <p class="mt-1 text-xs opacity-70">{{ translate('curve.traceSharedUart') }}</p>
-      </div>
-
-      <!-- 帧指针 backtrace：命中后由固件保存最近一次 PC 链，ELF 符号/行表映射 -->
-      <div class="debug-subpanel mt-3">
-        <div class="flex flex-wrap items-center gap-2 text-xs">
-          <span class="text-sm font-semibold">{{ translate('curve.backtraceTitle') }}</span>
-          <InfoTip :content="translate('curve.backtraceBoundary')" :label="translate('common.details')"/>
-          <el-checkbox
-              v-model="backtraceEnabled"
-              :disabled="sampling || !backtraceTriggerAvailable"
-              :title="backtraceTriggerAvailable ? translate('curve.backtraceBoundary') : translate('curve.backtraceRequiresTrigger')"
-          >{{ translate('curve.backtraceEnable') }}</el-checkbox>
-          <span v-if="!backtraceTriggerAvailable" class="opacity-70">{{ translate('curve.backtraceRequiresTrigger') }}</span>
-          <el-button size="small" :loading="backtraceLoading" @click="fetchBacktrace(true)">{{ translate('curve.backtraceRefresh') }}</el-button>
-          <span v-if="backtraceData?.valid">{{ translate('curve.backtraceFrames', {count: backtraceData.count}) }}</span>
-          <span v-if="backtraceData?.valid && backtraceData.truncated" class="render-warning">{{ translate('curve.backtraceTruncated', {count: CURVE_LOCAL_MAX_BACKTRACE_FRAMES}) }}</span>
-        </div>
-        <div v-if="backtraceError" class="mt-1 text-xs curve-field-error">{{ backtraceError }}</div>
-        <table v-if="backtraceFrames.length > 0" class="delta-table mt-1">
-          <thead>
-          <tr>
-            <th>#</th>
-            <th>PC</th>
-            <th>{{ translate('curve.backtraceFunction') }}</th>
-            <th>{{ translate('curve.backtraceSource') }}</th>
-          </tr>
-          </thead>
-          <tbody>
-          <tr v-for="backtraceFrame in backtraceFrames" :key="backtraceFrame.index">
-            <td class="font-mono">{{ backtraceFrame.index }}</td>
-            <td class="font-mono">
-              {{ formatHex32(backtraceFrame.pc) }}
-              <span class="opacity-60">{{ backtraceFrame.returnAddress ? translate('curve.backtraceReturn') : translate('curve.backtraceHalted') }}</span>
-            </td>
-            <td class="font-mono">
-              <template v-if="backtraceFrame.functionName">
-                {{ backtraceFrame.functionName }}<template v-if="backtraceFrame.functionOffset"> +0x{{ backtraceFrame.functionOffset.toString(16) }}</template>
-                <span v-if="!backtraceFrame.functionExact" class="render-warning">{{ translate('curve.backtraceInexact') }}</span>
-              </template>
-              <span v-else class="opacity-70">{{ translate('curve.backtraceNoSymbols') }}</span>
-            </td>
-            <td class="font-mono">
-              <template v-if="backtraceFrame.file">{{ backtraceFrame.file }}:{{ backtraceFrame.line ?? '?' }}</template>
-              <span v-else class="opacity-70">{{ lineIndex ? translate('curve.backtraceNoLine') : translate('curve.backtraceNoLineIndex') }}</span>
-            </td>
-          </tr>
-          </tbody>
-        </table>
-        <p v-else-if="!backtraceError && !backtraceData" class="mt-1 text-xs opacity-70">{{ translate('curve.backtraceEmpty') }}</p>
-        <p v-if="backtraceData && !backtraceData.valid && !backtraceError" class="mt-1 text-xs render-warning">{{ translate('curve.backtraceInvalid') }}</p>
-      </div>
-
-      <!-- 未实现能力边界：只说明，不提供伪功能控件 -->
-      <div class="debug-boundaries mt-3 text-xs opacity-80">
-        <div class="font-semibold">{{ translate('curve.debugUnavailableTitle') }}</div>
-        <p>{{ translate('curve.swoUnavailable') }}</p>
-        <p>{{ translate('curve.rtosUnavailable') }}</p>
-      </div>
-    </section>
-
     <!-- FFT 频谱（简单 DFT） -->
     <section v-if="fftOpen && fftData" class="curve-card advanced-control fft-panel">
       <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -1218,7 +1031,6 @@ import {translate, translateRaw, type TranslationKeys} from '@/locales'
 import {globalNotify} from '@/composables/notification'
 import SourceBrowser from '@/components/source/SourceBrowser.vue'
 import ObjectBrowser from '@/components/object/ObjectBrowser.vue'
-import InfoTip from '@/components/InfoTip.vue'
 import {
   DEFAULT_OBJECT_ROOT_NAMES,
   defaultObjectRoot,
@@ -7165,12 +6977,12 @@ let chartWorkerStats: {
 
 // ---- task-67：可选 WebGL 曲线渲染（feature flag，默认关闭） -------------------
 // 打开方式（显式 opt-in，不做自动开启）：
-//   URL `?chartWebgl=1`（本次会话）或 localStorage `birdiebot.chart.webgl=1|auto|force`；
+//   URL `?chartWebgl=1`（本次会话）或 localStorage `wifi-dap.chart.webgl=1|auto|force`；
 // 打开后 Worker 只在“大系列（>= CHART_WEBGL_MIN_SERIES）+ 无平滑”时走 WebGL，
 // 小系列/不支持/context lost/导出/冻结仍走现有 Canvas/Worker 路径。
 // 默认关闭的原因：本机无目标机 GPU，Node/headless 只能证明 CPU 段收益，不能证明
 // 真机端到端帧率；详见 docs/web-variable-curve.md §24。
-const CHART_WEBGL_STORAGE_KEY = 'birdiebot.chart.webgl'
+const CHART_WEBGL_STORAGE_KEY = 'wifi-dap.chart.webgl'
 let chartWebglMode: ChartWebglMode = 'off'
 /** Worker 上报的最近一帧实际渲染后端（webgl2/webgl1/canvas2d）。 */
 let chartWebglRenderer: string | null = null

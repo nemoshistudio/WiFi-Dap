@@ -16,14 +16,6 @@
         </button>
 
         <router-link to="/" class="bb-brand" :title="translate('navbar.getSomeFries')">
-          <img
-              class="bb-brand__mark"
-              :class="{ 'is-inverted': theme === 'light' }"
-              :src="BRAND_MARK_64"
-              alt=""
-              width="28"
-              height="28"
-          />
           <span class="bb-brand__text">
             <span class="bb-brand__name">{{ BRAND_NAME }}</span>
             <span class="bb-brand__page">{{ currentPageTitle }}</span>
@@ -116,14 +108,6 @@
     >
       <div class="bb-drawer__head">
         <router-link to="/" class="bb-brand bb-brand--drawer" @click="sideMenuOpen = false">
-          <img
-              class="bb-brand__mark"
-              :class="{ 'is-inverted': theme === 'light' }"
-              :src="BRAND_MARK_64"
-              alt=""
-              width="30"
-              height="30"
-          />
           <span class="bb-brand__text">
             <span class="bb-brand__name">{{ BRAND_NAME }}</span>
             <span class="bb-brand__page">{{ currentPageTitle }}</span>
@@ -221,14 +205,13 @@ import { ControlEvent } from "@/api";
 import { useRoute } from "vue-router";
 import { useFullscreen } from '@vueuse/core'
 import { BRAND_NAME } from "@/constants/brand";
-import { BRAND_MARK_64 } from "@/assets/brand/brand-assets";
 import { locale, setLang } from "@/i18n"
 import { LANGUAGES, getLanguageOption } from "@/constants/languages"
 import { openCommandPalette } from "@/components/dashboard/actionBus"
 
 type Theme = 'dark' | 'light'
 /** Keep in sync with the bootstrap snippet in src/main.ts. */
-const THEME_STORAGE_KEY = 'birdiebot.theme'
+const THEME_STORAGE_KEY = 'wifi-dap.theme'
 
 const wsStore = useWsStore();
 const { isFullscreen, toggle } = useFullscreen();

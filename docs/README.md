@@ -13,7 +13,6 @@
 
 | 读者/目的 | 文档 | 说明 |
 |---|---|---|
-| **新维护者 / 交接** | [PROJECT-HANDOFF.md](PROJECT-HANDOFF.md) | **先读这份**：项目现状、设备/固件、构建/烧录/HIL、已知问题、下一步与禁止事项 |
 | 新用户 / 烧录与使用 | [README_CN.md](../README_CN.md) / [README.md](../README.md) | 项目定位、功能矩阵、引脚、构建烧录、Web UI、调试接入、安全默认、故障排查（已按 final slim 更新） |
 | **离线 HTML 手册** | [manual/index.html](manual/index.html)（快速上手）/ [manual/manual.html](manual/manual.html)（完整手册）/ [manual/developer.html](manual/developer.html)（开发者附录） | 三本独立离线静态手册，浏览器直接打开；**不随固件发布、Web UI 无入口**（B5 已移除在线手册入口） |
 | **当前功能状态 / 恢复** | [feature-flags.md](feature-flags.md) | final slim 移除项（A1/A2/H1/H3/J1/M1/C4、B2/B3/B5）、Kconfig 开关、备份 tag `backup/full-features-2026-10-26`、逐项恢复步骤、资源收益、验证记录 |
@@ -82,7 +81,6 @@
 | [analysis/slim-hil/README.md](../analysis/slim-hil/README.md) | **final slim HIL 证据** | S3(F407) + C5(H7) 真机报告 JSON/时间戳：gate/SWD 矩阵/soak/USBIP；S3 600 s、C5 180 s clean | ✅ 已入库（commit `hil/slim`） |
 | ~~hardware-test-ota.md~~ | 历史清单 | OTA 硬件验收（首烧/上传/错误注入/回滚） | 📦 已归档：[archive/removed-features/hardware-test-ota.md](archive/removed-features/hardware-test-ota.md) |
 | ~~ota_upload.py / ota-info~~ | 历史脚本/子命令 | OTA 上传与 module 5 轮询 | 脚本保留，仅 full 构建适用（见 [feature-flags.md](feature-flags.md)） |
-| [merge-and-verification-2026-10-21.md](merge-and-verification-2026-10-21.md) | 合并 + 全量验证报告 | 2026-10-21 全功能合并清单、构建矩阵、host 测试、真机验证数据（历史） | ✅ 已入库（历史） |
 | [c1-ncm-status.md](c1-ncm-status.md) / [c1-second-session-analysis.md](c1-second-session-analysis.md) | C1 有线 DAP 状态/根因 | USB-NCM 双会话根因/修复、第二会话 `CMD_INFO` 证据链（历史） | ✅ 已入库（2026-10-21） |
 | [h7-flash-speedup.md](h7-flash-speedup.md) | 速度优化报告 | H7 烧录/调试 A/B 实测（历史） | ✅ 已入库（2026-10-21） |
 | [web-variable-curve.md](web-variable-curve.md) / [target-flash-formats.md](target-flash-formats.md) | Web 功能说明 | 变量曲线（含 C4 ≤64 说明）、目标烧录多格式与 SHA 契约 | ✅ 已入库 |

@@ -177,7 +177,7 @@ EXIT_UNREACHABLE = 3
 TOOL_NAME = "birdiebot-wifi-dap-hil-extended"
 TOOL_VERSION = 1
 
-DEFAULT_HOST = "<device-ip>"
+DEFAULT_HOST = "192.168.7.1"
 DEFAULT_DURATION = 20.0            # short soak smoke (task baseline: 1800 s)
 DEFAULT_OPENOCD = os.path.join(REPO_ROOT, "build/openocd-master-install/bin/openocd")
 DEFAULT_OPENOCD_SCRIPTS = os.path.join(
@@ -691,7 +691,7 @@ class FakeDevice:
         self.curve_error = curve_error
         self.heap_free = heap_free
         self.heap_largest = heap_largest
-        self.uid = "<target-uid>"
+        self.uid = "0123456789ABCDEF01234567"
         self.family = "stm32h7"
         self.series = "STM32H7"
         self.device = "STM32H723/H725/H730/H733/H735"

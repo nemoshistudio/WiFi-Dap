@@ -326,7 +326,6 @@ function PC range:
   body buffer (HTTP `s_json` 1280 B); the engine only keeps a const pointer
   while running and the parser refuses to overwrite it until the engine is idle
   (start returns 409 busy).  Builds stay far below the ESP32/S3 DRAM budget
-  (measured image sizes are reported in `PHASE0-1-REPORT.md` §16).
   Logical limits reported by the parser and `GET /api/curve/status`
   (`max_groups`/`max_series`/`max_series_per_group`/`expr_pool_max`/
   `expr_pool_used`): groups 1..8, series/group 1..64, total series <=512,

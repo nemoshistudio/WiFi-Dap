@@ -62,7 +62,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
-IMAGE="$HOME/reference firmware/firmware/reference-board/reference/firmware.bin"
+IMAGE="~/firmware/reference/firmware.bin"
 EXPECTED_SHA256=""
 OPENOCD="$REPO_ROOT/build/openocd-master-install/bin/openocd"
 SCRIPTS="$REPO_ROOT/build/openocd-master-install/share/openocd/scripts"

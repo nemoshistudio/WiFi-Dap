@@ -85,7 +85,7 @@ except ImportError as exc:  # pragma: no cover - shipped side by side
           f"(keep both scripts in scripts/): {exc}", file=sys.stderr)
     raise SystemExit(2)
 
-DEFAULT_IMAGE = Path("$HOME/reference firmware/firmware/reference-board/reference/firmware.bin")
+DEFAULT_IMAGE = Path("~/firmware/reference/firmware.bin")
 DEFAULT_OPENOCD = REPO_ROOT / "build/openocd-master-install/bin/openocd"
 DEFAULT_SCRIPTS = REPO_ROOT / "build/openocd-master-install/share/openocd/scripts"
 CANDIDATE_OPENOCD = REPO_ROOT / "build/openocd-master-speed/install/bin/openocd"

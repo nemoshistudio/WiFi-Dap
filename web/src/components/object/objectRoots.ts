@@ -124,7 +124,7 @@ export function isFixedAddressNode(node: VariableNode | null | undefined): boole
 }
 
 /**
- * Pointer type display (`Foo *`, `Robot::TargetApp *`).
+ * Pointer type display (`Foo *`, `TargetApp *`).
  * Qualifiers (`const`) are ignored so `const Foo *` still counts as a pointer.
  */
 export function isPointerTypeName(typeName: string | null | undefined): boolean {

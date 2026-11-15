@@ -147,7 +147,7 @@ function fixtureHandle() {
     name: 'target_debug_handle',
     shortName: 'target_debug_handle',
     qualifiedName: 'target_debug_handle',
-    typeName: 'Robot::TargetApp *',
+    typeName: 'TargetApp *',
     address: HANDLE_ADDRESS,
     size: 4,
     sampleable: true,
@@ -244,7 +244,7 @@ function fixtureVariables() {
     sampleable: false,
     children: [field('.gone', 'uint32_t', {address: 0x20000020})],
   }
-  const duplicateHandle = {...fixtureHandle(), typeName: 'Robot::TargetApp *'}
+  const duplicateHandle = {...fixtureHandle(), typeName: 'TargetApp *'}
   return [unsampleableAggregate, scalar, handle, local, snapshot, pointerToScalar, crc, frameRegister, duplicateHandle]
 }
 
@@ -253,7 +253,7 @@ section('[1] Address / type / location helpers')
 // ---------------------------------------------------------------------------
 eq('formatObjectAddress: 32-bit hex', or.formatObjectAddress(HANDLE_ADDRESS), '0x24002FA8')
 eq('formatObjectAddress: zero', or.formatObjectAddress(0), '0x00000000')
-eq('isPointerTypeName: pointer', or.isPointerTypeName('Robot::TargetApp *'), true)
+eq('isPointerTypeName: pointer', or.isPointerTypeName('TargetApp *'), true)
 eq('isPointerTypeName: const pointer', or.isPointerTypeName('const Foo *'), true)
 eq('isPointerTypeName: reference is not pointer', or.isPointerTypeName('Foo &'), false)
 eq('isPointerTypeName: object', or.isPointerTypeName('Component::CMD'), false)
@@ -295,7 +295,7 @@ eq('preferred root fields', {
 }, {
   key: `target_debug_handle@${HANDLE_ADDRESS.toString(16)}`,
   name: 'target_debug_handle',
-  typeName: 'Robot::TargetApp *',
+  typeName: 'TargetApp *',
   address: HANDLE_ADDRESS,
   depth: 0,
   childCount: 3,
@@ -312,7 +312,7 @@ eq('find root by key', or.findObjectRoot(roots, roots[0].key)?.name, 'target_deb
 eq('find root by full name', or.findObjectRoot(roots, 'target_debug_handle')?.name, 'target_debug_handle')
 eq('find missing root', or.findObjectRoot(roots, 'nope@0'), null)
 eq('matchesPreferredRootName: last scope', or.matchesPreferredRootName({
-  name: 'Robot::TargetApp::target_debug_handle',
+  name: 'TargetApp::target_debug_handle',
   shortName: 'target_debug_handle',
   typeName: 'Robot *',
   address: 1,
@@ -710,7 +710,7 @@ check('docs: object-watch.md covers API + integration', ['ObjectBrowser', 'disco
 // ---------------------------------------------------------------------------
 section('[12] Optional real ELF smoke (reference firmware.elf)')
 // ---------------------------------------------------------------------------
-const elfPath = process.argv[2] ?? process.env.OBJECT_ELF ?? '$HOME/reference firmware/firmware/reference-board/reference/firmware.elf'
+const elfPath = process.argv[2] ?? process.env.OBJECT_ELF ?? '~/firmware/reference/firmware.elf'
 if (!fs.existsSync(elfPath)) {
   console.log(`  skip real ELF smoke: ${elfPath} not found (set OBJECT_ELF or pass a path)`)
 } else {
@@ -726,7 +726,7 @@ if (!fs.existsSync(elfPath)) {
   const realDefault = or.defaultObjectRoot(realRoots)
   check('ELF: preferred root is target_debug_handle', !!realDefault && realDefault.name === 'target_debug_handle', realDefault?.name)
   if (realDefault) {
-    check('ELF: root is fixed-address pointer', /Robot::TargetApp \*/.test(realDefault.typeName)
+    check('ELF: root is fixed-address pointer', /TargetApp \*/.test(realDefault.typeName)
       && realDefault.address !== 0 && realDefault.baseKind === 'pointer' && realDefault.liveSamplable,
     `${realDefault.typeName}@${realDefault.address.toString(16)}`)
     eq('ELF: 5 top-level modules', realDefault.childCount, 5)

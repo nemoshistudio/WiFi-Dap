@@ -895,7 +895,7 @@ export function buildTargetDiagnostics(input: TargetDiagnosticsInput): Record<st
     const match = autoMatchTargetProfile(detected)
     const profile = match?.profile ?? null
     return {
-        kind: 'birdiebot-target-diagnostics',
+        kind: 'wifi-dap-target-diagnostics',
         version: 2,
         generatedAt: input.generatedAt ?? null,
         appVersion: input.appVersion ?? null,
@@ -946,6 +946,6 @@ export function buildTargetDiagnosticsJson(input: TargetDiagnosticsInput): strin
     try {
         return JSON.stringify(buildTargetDiagnostics(input), null, 2)
     } catch {
-        return JSON.stringify({kind: 'birdiebot-target-diagnostics', version: 2, error: 'serialization failed'})
+        return JSON.stringify({kind: 'wifi-dap-target-diagnostics', version: 2, error: 'serialization failed'})
     }
 }

@@ -478,7 +478,8 @@ Full-build OTA error codes and rollback steps are historical: [docs/archive/remo
 - **Current feature state**: [docs/feature-flags.md](docs/feature-flags.md) (final slim removals, Kconfig switches, backup tag, restore steps); [docs/archive/README.md](docs/archive/README.md) (historical evidence / removed features).
 - **Key contracts**: [protocol.md](docs/protocol.md) (JSON/WS protocol), [wifi-credential-memory.md](docs/wifi-credential-memory.md), [versioning.md](docs/versioning.md), [board-pins.md](docs/board-pins.md), [web-status-ui.md](docs/web-status-ui.md) (status page + compact strip).
 - **Security**: [docs/security.md](docs/security.md) (deployment hardening guide); [docs/security-review-web.md](docs/security-review-web.md) (historical full-build Web/OTA/WiFi security review — OTA/discovery endpoints are removed in slim and the Host/Origin guard is off by default).
-- **Feedback**: author homepage <https://yunsi.studio/>; project homepage <https://yunsi.studio/wireless-debugger>.
+- **Feedback**: open an issue on the project repository (GitHub Issues).
+- **Authorship**: this repository is maintained by its own contributors; the upstream projects below are dependencies and are credited, not the authors of this repository.
 - **License** (mixed licensing; full statement in [NOTICE](NOTICE), texts in [LICENSES/](LICENSES/)):
   - **Project-original parts**: **Apache License 2.0** (root [LICENSE](LICENSE) / [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)); individual files may state another SPDX license in their header (e.g. some `scripts/` are SPDX MIT).
   - **Third-party components keep their upstream licenses**:

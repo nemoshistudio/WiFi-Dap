@@ -286,7 +286,7 @@ def dry_run() -> int:
         log("  [%s] %s" % ("ok" if passed else "FAIL", name))
         failed += 0 if passed else 1
     # Command construction sanity (no hardware touched).
-    root_argv = [default_root_helper()] + ["usbip", "attach", "-r", "<device-ip>",
+    root_argv = [default_root_helper()] + ["usbip", "attach", "-r", "192.168.7.1",
                                            "-b", "1-1"]
     log("  root helper command: %s" % " ".join(shlex.quote(part) for part in root_argv))
     return 0 if failed == 0 else 1
@@ -295,7 +295,7 @@ def dry_run() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="HIL regression for the task-66 target/info -> USBIP CMD_INFO bug")
-    parser.add_argument("--host", default="<device-ip>",
+    parser.add_argument("--host", default="192.168.7.1",
                         help="device IP for usbip attach + HTTP (default: %(default)s)")
     parser.add_argument("--port", type=int, default=80, help="device HTTP port")
     parser.add_argument("--busid", default="1-1", help="usbip remote bus id")

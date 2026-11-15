@@ -143,7 +143,7 @@ Phase 1：
 
 - 固定地址 `xTickCount`：100–101 Hz、60 s / 5,966 帧、Invalid 0、
   Overwritten 0、heap 稳定 42.1 MB；停止后 Web-DAP 可正常重连，目标已恢复运行。
-- 全局 `target_debug_handle->bmi088_.accl_ x/y/z`：100 Hz、约 450 帧/5 s、
+- 全局 `target_debug_handle->imu_.accl_ x/y/z`：100 Hz、约 450 帧/5 s、
   Invalid 0、Overwritten 0，数值正常（accel_z≈9.7 m/s²）。
 - 栈帧变量 `delay`（`[r13+…]`）：100 Hz 采样，Invalid≈43/470（函数帧不在栈上时
   失效，符合预期），Overwritten 0。
@@ -238,13 +238,13 @@ Phase 1：
 在 reference 固件中新增 BMI088 调试快照全局结构（`src/component/comp_debug_snapshot.*`，
 `PraseAccel/PraseGyro` 末尾 seqlock 写入），固件编译并烧录后：
 
-- 快照符号：`g_bmi088_debug_snapshot` @ **0x20002270**，60 B；
+- 快照符号：`g_imu_debug_snapshot` @ **0x20002270**，60 B；
   字段 `raw_accel[3]/raw_gyro[3]/raw_temp/accel[3]/gyro[3]/temp/accel_count/gyro_count`。
-- Web 上传 `reference-debug-O0-snapshot/firmware.elf`，本地模式 Periodic + 5 ms：
+- Web 上传 `reference-debug-snapshot/firmware.elf`，本地模式 Periodic + 5 ms：
   **201 Hz、Invalid 0、Overwritten 0、Halt OFF**；
   选择 `raw_accel[0..2]` 时曲线持续更新（示例 -4912/-2292/648），无需 halt 目标。
 - 目标固件运行正常（`g_assert_count=0`，`target_debug_handle` 初始化，tick 递增）。
-- 产物：`firmware/reference-board/reference-debug-O0-snapshot/`（ELF sha256
+- 产物：`firmware/reference-board/reference-debug-snapshot/`（ELF sha256
   `c92df21b4dee763dd77af4f9cfe4b67c9de863f03b4fceacd20e0bbcc5706f32`，
   Windows `C:\Users\reference firmware\ozone-test\25mo​ni-debug-O0-snapshot\`）。
 - 注意：快照源码在 reference firmware 工作树（未 commit）；构建用的 `-O0`/cap cutoff/

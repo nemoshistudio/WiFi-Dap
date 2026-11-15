@@ -4,7 +4,8 @@ WiFi Dap
 Copyright and third-party attribution notice.
 
 This file summarises the licensing of the WiFi Dap firmware, Web UI,
-tooling and documentation. The authoritative license texts are kept in the
+tooling and documentation. Upstream projects below are dependencies and are
+credited as third-party sources; they are not the authors of this repository. The authoritative license texts are kept in the
 LICENSES/ directory; per-directory LICENSE / LICENCE.txt files from upstream
 projects are preserved where provided.
 

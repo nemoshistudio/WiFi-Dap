@@ -154,7 +154,7 @@ void app_main()
 	/* docs/versioning.md §2.4: first log line, before WiFi/mDNS can flood it. */
 	{
 		const esp_app_desc_t *app = esp_app_get_description();
-		ESP_LOGI("BIRDIEBOT", "WiFi Dap fw=%s proto=%d board=%s idf=%s",
+		ESP_LOGI("WIFI-DAP", "WiFi Dap fw=%s proto=%d board=%s idf=%s",
 		         app ? app->version : "unknown",
 		         BIRDIEBOT_PROTOCOL_VERSION,
 		         BIRDIEBOT_BOARD_STR,
@@ -171,7 +171,7 @@ void app_main()
 	 * WiFi / lwIP budget is visible after the PSRAM migrations. */
 #if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
                                 defined(CONFIG_IDF_TARGET_ESP32S3))
-	ESP_LOGI("BIRDIEBOT",
+	ESP_LOGI("WIFI-DAP",
 	         "PSRAM ready: total_free=%u internal_free=%u internal_largest=%u "
 	         "psram_free=%u psram_largest=%u",
 	         (unsigned)esp_get_free_heap_size(),
@@ -194,7 +194,7 @@ void app_main()
 	{
 		esp_err_t wired_err = birdiebot_wired_dap_init();
 		if (wired_err != ESP_OK) {
-			ESP_LOGW("BIRDIEBOT", "wired DAP (USB-NCM) init failed: %s; continuing Wi-Fi only",
+			ESP_LOGW("WIFI-DAP", "wired DAP (USB-NCM) init failed: %s; continuing Wi-Fi only",
 			         esp_err_to_name(wired_err));
 		}
 	}
@@ -224,7 +224,7 @@ void app_main()
 			heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 		esp_err_t reserve_err = dap_handle_prealloc_ringbuffers();
 
-		ESP_LOGI("BIRDIEBOT",
+		ESP_LOGI("WIFI-DAP",
 		         "heap before DAP ring reserve: free=%u largest=%u -> reserve %s "
 		         "(free=%u largest=%u)",
 		         (unsigned)free_before, (unsigned)largest_before,
@@ -241,7 +241,7 @@ void app_main()
 	/* P0-2 diagnostics: heap state after NCM/WiFi stack initialization.  The
 	 * single largest block is what the JSON curve body / OTA buffers need, so
 	 * log it here (also visible through GET /api/target/status). */
-	ESP_LOGI("BIRDIEBOT", "heap after network init: free=%u largest=%u",
+	ESP_LOGI("WIFI-DAP", "heap after network init: free=%u largest=%u",
 	         (unsigned)esp_get_free_heap_size(),
 	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT |
 	                                                    MALLOC_CAP_INTERNAL));
@@ -253,7 +253,7 @@ void app_main()
 #if defined(CONFIG_SPIRAM) && (defined(CONFIG_IDF_TARGET_ESP32C5) || \
                                 defined(CONFIG_IDF_TARGET_ESP32S3))
 #define BIRDIEBOT_LOG_INTERNAL_HEAP(stage)                                   \
-	ESP_LOGI("BIRDIEBOT", "internal heap %-18s free=%u largest=%u",         \
+	ESP_LOGI("WIFI-DAP", "internal heap %-18s free=%u largest=%u",         \
 	         stage,                                                          \
 	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |         \
 	                                           MALLOC_CAP_8BIT),             \
@@ -281,7 +281,7 @@ void app_main()
 		const esp_err_t dap_tcp_err = dap_tcp_server_start();
 		if ((dap_tcp_err != ESP_OK) &&
 		    (dap_tcp_err != ESP_ERR_NOT_SUPPORTED)) {
-			ESP_LOGW("BIRDIEBOT",
+			ESP_LOGW("WIFI-DAP",
 			         "DAP TCP backend not started: %s",
 			         esp_err_to_name(dap_tcp_err));
 		}
@@ -310,13 +310,13 @@ void app_main()
             xTaskCreatePinnedToCore(DAP_Thread, "DAP_Task", 3072, NULL,
                                     CONFIG_BIRDIEBOT_DAP_TASK_PRIORITY, NULL,
                                     DAP_TASK_AFFINITY);
-        ESP_LOGI("BIRDIEBOT", "DAP task create: %s (internal free=%u largest=%u)",
+        ESP_LOGI("WIFI-DAP", "DAP task create: %s (internal free=%u largest=%u)",
                  dap_task_ret == pdPASS ? "ok" : "FAILED",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
                                                             MALLOC_CAP_8BIT));
         if (dap_task_ret != pdPASS) {
-            ESP_LOGE("BIRDIEBOT", "DAP task creation failed: no internal RAM");
+            ESP_LOGE("WIFI-DAP", "DAP task creation failed: no internal RAM");
             dap_handle_note_task_create(false);
         }
     }
@@ -340,7 +340,7 @@ void app_main()
 			xTaskCreateWithCaps(uart_bridge_task, "uart_server", 4096, NULL, 2,
 			                    NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 		if (uart_task_ret != pdPASS) {
-			ESP_LOGW("BIRDIEBOT", "uart_server PSRAM stack unavailable, "
+			ESP_LOGW("WIFI-DAP", "uart_server PSRAM stack unavailable, "
 			         "using internal RAM");
 			xTaskCreate(uart_bridge_task, "uart_server", 4096, NULL, 2, NULL);
 		}

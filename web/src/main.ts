@@ -58,7 +58,7 @@ if (import.meta.env.VITE_APP_MODE === 'dev') {
  * the light theme does not flash dark. Keep the storage key in sync with
  * src/views/navigation/NavBar.vue (the toggle lives there).
  */
-const THEME_STORAGE_KEY = 'birdiebot.theme'
+const THEME_STORAGE_KEY = 'wifi-dap.theme'
 const theme: 'dark' | 'light' = (() => {
   try {
     return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'

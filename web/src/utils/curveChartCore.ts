@@ -54,7 +54,7 @@ function parseChartWebglToken(raw: string | null | undefined): ChartWebglMode | 
 /**
  * 解析 WebGL feature flag（纯函数，Node 可测）：
  *  1. URL query `?chartWebgl=1|auto|force|0`（会话级覆盖，便于真机 A/B 对比）；
- *  2. localStorage `birdiebot.chart.webgl`（持久 opt-in）；
+ *  2. localStorage `wifi-dap.chart.webgl`（持久 opt-in）；
  *  3. 默认 `off`。
  * 非法值忽略并继续向下回退（不抛错）。
  */

@@ -322,13 +322,13 @@ class ImageRequirementTests(unittest.TestCase):
         "supported": True,
         "family": "stm32h7",
         "flash_size": 1048576,
-        "uid": "<target-uid>",
+        "uid": "0123456789ABCDEF01234567",
     }
 
     def test_valid_h7_image_passes(self) -> None:
         errors, facts = ext.check_image_requirements(
             FLASH_IMAGE, expect_sha256=FLASH_SHA,
-            expect_uid="1e00 0d00 1151 3332 3738 3732",
+            expect_uid="0123 4567 89ab cdef 0123 4567",
             expect_flash_kib=1024, target=self.TARGET, require_h7=True)
         self.assertEqual(errors, [])
         self.assertEqual(facts["image_size"], 4096)

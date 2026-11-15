@@ -30,7 +30,7 @@
  *
  * 常用参数：
  *   --url <url>            页面地址（默认 http://<device-ip>/#/debug-curve）
- *   --elf <path>           调试 ELF（默认 $HOME/reference firmware/firmware/reference-board/reference-debug-O0/firmware.elf）
+ *   --elf <path>           调试 ELF（默认 ~/firmware/reference-debug/firmware.elf）
  *   --out <json>           结果 JSON（默认 /tmp/curve-perf-before.json）
  *   --md <path>            额外输出 Markdown 摘要（可选）
  *   --compare <json>       与历史 JSON 对比，打印/写入 delta
@@ -75,7 +75,7 @@ const WEB_ROOT = path.resolve(__dirname, '..')
 function parseArgs(argv) {
   const opts = {
     url: 'http://<device-ip>/#/debug-curve',
-    elf: '$HOME/reference firmware/firmware/reference-board/reference-debug-O0/firmware.elf',
+    elf: '~/firmware/reference-debug/firmware.elf',
     out: '/tmp/curve-perf-before.json',
     md: '',
     compare: '',

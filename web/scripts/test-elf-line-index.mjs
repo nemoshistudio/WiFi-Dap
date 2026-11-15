@@ -28,8 +28,8 @@ import {fileURLToPath} from 'node:url'
 import {execFileSync} from 'node:child_process'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const releaseElf = process.argv[2] ?? '$HOME/reference firmware/firmware/reference-board/reference/firmware.elf'
-const debugElf = process.argv[3] ?? '$HOME/reference firmware/firmware/reference-board/reference-debug-O0/firmware.elf'
+const releaseElf = process.argv[2] ?? '~/firmware/reference/firmware.elf'
+const debugElf = process.argv[3] ?? '~/firmware/reference-debug/firmware.elf'
 
 // ---------------------------------------------------------------------------
 // 打包 TS（项目自带 esbuild，离线）

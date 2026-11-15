@@ -143,7 +143,7 @@ interface PaletteSection {
   items: PaletteItem[];
 }
 
-const RECENT_STORAGE_KEY = 'birdiebot.palette.recent.v1';
+const RECENT_STORAGE_KEY = 'wifi-dap.palette.recent.v1';
 const RECENT_LIMIT = 5;
 /** Variable/function search only kicks in from 2 characters (huge ELF indexes). */
 const ELF_SECTION_LIMIT = 8;

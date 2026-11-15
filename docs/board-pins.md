@@ -116,7 +116,7 @@ Kconfig 会按 `idf.py set-target` 自动给出默认值（`components/board/Kco
 
 > 板身份：`BIRDIEBOT_BOARD_ID="wifi_dap_s3"`、`BIRDIEBOT_BOARD_NAME="WiFi DAP S3"`。
 > 硬件模组为 **N16R8（实为 16 MB Flash）**，但当前 SDK 仍按 **8 MB 分区**（见
-> [PROJECT-HANDOFF.md](PROJECT-HANDOFF.md) §5）；本节标题的 8MB 是**分区口径**。
+）；本节标题的 8MB 是**分区口径**。
 
 | 功能 | 宏 | 引脚 | 说明 |
 |---|---|---|---|

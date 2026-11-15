@@ -11,7 +11,7 @@
  *  - 点击候选（同名同行多候选、同文件同名、项目内同名）；
  *  - 源码 tokenizer（变量高亮/字符串/注释/预处理）+ 块注释跨行状态；
  *  - 行虚拟化窗口；LRU 缓存；labels 默认文案/占位符；
- *  - 可选：只读扫描真实项目根目录 $HOME/reference firmware（不存在则 SKIP）。
+ *  - 可选：只读扫描真实项目根目录 ~/reference-firmware（不存在则 SKIP）。
  *
  * 用法：
  *   node scripts/test-source-project.mjs
@@ -726,7 +726,7 @@ check('task43: index.ts 导出 lineTarget API',
 // ---------------------------------------------------------------------------
 console.log('\n[10] 可选：只读扫描真实项目根目录')
 // ---------------------------------------------------------------------------
-const realRoot = process.env.REFERENCE_ROOT ?? '$HOME/reference firmware'
+const realRoot = process.env.REFERENCE_ROOT ?? '~/reference-firmware'
 if (fs.existsSync(realRoot)) {
   const ignored = (name) => sp.isIgnoredDirectory(name)
   const sourceEntries = []

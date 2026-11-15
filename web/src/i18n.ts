@@ -8,7 +8,7 @@ export type Locale = (typeof availableLanguages)[number]
 
 export const messages = { zh, en } as const
 
-const LOCALE_STORAGE_KEY = 'birdiebot.lang'
+const LOCALE_STORAGE_KEY = 'wifi-dap.lang'
 
 function isLocale(value: unknown): value is Locale {
     return value === 'zh' || value === 'en'
