@@ -178,7 +178,7 @@ python3 scripts/check_partitions.py --require-bin     # 额外要求已构建的
 python3 scripts/check_partitions.py --skip-layout     # 只查 app 大小/内嵌版本
 ```
 
-校验内容（历史契约 `docs/archive/removed-features/ota-local-upload.md` §1；final slim 保留双槽布局与回滚，但无 Web OTA 端点）：
+校验内容（历史契约 `tests/host/fixtures/ota-upload-contract.md` §1；final slim 保留双槽布局与回滚，但无 Web OTA 端点）：
 
 - `partitions/partitions_8mb_ota.csv`：nvs 24K / phy 4K / otadata 8K / ota_0 3M @0x20000 /
   ota_1 3M @0x320000 / wt_nvs 64K / coredump 64K，ptable @0x8000，末尾 0x640000~0x800000 预留；

@@ -17,6 +17,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 DOCS = ROOT / "docs"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PORT_PARTITIONS = ROOT / "partitions"
 
 
@@ -39,6 +40,13 @@ def read_doc(name: str) -> str:
     path = DOCS / name
     if not path.is_file():
         raise FileNotFoundError(f"contract document not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def read_fixture(name: str) -> str:
+    path = FIXTURES / name
+    if not path.is_file():
+        raise FileNotFoundError(f"test fixture not found: {path}")
     return path.read_text(encoding="utf-8")
 
 

@@ -1,6 +1,6 @@
 """Host tests for the OTA upload contract (Wave 3 / WP-302).
 
-Contract source: docs/archive/removed-features/ota-local-upload.md (v1 frozen) + docs/protocol.md.
+Contract source: tests/host/fixtures/ota-upload-contract.md (v1 frozen) + docs/protocol.md.
 Covers the parts that can be tested without a device:
 
   * SHA-256 file digest (``scripts/ota_upload.py:sha256_file``) against known
@@ -30,12 +30,12 @@ from pathlib import Path
 import script_loader as sl
 
 ota = sl.load_script("ota_upload")
-OTA_DOC = sl.read_doc("archive/removed-features/ota-local-upload.md")
+OTA_DOC = sl.read_fixture("ota-upload-contract.md")
 PROTOCOL_DOC = sl.read_doc("protocol.md")
 
 STATES = ("IDLE", "RECEIVING", "VERIFYING", "READY", "APPLYING", "ERROR")
 
-# Frozen copy of docs/archive/removed-features/ota-local-upload.md §3.4 (kept independent of the parser).
+# Frozen copy of tests/host/fixtures/ota-upload-contract.md §3.4 (kept independent of the parser).
 EXPECTED_HTTP_MAP = {
     400: 5,
     403: 5,

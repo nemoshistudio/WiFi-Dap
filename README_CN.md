@@ -87,7 +87,6 @@ python3 scripts/ota_upload.py --host 192.168.7.1 \
 
 - [协议](docs/protocol.md)
 - [引脚](docs/board-pins.md)
-- [功能开关](docs/feature-flags.md)
 - [本地曲线采样](docs/curve-local-sampler.md)
 - [版本](docs/versioning.md)
 

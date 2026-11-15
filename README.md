@@ -87,7 +87,6 @@ Start at [docs/README.md](docs/README.md):
 
 - [Protocol](docs/protocol.md)
 - [Board pins](docs/board-pins.md)
-- [Feature flags](docs/feature-flags.md)
 - [Local curve sampling](docs/curve-local-sampler.md)
 - [Versioning](docs/versioning.md)
 
