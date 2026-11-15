@@ -1,0 +1,22 @@
+# Experimental ESP32-S3 CMSIS-DAP over TCP backend variant (M3).
+#
+# Enables the OpenOCD `cmsis-dap backend tcp` server on port 3241 and, with
+# main/dap_tcp_bridge.c, gives it exclusive DAP ownership (DELETE_HANDLE /
+# RESET_HANDLE hand-off).  NOT part of the default build/release matrix: the
+# default CONFIG_BIRDIEBOT_DAP_TCP_ENABLE is n and nothing listens on 3241.
+# Hardware validation with OpenOCD master is pending; see
+# docs/dap-tcp-backend.md (HIL H1-H14) and docs/xrdap-learnings.md.
+#
+# Append as a second SDKCONFIG_DEFAULTS entry:
+#
+#   idf.py -B build/esp32s3-dap-tcp \
+#     -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32s3;sdkconfig.defaults.esp32s3.dap_tcp" \
+#     -D SDKCONFIG=build/esp32s3-dap-tcp/sdkconfig set-target esp32s3
+#   idf.py -B build/esp32s3-dap-tcp build
+#
+# Notes:
+#  - main/dap_configuration.h caps DAP_PACKET_SIZE to 1024 in this build
+#    (OpenOCD's TCP backend allocates exactly 1024 bytes per packet).
+#  - The USBIP transport in the same image also runs at 1024 instead of the
+#    S3 default 1280; use a separate build if you benchmark USBIP.
+CONFIG_BIRDIEBOT_DAP_TCP_ENABLE=y

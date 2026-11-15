@@ -63,7 +63,7 @@
 | 目标芯片 | ESP32-C5 | ✅ 真机验证（非发布目标）、Wi-Fi-only | ESP-IDF **v5.5.6**，8 MB 双槽布局，**无 USB-OTG/NCM**；Wi-Fi USBIP + Web/曲线/UART；UART1 桥 GPIO25/26；slim 无 Web OTA；经内置 USB Serial/JTAG + OpenOCD 刷写；实验室 bring-up + final slim HIL 有记录（非发布目标） |
 | 调试协议 | SWD / JTAG | ✅ | CMSIS-DAP 实现，引脚见 [docs/board-pins.md](docs/board-pins.md)，默认 SWD 时钟 **2 MHz** |
 | 调试协议 | SWD 高速引擎（M4） | ✅ 代码完成，HIL 待办 | ESP32-S3 专用 GPIO 高速路径：默认 160 MHz CPU 下 **20 MHz**，240 MHz 变体下 **24 MHz**；Kconfig 默认打开，仅当 host 请求 ≥12 MHz 时启用（默认时钟仍 2 MHz）；见 [docs/swd-23mhz-engine.md](docs/swd-23mhz-engine.md) |
-| 管理传输 | CMSIS-DAP over TCP 后端（M3 骨架） | 🧪 骨架，默认关闭 | 端口 **3241**，OpenOCD `cmsis-dap backend tcp` 帧格式；真正使用前需补 DAP 执行器桥接；见 [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
+| 管理传输 | CMSIS-DAP over TCP 后端（M3） | 🧪 默认关闭，HIL 待办 | 端口 **3241**，OpenOCD `cmsis-dap backend tcp` 帧格式 + DAP 执行器桥接（`main/dap_tcp_bridge.c`）；OpenOCD master 连接/init 已真机验证（2026-11-15）；见 [docs/dap-tcp-backend.md](docs/dap-tcp-backend.md) |
 | 目标烧录 | Web 直接烧录 / STM32 识别 | ✅ F4/H7 实板验证 | 浏览器上传 `.bin`/`.elf`/`.hex`/`.srec`（前端转裸镜像），ESP32 经 SWD 流式写入（扇区擦除、x64/x32、SHA-256 校验 + SWD 复位）；**全 STM32 系列识别**（DEV_ID 表）；见 [docs/stm32-web-flash-plan.md](docs/stm32-web-flash-plan.md) |
 | 传输性能 | USBIP/DAP 调优 | ✅ | A3：Wi-Fi 下 64 KB 读约 43 KiB/s（延迟受限）；目标烧录时暂停 UART 桥，Wi-Fi/HTTP 保持在线 |
 | USB 传输 | USBIP / WinUSB | ✅ | CMSIS-DAP v2，TCP **3240**；Windows 推荐 usbip-win 0.3.0 `attach_ude` |

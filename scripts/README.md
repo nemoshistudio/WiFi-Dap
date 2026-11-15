@@ -18,6 +18,7 @@ remote、不会触发 GitHub Actions（INTEGRATION-PLAN v4 §8.4）。
 | `check-release-versions.sh` | 固件 tag / Web version / protocol / 镜像内嵌版本交叉校验 | WP-143 |
 | `check-protocol-version.sh` | 协议版本三源一致性门禁：C 头 == `docs/protocol.md` == `web/src/api/index.ts` | WP-143/审计 B6 |
 | `device_smoke.sh` | 设备就绪**只读**冒烟：USBIP/HTTP/WS 握手 + WS ping（OTA GET_INFO 仅 full 构建；slim 预期 unsupported），聚合 PASS/FAIL | WP-305 |
+| `dap_tcp_smoke.py` | **CMSIS-DAP over TCP（3241）真机冒烟**（M3，纯标准库、无目标 MCU）：帧格式、`DAP_Info` caps/序列号/包长、`DAP_Connect/Disconnect`、`DAP_SWJ_Clock` 20MHz↔2MHz、非法帧关连接；`--host <DAP-IP>`，2026-11-15 已在 WiFi DAP S3 上 NCM/Wi-Fi 双链路 12/12 验证 | M3 |
 | `hil_gate.py` | 真机 **HIL 回归/性能门禁**：目标检测 → 本地采样 1/5 系列 → 帧率/丢帧/heap/诊断字段 → 页面 smoke；只读、JSON+退出码、内置 `--dry-run` | task-59 |
 | `hil_extended.py` | 真机 **opt-in HIL 扩展冒烟**（默认 dry-run）：只读 preflight / soak / Web Flash（`--yes-flash`）/ OTA（`--yes-ota`）/ USBIP-OpenOCD；复用 hil_gate 的 HTTP/CBS1/CVF2 逻辑，不改默认只读行为；JSON+退出码 | task-65 |
 | `ota_upload.py` | 历史 full 构建 OTA：HTTP 直传 `/api/ota/upload` + WS 查模块 5 GET_INFO（纯标准库）；**final slim 无 Web OTA 端点，脚本仅适用于从 `backup/full-features-2026-10-26` 恢复的构建** | WP-205/305 |

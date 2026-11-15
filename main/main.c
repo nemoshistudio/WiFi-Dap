@@ -21,6 +21,7 @@
 #include "components/board/include/birdiebot_board.h"
 #include "birdiebot_probe_identity.h"
 #include "dap_tcp_server.h"
+#include "dap_tcp_bridge.h"
 
 #include <sdkconfig.h>
 
@@ -270,9 +271,12 @@ void app_main()
 	BIRDIEBOT_LOG_INTERNAL_HEAP("after webserver");
 
 	/* M3: CMSIS-DAP over TCP backend (OpenOCD `cmsis-dap backend tcp`, port
-	 * 3241).  Kconfig default off; when off the call is a safe no-op.  The
-	 * current skeleton answers through the weak hook in components/dap_tcp and
-	 * does not own the DAP engine yet (docs/dap-tcp-backend.md). */
+	 * 3241).  Kconfig default off; when off both calls are safe no-ops.
+	 * dap_tcp_bridge_init() makes main.o reference the strong DAP executor
+	 * hooks in main/dap_tcp_bridge.c (otherwise the linker would keep the weak
+	 * stubs).  Ownership hand-off (DELETE_HANDLE/RESET_HANDLE) is in that file;
+	 * see docs/dap-tcp-backend.md §7.2. */
+	dap_tcp_bridge_init();
 	{
 		const esp_err_t dap_tcp_err = dap_tcp_server_start();
 		if ((dap_tcp_err != ESP_OK) &&
