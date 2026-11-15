@@ -81,6 +81,10 @@ python3 scripts/ota_upload.py --host 192.168.7.1 \
 - **USBIP/WinUSB**、elaphureLink：使用标准 CMSIS-DAP 工具，在调试器里选择该探针。
 - 长线材建议 OpenOCD `adapter speed 16000`。
 
+## 使用
+
+Web UI、USBIP、OpenOCD、OTA 的完整步骤见 [docs/usage.md](docs/usage.md)。
+
 ## 文档
 
 入口：[docs/README.md](docs/README.md)

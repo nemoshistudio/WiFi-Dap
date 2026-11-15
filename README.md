@@ -81,6 +81,10 @@ python3 scripts/ota_upload.py --host 192.168.7.1 \
 - **USBIP/WinUSB** and elaphureLink: use standard CMSIS-DAP tooling (select the CMSIS-DAP probe in your debugger).
 - Target firmware and debugging use the same SWD pins; 16 MHz is the recommended adapter speed for long wires.
 
+## Usage
+
+See [docs/usage.md](docs/usage.md) for the Web UI, USBIP, OpenOCD and OTA workflows.
+
 ## Documentation
 
 Start at [docs/README.md](docs/README.md):
