@@ -16,13 +16,16 @@ the target itself. All paths are relative to the device HTTP server.
 ## Start body
 
 - `trigger`: `periodic`, `breakpoint` or `watchpoint`
-- `interval_us`: 1000..200000 (5000 minimum for halt triggers)
+- `interval_us`: 200..200000 (5000 minimum for halt triggers); 200/250 us
+  tiers are available for fast local sampling.
 - `series` or `groups`: 1..64 series total, up to 8 groups
 - series fields: `address` + `size`, or an address expression; optional `name`,
   `sample_every`, `format`
 - optional: `halt`, `watchpoints`, `snapshot_after`, `condition`
 
-Limits and validation are enforced in `web/src/api/curveLocal.ts`.
+Contiguous series are read with one SWD block transfer per tick; non-contiguous
+or PC-gated series fall back to per-series reads. Limits and validation are
+enforced in `web/src/api/curveLocal.ts`.
 
 ## Frames
 

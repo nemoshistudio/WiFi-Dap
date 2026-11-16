@@ -219,7 +219,7 @@
           <label class="flex items-center gap-2">
             <span class="whitespace-nowrap">{{ localTrigger === 'breakpoint' ? translate('curve.localMinInterval') : translate('curve.localInterval') }}</span>
             <el-select v-model="localIntervalMs" size="small" style="width: 6rem" :disabled="sampling">
-              <el-option v-for="interval in LOCAL_INTERVALS" :key="interval" :value="interval" :label="interval + ' ms'"/>
+              <el-option v-for="interval in LOCAL_INTERVALS" :key="interval" :value="interval" :label="formatLocalInterval(interval)"/>
             </el-select>
           </label>
           <span>{{ translate('curve.points') }}: <b>{{ sampleCount }}</b></span>
@@ -1150,9 +1150,13 @@ const SAMPLING_SOURCES: SamplingSource[] = ['web', 'local']
 /** ELF 卡片视图：Variables（原有变量树/手动地址）/ Source（SourceBrowser 源码浏览）。 */
 type ElfView = 'variables' | 'source' | 'objects'
 /** 设备本地采样间隔（ms）；固件契约 5..200 ms。 */
-const LOCAL_INTERVALS = [5, 10, 20, 50]
+const LOCAL_INTERVALS = [0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50]
 /** 新用户默认 20 ms（50 Hz）本地采样；保留 10 ms 选项。 */
 const DEFAULT_LOCAL_INTERVAL_MS = 20
+
+function formatLocalInterval(interval: number): string {
+  return interval < 1 ? `${Math.round(interval * 1000)} µs` : `${interval} ms`
+}
 /** B 模式默认绘制上限；可在 32/64/128 间配置（A 模式忽略此上限）。 */
 const DEFAULT_DRAW_CAP = 64
 const DRAW_CAP_OPTIONS = [32, 64, 128]

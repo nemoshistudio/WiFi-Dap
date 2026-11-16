@@ -63,7 +63,7 @@ extern "C" {
 #define CURVE_EXPR_POOL_MAX         768U
 #define CURVE_MAX_EXPR_DEPTH        8U
 #define CURVE_MAX_SAMPLE_BYTES      256U
-#define CURVE_MIN_INTERVAL_US       1000U
+#define CURVE_MIN_INTERVAL_US       200U
 #define CURVE_MAX_INTERVAL_US       200000U
 #define CURVE_SERIES_SIZE_MIN       1U
 #define CURVE_SERIES_SIZE_MAX       8U

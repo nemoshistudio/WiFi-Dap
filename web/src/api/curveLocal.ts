@@ -44,7 +44,7 @@ export const CURVE_LOCAL_MAX_TOTAL_SERIES = 64
 export const CURVE_LOCAL_MAX_VARIANTS = 16
 export const CURVE_LOCAL_MAX_SERIES_SIZE = 8
 export const CURVE_LOCAL_MAX_SAMPLE_BYTES = 256
-export const CURVE_LOCAL_MIN_INTERVAL_US = 1000
+export const CURVE_LOCAL_MIN_INTERVAL_US = 200
 export const CURVE_LOCAL_MAX_INTERVAL_US = 200000
 /**
  * 固件 task-60：series.sample_every（别名 divisor）范围 1..64。

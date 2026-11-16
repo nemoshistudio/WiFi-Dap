@@ -712,6 +712,85 @@ static esp_err_t curve_ensure_core_running(void)
  * group's payload length (== group sample_bytes) and becomes the CVF2
  * payload_len.
  */
+/**
+ * Fast path for a group of simple, contiguous series (typical struct fields or
+ * adjacent variables): evaluate every absolute address once and read the whole
+ * run with one SWD block transfer instead of one transaction per series.
+ *
+ * Returns true when the group was handled (success or failure).  A group is
+ * only eligible when every series has sample_every == 1, needs no PC, uses an
+ * absolute address expression and the addresses form one contiguous run that
+ * fits the 256-byte group payload.  Anything else falls back to the generic
+ * per-series loop below.
+ */
+static bool curve_collect_block_try(const curve_config_t *cfg,
+                                    const curve_group_t *group,
+                                    const uint32_t *reg_values,
+                                    const bool *reg_valid,
+                                    uint8_t *payload, uint16_t *payload_len_out,
+                                    uint64_t *valid_mask_out, bool *ok_out,
+                                    esp_err_t *err_out)
+{
+    uint32_t base = 0U;
+    uint32_t address = 0U;
+    uint32_t total = 0U;
+    uint16_t first = group->series_first;
+    uint16_t last = (uint16_t)(first + group->series_count);
+
+    if (last <= first) {
+        return false;
+    }
+
+    for (uint16_t si = first; si < last; si++) {
+        const curve_series_t *series = &cfg->series[si];
+        curve_eval_result_t res;
+        uint32_t addr = 0U;
+
+        if (series->sample_every > CURVE_SAMPLE_EVERY_MIN ||
+            curve_series_needs_pc(series) ||
+            series->expr == CURVE_EXPR_NONE) {
+            return false;
+        }
+        res = curve_expr_eval(cfg, series->expr, reg_values, reg_valid, &addr);
+        if (res != CURVE_EVAL_OK || !curve_addr_range_ok(addr, series->size)) {
+            return false;
+        }
+        if (si == first) {
+            base = addr;
+        } else if (addr != address) {
+            return false;
+        }
+        if (total + series->size > CURVE_MAX_SAMPLE_BYTES) {
+            return false;
+        }
+        address = addr + series->size;
+        total += series->size;
+    }
+
+    if (total == 0U) {
+        return false;
+    }
+
+    esp_err_t err = tf_swd_read_mem(base, payload, total);
+    if (err != ESP_OK) {
+        *valid_mask_out = 0U;
+        *payload_len_out = 0U;
+        *ok_out = false;
+        *err_out = err;
+        (void)tf_swd_recover_bus();
+        return true;
+    }
+
+    uint64_t mask = (group->series_count >= 64U)
+                        ? UINT64_MAX
+                        : (((uint64_t)1U << group->series_count) - 1U);
+    *valid_mask_out = mask;
+    *payload_len_out = (uint16_t)total;
+    *ok_out = true;
+    *err_out = ESP_OK;
+    return true;
+}
+
 static void curve_collect_sample(const curve_config_t *cfg, uint8_t group_index,
                                  bool core_halted, uint8_t pc_state,
                                  uint32_t pc_value, uint8_t *payload,
@@ -783,6 +862,34 @@ static void curve_collect_sample(const curve_config_t *cfg, uint8_t group_index,
     /* Object watch: memoize pointer dereferences inside this tick only.  Safe
      * while the core is halted; no-halt ticks keep the cache disabled. */
     curve_expr_cache_begin(core_halted);
+
+    /* Fast path: one SWD block read for a contiguous group.  This is the
+     * common case for struct fields and adjacent variables and removes one
+     * per-series SWD transaction from every sampler tick. */
+    {
+        uint64_t block_mask = 0U;
+        uint16_t block_len = 0U;
+        bool block_ok = false;
+        esp_err_t block_err = ESP_OK;
+
+        if (curve_collect_block_try(cfg, group, reg_values, reg_valid, payload,
+                                    &block_len, &block_mask, &block_ok,
+                                    &block_err)) {
+            curve_expr_cache_end();
+            *payload_len_out = block_len;
+            if (valid_mask_out != NULL) {
+                *valid_mask_out = block_ok ? block_mask : 0U;
+            }
+            if (stale_out != NULL) {
+                *stale_out = 0U;
+            }
+            *invalid_out = block_ok ? 0U : group->series_count;
+            *out_of_scope_out = 0U;
+            *ok_out = block_ok;
+            *err_out = block_err;
+            return;
+        }
+    }
 
     first = group->series_first;
     last = (uint16_t)(first + group->series_count);

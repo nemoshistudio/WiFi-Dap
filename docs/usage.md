@@ -67,8 +67,12 @@ openocd -f interface/cmsis-dap.cfg \
 - Keil: select CMSIS-DAP; the target DLL is the standard ARM CMSIS-DAP driver.
 - On Windows use a USBIP client for the same remote device, or use
   elaphureLink for a driver-free Keil connection.
-- The default SWD clock is 2 MHz. For H723/long wires use `adapter speed 16000`;
-  `20000` also works, `24000` needs the 240 MHz CPU variant and short wires.
+- The default SWD clock is 2 MHz.
+- For block reads use **20 MHz** (`adapter speed 20000`): at 24 MHz the CM7
+  AHB-AP read path retries and is ~2x slower; 20 MHz measured ~0.43 s for
+  128 KiB vs ~0.77-0.89 s at 24 MHz.
+- 24 MHz is still useful for short-wire flash programming on the 240 MHz
+  variant; 16 MHz is the conservative long-wire setting.
 
 Detach when done:
 
