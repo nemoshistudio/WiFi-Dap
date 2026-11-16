@@ -165,6 +165,28 @@ export function isPlausibleTargetAddress(address: number): boolean {
     )
 }
 
+/** ELF section flag：加载到目标地址空间的段（XRDAP 用它校验变量地址是否真的落在镜像里）。 */
+export const SHF_ALLOC = 0x2
+
+/**
+ * 地址是否落在某个 SHF_ALLOC 段的 `[sh_addr, sh_addr+sh_size)` 里。
+ *
+ * 合并自 XRDAP-Host `elf.rs` 的 `placed(addr)`：变量地址落在加载段内才可信；
+ * 地址 0 的 `--gc-sections` 残留由调用方另外判断（符号表零地址例外）。
+ * 比"STM32 固定窗口"更通用（换目标/换内存布局不用改代码），同时保留
+ * `isPlausibleTargetAddress()` 供可重定位 ELF 与符号表回退使用。
+ */
+export function addressInAllocSections(address: number, sections: readonly ElfSectionInfo[]): boolean {
+    const value = address >>> 0
+    for (const section of sections) {
+        if ((section.flags & SHF_ALLOC) === 0 || section.size === 0) continue
+        const start = section.address >>> 0
+        const end = (start + (section.size >>> 0)) >>> 0
+        if (end > start ? value >= start && value < end : value >= start) return true
+    }
+    return false
+}
+
 /** 页面展示用：0x + 8 位大写十六进制。 */
 export function formatHex32(value: number): string {
     return `0x${(value >>> 0).toString(16).toUpperCase().padStart(8, '0')}`

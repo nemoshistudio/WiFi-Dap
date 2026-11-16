@@ -26,14 +26,15 @@
  *    带解引用表达式，可在实时（两阶段）或调试（暂停）模式采样。
  *
  * 限制（页面 UI 会提示/降级）：
- *  - .debug_loc 位置列表不解析（局部变量，标记为无位置）；
+ *  - 压缩调试段（-gz / SHF_COMPRESSED / .zdebug_*）暂不支持（P1，见
+ *    analysis/elf-identification-merge.md）；
  *  - 展开深度 3、每节点最多 64 个子项，防止巨型结构体爆 UI；
  *  - 64-bit 值以两个 32-bit word 读取，>64-bit 聚合只读前 8 字节。
  */
 import type {AddressExpr, DisplayFormat, ElfSectionInfo, LocationVariant, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
 import {decodeLocationList, type LocationListEntry} from './dwarfLocList'
 import {parseLineTable, type LineTable} from './dwarfLineTable'
-import {isPlausibleTargetAddress, TARGET_FLASH_RANGE} from './elfTypes'
+import {addressInAllocSections, isPlausibleTargetAddress, TARGET_FLASH_RANGE} from './elfTypes'
 import {addressExprIsLive} from './dwarfLocation'
 
 export class DwarfParseError extends Error {
@@ -584,27 +585,73 @@ function attrAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined): number 
     return null
 }
 
-/** 解析 DW_AT_location 中的固定地址：DW_OP_addr / DW_OP_addrx / GNU_addr_index。 */
-function fixedAddressFromBlock(ctx: Ctx, unit: Unit, block: Uint8Array | undefined): number | null {
+/**
+ * 解析固定地址操作数序列（纯函数，供单测直接覆盖）。
+ *
+ * 合并自 XRDAP-Host `elf.rs::fixed_address` 的接受范围：
+ *   - 首个操作数 `DW_OP_addr`（FORM_ADDR 或 exprloc 里的地址）或 `DW_OP_addrx` /
+ *     `DW_OP_GNU_addr_index`（经 `.debug_addr`）；
+ *   - 之后允许 0..N 个 `DW_OP_plus_uconst <uleb>`：armclang 把几个全局变量合并进
+ *     `.L_MergedGlobals` 时写 `DW_OP_addr <base>; DW_OP_plus_uconst <off>`；
+ *   - 其它任何操作数（`DW_OP_fbreg`/`reg`/`piece`/`deref`…）返回 null（不是固定地址）。
+ *
+ * XRDAP 只接受 0/1 个 `plus_uconst`；这里放宽为连续多个（语义相同，对异常编译器更稳）。
+ *
+ * @param block      DW_AT_location 的表达式字节
+ * @param addrSize   CU 地址宽度（4 / 8）
+ * @param resolveAddrx  `addrx`/`GNU_addr_index` 的索引解析回调；无 `.debug_addr` 时不传
+ * @returns 固定地址；不是固定地址表达式时 null
+ */
+export function decodeFixedAddressOps(
+    block: Uint8Array,
+    addrSize: number,
+    resolveAddrx?: (index: number) => number | null,
+): number | null {
     if (!block || block.length === 0) return null
     const opcode = block[0]
+    let address: number
+    let offset = 1
     if (opcode === OP_ADDR) {
-        if (block.length < 1 + unit.addrSize) return null
-        return readUint(block, 1, unit.addrSize)
-    }
-    if (opcode === OP_ADDRX || opcode === OP_GNU_ADDR_INDEX) {
-        if (!ctx.sections.addr) return null
+        if (block.length < 1 + addrSize) return null
+        address = readUint(block, 1, addrSize)
+        offset = 1 + addrSize
+    } else if (opcode === OP_ADDRX || opcode === OP_GNU_ADDR_INDEX) {
+        if (!resolveAddrx) return null
+        const reader = new ByteReader(block, 1)
         try {
-            const reader = new ByteReader(block, 1)
-            const index = reader.uleb()
-            const offset = unit.addrBase + index * unit.addrSize
-            if (offset + unit.addrSize > ctx.sections.addr.length) return null
-            return readUint(ctx.sections.addr, offset, unit.addrSize)
+            const resolved = resolveAddrx(reader.uleb())
+            if (resolved === null) return null
+            address = resolved >>> 0
+            offset = reader.offset
         } catch {
             return null
         }
+    } else {
+        return null
     }
-    return null
+    const reader = new ByteReader(block, offset)
+    try {
+        while (reader.remaining > 0) {
+            if (reader.u8() !== OP_PLUS_UCONST) return null
+            address = (address + reader.uleb()) >>> 0
+        }
+    } catch {
+        return null
+    }
+    // 至少要有第一个操作数本身（air：opcode 后没有任何地址字节时 readUint 返回 0，
+    // 但块长检查已经在上面的分支里做过）。
+    return address >>> 0
+}
+
+/** 解析 DW_AT_location 中的固定地址：DW_OP_addr / DW_OP_addrx / GNU_addr_index（+ plus_uconst）。 */
+function fixedAddressFromBlock(ctx: Ctx, unit: Unit, block: Uint8Array | undefined): number | null {
+    if (!block || block.length === 0) return null
+    return decodeFixedAddressOps(block, unit.addrSize, (index) => {
+        if (!ctx.sections.addr) return null
+        const at = unit.addrBase + index * unit.addrSize
+        if (at + unit.addrSize > ctx.sections.addr.length) return null
+        return readUint(ctx.sections.addr, at, unit.addrSize)
+    })
 }
 
 function locationFixedAddress(ctx: Ctx, unit: Unit, attr: AttrValue | undefined): number | null {
@@ -2259,10 +2306,19 @@ function openDwarfContext(
 export function extractDwarfVariables(
     bytes: Uint8Array,
     sections: readonly ElfSectionInfo[],
-    options: {demangle?: (mangled: string) => string | null} = {},
+    options: {demangle?: (mangled: string) => string | null; relocatable?: boolean} = {},
 ): DwarfCollectResult {
     const warnings: string[] = []
     const opened = openDwarfContext(bytes, sections, warnings, options.demangle)
+    /**
+     * 固定地址是否"真的加载到目标上"（合并自 XRDAP-Host `elf.rs` 的 placed 校验）：
+     * - 链接后的 ELF（ET_EXEC/ET_DYN）：地址必须落在某个 SHF_ALLOC 段内；
+     * - 可重定位 ELF（ET_REL）：段地址为 0，退回过理性窗口判断（保持旧行为）。
+     * 比只认 STM32 固定窗口更通用；地址 0 的 --gc-sections 残留由调用方继续拒绝。
+     */
+    const placed = options.relocatable === true
+        ? (address: number): boolean => isPlausibleTargetAddress(address)
+        : (address: number): boolean => addressInAllocSections(address, sections)
     if (!opened) {
         return {
             variables: [],
@@ -2356,13 +2412,27 @@ export function extractDwarfVariables(
             let base: BaseLocation | null = null
             if (location.kind === 'fixed' && location.address !== undefined) {
                 const address = location.address >>> 0
-                if (address !== 0 && isPlausibleTargetAddress(address)) {
+                if (address !== 0 && placed(address)) {
                     base = {address, expr: null}
                 }
             } else if (location.kind === 'memory' && location.expr) {
                 base = {address: null, expr: location.expr}
             } else if (location.kind === 'register' && location.register !== undefined) {
                 base = {address: null, expr: {kind: 'reg', reg: location.register, offset: 0}, payloadInRegister: true}
+            }
+            if (!base && numericAttr(die, AT_DECLARATION) === 1) {
+                // 只有声明、没有可用位置的变量：定义 DIE（若存在）会自己出现；
+                // 跳过可避免列表里多出一条不可采样的重复项。
+                // 合并自 XRDAP-Host `elf.rs::collect_vars` 的 declaration 过滤。
+                dwarfSkipped += 1
+                continue
+            }
+            if (!base && location.kind === 'fixed') {
+                // 有固定地址但没通过 placed 校验（--gc-sections 残留的地址 0、
+                // 越界地址等）：不是可用变量，直接丢弃；合并自 XRDAP-Host 的
+                // placed 过滤，避免变量列表里出现永远读不到的项。
+                dwarfSkipped += 1
+                continue
             }
             const pcRange = subprogramRangeForDIE(ctx, die)
             let node: VariableNode

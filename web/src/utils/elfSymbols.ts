@@ -11,13 +11,14 @@ import type {ElfSectionInfo, ElfVariablesResult, SampleLeaf, VariableNode} from 
 import {extractDwarfVariables} from './elfDwarf'
 import {
     formatHex32,
+    addressInAllocSections,
     isPlausibleTargetAddress,
     TARGET_FLASH_RANGE,
     TARGET_RAM_RANGE,
 } from './elfTypes'
 
 export type {AddressExpr, DisplayFormat, ElfSectionInfo, ElfVariablesResult, SampleLeaf, ValueKind, VariableNode} from './elfTypes'
-export {formatHex32, isPlausibleTargetAddress, TARGET_FLASH_RANGE, TARGET_RAM_RANGE}
+export {addressInAllocSections, formatHex32, isPlausibleTargetAddress, TARGET_FLASH_RANGE, TARGET_RAM_RANGE}
 export {DwarfParseError} from './elfDwarf'
 
 export class ElfParseError extends Error {
@@ -550,7 +551,10 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
 
     let dwarf: ReturnType<typeof extractDwarfVariables> | null = null
     try {
-        dwarf = extractDwarfVariables(bytes, image.sections, {demangle: demangleItanium})
+        dwarf = extractDwarfVariables(bytes, image.sections, {
+            demangle: demangleItanium,
+            relocatable: image.elfType === ET_REL,
+        })
         warnings.push(...dwarf.warnings)
     } catch (error) {
         warnings.push(`DWARF parse failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -574,6 +578,9 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
     }
 
     // ---- 回退：符号表（仅 DATA/OBJECT，无类型信息）----
+    // 合并 XRDAP-Host 的做法：保留符号真实大小（1/2/4/8），地址校验优先用
+    // SHF_ALLOC 段归属；可重定位 ELF 退回 STM32 可访问窗口。
+    const relocatable = image.elfType === ET_REL
     const {symbols} = image.readSymbols()
     const variables: VariableNode[] = []
     const seen = new Set<string>()
@@ -583,14 +590,22 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
         if (symbol.shndx === SHN_UNDEF || symbol.shndx === SHN_ABS || symbol.shndx === SHN_COMMON) continue
         if (!symbol.name || isCompilerArtifact(symbol.name)) continue
         const address = symbol.value >>> 0
-        if (address === 0 || !isPlausibleTargetAddress(address) || address % 4 !== 0) continue
+        const symbolSize = symbol.size >>> 0
+        const placed = relocatable
+            ? isPlausibleTargetAddress(address)
+            : addressInAllocSections(address, image.sections)
+        const leafSize = symbolSize === 1 || symbolSize === 2 || symbolSize === 4 || symbolSize === 8
+            ? symbolSize
+            : 4
+        const alignment = Math.max(1, Math.min(leafSize, 4))
+        if (address === 0 || !placed || address % alignment !== 0) continue
         const name = displaySymbolName(symbol.name)
         const key = `${name}@${address.toString(16)}`
         if (seen.has(key)) continue
         seen.add(key)
         const leaf: SampleLeaf = {
             address,
-            size: 4,
+            size: leafSize,
             bitOffset: 0,
             bitSize: 0,
             kind: 'uint',
@@ -598,9 +613,9 @@ export function parseElfVariables(buffer: ArrayBuffer | Uint8Array): ElfVariable
         }
         variables.push({
             name,
-            typeName: '',
+            typeName: leafSize === 4 && symbolSize !== 4 ? `raw/${symbolSize}B` : `u${leafSize * 8}`,
             address,
-            size: symbol.size,
+            size: symbolSize,
             sample: leaf,
         })
     }
