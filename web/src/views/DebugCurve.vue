@@ -1152,7 +1152,7 @@ type ElfView = 'variables' | 'source' | 'objects'
 /** 设备本地采样间隔（ms）；固件契约 5..200 ms。 */
 const LOCAL_INTERVALS = [0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50]
 /** 新用户默认 20 ms（50 Hz）本地采样；保留 10 ms 选项。 */
-const DEFAULT_LOCAL_INTERVAL_MS = 20
+const DEFAULT_LOCAL_INTERVAL_MS = 0.2
 
 function formatLocalInterval(interval: number): string {
   return interval < 1 ? `${Math.round(interval * 1000)} µs` : `${interval} ms`
